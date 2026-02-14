@@ -15,43 +15,51 @@ from .utils import *
 from .load_data import load_adni, prepare_data_loaders
 
 
-def load_filter_config(filter_config_path):
-    filter_config = configparser.ConfigParser()
-    filter_config.read(filter_config_path)
-    return filter_config
+def load_config(config_path):
+    conf = configparser.ConfigParser()
+    conf.read(config_path)
+    return conf
 
 def main():
     """Main function for training and inference."""
     parser = argparse.ArgumentParser(description='Train VAE models or run inference on ADNI-B data')
     parser.add_argument(
-        '--mode',
+        '-m', '--mode',
         type=str,
         default='train',
         choices=['train', 'inference', 'load'],
-        help='Mode: train, inference, or just load data'
+        help='Mode: train, inference, or just load data (default: train)'
     )
     parser.add_argument(
-        '--data-dir',
+        '-d', '--data-dir',
         type=pathlib.Path,
         default=project_path / "data",
         help='Path to data directory (default: ./data)'
     )
     parser.add_argument(
-        '--batch-size',
-        type=int,
-        default=32,
-        help='Batch size for DataLoaders'
-    )
-    parser.add_argument(
-        '--no-flatten',
-        action='store_true',
-        help='Keep timeseries as 2D (N_ROIs, T_timepoints). Default is to flatten to 1D.'
-    )
-    parser.add_argument(
-        '--filter-config',
+        '--data-config',
         type=pathlib.Path,
-        default=project_path / "config" / "filter.yml",
-        help='Path to filter configuration file (default: ./config/filter.yml)'
+        default=project_path / "config" / "data.yml",
+        help='Path to data configuration file (default: ./config/data.yml)'
+    )
+    parser.add_argument(
+        '--model-config',
+        type=pathlib.Path,
+        default=project_path / "config" / "model.yml",
+        help='Path to model configuration file (default: ./config/model.yml)'
+    )
+    parser.add_argument(
+        '--training-config',
+        type=pathlib.Path,
+        default=project_path / "config" / "training.yml",
+        help='Path to training configuration file (default: ./config/training.yml)'
+    )
+    parser.add_argument(
+        '--device',
+        type=str,
+        default='mps',
+        choices=['cpu', 'cuda', 'mps'],
+        help='Device to use for training and inference (default: mps)'
     )
     
     args = parser.parse_args()
@@ -62,22 +70,22 @@ def main():
     
     # Load ADNI data
     print(f"\nLoading ADNI-B dataset...")
-    filter_config = load_filter_config(args.filter_config)
-    if 'BandPassFilter' in filter_config:
+    data_config = load_config(args.data_config)
+    if 'filter' in data_config and data_config['filter']['type'] == 'BandPassFilter':
         filter = BandPassFilter(
-            tr=float(filter_config['BandPassFilter']['tr']),
-            flp=float(filter_config['BandPassFilter']['flp']),
-            fhi=float(filter_config['BandPassFilter']['fhi']),
-            k=int(filter_config['BandPassFilter']['k']),
-            remove_artifacts=filter_config['BandPassFilter']['remove_artifacts'],
-            apply_demean=filter_config['BandPassFilter']['apply_demean'],
-            apply_detrend=filter_config['BandPassFilter']['apply_detrend'],
-            apply_finalDetrend=filter_config['BandPassFilter']['apply_finalDetrend'],
+            tr=float(data_config['filter']['tr']),
+            flp=float(data_config['filter']['flp']),
+            fhi=float(data_config['filter']['fhi']),
+            k=int(data_config['filter']['k']),
+            remove_artifacts=data_config['filter']['remove_artifacts'],
+            apply_demean=data_config['filter']['apply_demean'],
+            apply_detrend=data_config['filter']['apply_detrend'],
+            apply_finalDetrend=data_config['filter']['apply_finalDetrend'],
         )
-        print(f"Filter configuration found in {args.filter_config}")
+        print(f"Filter configuration found in {args.data_config}")
     else:
         filter = None
-        print(f"No filter configuration found in {args.filter_config}")
+        print(f"No filter configuration found in {args.data_config}")
     data_loader = load_adni(
         data_dir=args.data_dir,
         filter=filter,
@@ -94,12 +102,14 @@ def main():
     
     # Prepare PyTorch DataLoaders
     print(f"\nPreparing PyTorch DataLoaders...")
-    flatten = not args.no_flatten  # Default is True (flatten)
     loaders = prepare_data_loaders(
         data_loader,
-        batch_size=args.batch_size,
-        flatten=flatten,
-        normalize=False,
+        batch_size=int(data_config['data']['batch_size']),
+        flatten=data_config['data']['flatten'],
+        normalize=data_config['data']['normalize'],
+        train_split=float(data_config['data']['train_split']),
+        val_split=float(data_config['data']['val_split']),
+        random_seed=int(data_config['data']['random_seed']),
     )
     
     print(f"\nDataLoader information:")
@@ -107,19 +117,18 @@ def main():
     print(f"  Number of samples:")
     for split, num in loaders['num_samples'].items():
         print(f"    {split}: {num}")
-
-    breakpoint()
     
     # Mode-specific actions
     if args.mode == 'load':
         # Just load and display data
         print(f"\nTesting data loading...")
         sample_batch = next(iter(loaders['train_loader']))
-        if isinstance(sample_batch, tuple):
+        if isinstance(sample_batch, tuple) or isinstance(sample_batch, list):
             batch_data, batch_labels = sample_batch
             print(f"  Batch shape: {batch_data.shape}")
             print(f"  Batch labels: {batch_labels[:5]}...")  # Show first 5 labels
         else:
+            breakpoint()
             print(f"  Batch shape: {sample_batch.shape}")
         
         print("\n" + "=" * 60)
@@ -132,21 +141,27 @@ def main():
         print("Training mode")
         print("=" * 60)
 
-        # running on mac
-        device = 'mps'
-
         from .models import BasicVAE
         from .train import train_vae_basic, plot_training_history
-        model = BasicVAE(input_dim=78800, device=device)
+
+        model_config = load_config(args.model_config)
+        model_name = model_config['model']['name']
+        if model_name == "BasicVAE":
+            model = BasicVAE(input_dim=78800, device=args.device)
+        else:
+            raise ValueError(f"Model name {model_name} not supported")
+
+        training_config = load_config(args.training_config)
         # train full model first    
         history = train_vae_basic(
             model,
             loaders['train_loader'],
             loaders['val_loader'],
-            num_epochs=40,
-            learning_rate=1e-3,
-            device=device,
-            loss_per_feature=False
+            num_epochs=int(training_config['training']['num_epochs']),
+            learning_rate=float(training_config['training']['learning_rate']),
+            loss_per_feature=training_config['training']['loss_per_feature'],
+            kld_weight=float(training_config['training']['kld_weight']),
+            device=args.device,
         )
         os.makedirs('plots', exist_ok=True)
         plot_training_history(history, save_path='plots/basicVAE_training_history.png', show=False)
@@ -157,26 +172,21 @@ def main():
         # TODO: Add inference logic here
         print("\n" + "=" * 60)
         print("Inference mode")
-        print("=" * 60)
-
-        # running on mac
-        device = 'mps'
+        print("=" * 60) 
 
         from .models import BasicVAE
         from .inference import inference_vae_basic
-        model = BasicVAE(input_dim=78800, device=device)
+        model = BasicVAE(input_dim=78800, device=args.device)
         model.load_state_dict(torch.load('checkpoints/best_model.pt'))
         inference_vae_basic(
             model,
             loaders['test_loader'],
-            device=device,
+            device=args.device,
             loss_per_feature=True,
             num_examples=3,
             plot_dir='plots'
         )
 
-    return data_loader, loaders
-
 
 if __name__ == '__main__':
-    data_loader, loaders = main()
+    main()

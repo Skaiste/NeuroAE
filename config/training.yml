@@ -1,0 +1,6 @@
+[training]
+num_epochs: 40
+learning_rate: 1e-3
+loss_per_feature: false
+kld_weight: 0.01
+save_dir: ./checkpoints

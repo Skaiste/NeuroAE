@@ -1,9 +1,0 @@
-[BandPassFilter]
-tr: 3
-flp: 0.01
-fhi: 0.08
-k: 2
-remove_artifacts: true
-apply_demean: true
-apply_detrend: true
-apply_finalDetrend: false

@@ -10,7 +10,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-def loss_function(x, x_hat, mu, log_var, error_per_feature=True):
+def loss_function(x, x_hat, mu, log_var, error_per_feature=True, kld_weight=1.0):
     # if selected error per feature, we are averaging everything
     if error_per_feature:
         # recon: mean mse loss
@@ -30,36 +30,9 @@ def loss_function(x, x_hat, mu, log_var, error_per_feature=True):
         kld = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
         kld = kld.sum(dim=1).mean() / log_var.size(1)
 
-    return recon + kld, recon, kld
+    return recon + kld_weight * kld, recon, kld
 
 import math
-
-def denormalise_losses(recon, kld, min_val, max_val, input_dim, latent_dim, error_per_feature=True):
-
-    R = max_val - min_val  # global range
-
-    # Convert recon to per-feature MSE (normalized space)
-    if not error_per_feature:
-        mse_norm_per_feature = recon / input_dim
-    else:
-        mse_norm_per_feature = recon
-
-    rmse_norm_per_feature = math.sqrt(mse_norm_per_feature)
-
-    # Convert to original units
-    mse_orig_per_feature = mse_norm_per_feature * (R ** 2)
-    rmse_orig_per_feature = rmse_norm_per_feature * R
-
-    # KL is unitless — just make it interpretable
-    kld_per_dim = kld / latent_dim
-
-    return {
-        "mse_norm_per_feature": mse_norm_per_feature,
-        "rmse_norm_per_feature": rmse_norm_per_feature,
-        "mse_orig_per_feature": mse_orig_per_feature,
-        "rmse_orig_per_feature": rmse_orig_per_feature,
-        "kld_per_dim": kld_per_dim,
-    }
 
 
 def train_vae_basic(
@@ -71,6 +44,7 @@ def train_vae_basic(
     loss_per_feature=True,
     device='cuda' if torch.cuda.is_available() else 'cpu',
     save_dir='./checkpoints',
+    kld_weight=1.0,
 ):
     history = {
         'train_loss': [],
@@ -101,7 +75,7 @@ def train_vae_basic(
             optimizer.zero_grad()
             
             recon_x, mu, logvar, z = model(x)
-            loss, recon, kld = loss_function(x, recon_x, mu, logvar, loss_per_feature)
+            loss, recon, kld = loss_function(x, recon_x, mu, logvar, loss_per_feature, kld_weight)
             train_loss += loss.item()
             train_reproduction_loss += recon.item()
             train_KLD += kld.item()
@@ -123,7 +97,7 @@ def train_vae_basic(
             for batch_idx, (data, _) in enumerate(val_loader):
                 x = data.to(device)
                 recon_x, mu, logvar, z = model(x)
-                loss, recon, kld = loss_function(x, recon_x, mu, logvar, loss_per_feature)
+                loss, recon, kld = loss_function(x, recon_x, mu, logvar, loss_per_feature, kld_weight)
                 val_loss += loss.item()
                 val_reproduction_loss += recon.item()
                 val_KLD += kld.item()
@@ -147,18 +121,6 @@ def train_vae_basic(
             torch.save(model.state_dict(), f'{save_dir}/best_model.pt')
             
     print("Training complete!")
-
-    # print("Calculated denormalised losses for best model:")
-    # train_unnorm_losses = denormalise_losses(train_reproduction_loss, train_KLD, train_loader.dataset.data_min, train_loader.dataset.data_max, 78800, 64, loss_per_feature)
-    # val_unnorm_losses = denormalise_losses(val_reproduction_loss, val_KLD, train_loader.dataset.data_min, train_loader.dataset.data_max, 78800, 64, loss_per_feature)
-    # print(f"Train:")
-    # print(f"\tRMSE per feature: {train_unnorm_losses['rmse_orig_per_feature']}")
-    # print(f"\tKLD per dim: {train_unnorm_losses['kld_per_dim']}")
-    # print(f"Validation:")
-    # print(f"\tRMSE per feature: {val_unnorm_losses['rmse_orig_per_feature']}")
-    # print(f"\tKLD per dim: {val_unnorm_losses['kld_per_dim']}")
-
-
     return history
 
 
