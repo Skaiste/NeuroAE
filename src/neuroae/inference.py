@@ -3,7 +3,7 @@ import torch
 import matplotlib.pyplot as plt
 import numpy as np
 
-from src.train import loss_function
+from .train import loss_function
 
 def denormalise(a_norm, min_val, max_val):
     return a_norm * (max_val - min_val) + min_val

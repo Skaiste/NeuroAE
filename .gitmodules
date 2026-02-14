@@ -1,3 +1,6 @@
 [submodule "LibBrain"]
 	path = LibBrain
 	url = https://github.com/dagush/LibBrain.git
+[submodule "WholeBrain"]
+	path = WholeBrain
+	url = https://github.com/Skaiste/WholeBrain

@@ -211,3 +211,6 @@ models/
 checkpoints/
 
 .DS_Store
+
+.cursorignore
+.codexignore

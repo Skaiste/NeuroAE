@@ -7,8 +7,18 @@ This script loads ADNI-B data and can be used for training models or running inf
 import argparse
 import os
 import torch
-from src.load_data import load_adni, prepare_data_loaders
+import pathlib
+import configparser
+from neuronumba.tools.filters import BandPassFilter
 
+from .utils import *
+from .load_data import load_adni, prepare_data_loaders
+
+
+def load_filter_config(filter_config_path):
+    filter_config = configparser.ConfigParser()
+    filter_config.read(filter_config_path)
+    return filter_config
 
 def main():
     """Main function for training and inference."""
@@ -22,8 +32,8 @@ def main():
     )
     parser.add_argument(
         '--data-dir',
-        type=str,
-        default=None,
+        type=pathlib.Path,
+        default=project_path / "data",
         help='Path to data directory (default: ./data)'
     )
     parser.add_argument(
@@ -37,6 +47,12 @@ def main():
         action='store_true',
         help='Keep timeseries as 2D (N_ROIs, T_timepoints). Default is to flatten to 1D.'
     )
+    parser.add_argument(
+        '--filter-config',
+        type=pathlib.Path,
+        default=project_path / "config" / "filter.yml",
+        help='Path to filter configuration file (default: ./config/filter.yml)'
+    )
     
     args = parser.parse_args()
     
@@ -46,8 +62,25 @@ def main():
     
     # Load ADNI data
     print(f"\nLoading ADNI-B dataset...")
+    filter_config = load_filter_config(args.filter_config)
+    if 'BandPassFilter' in filter_config:
+        filter = BandPassFilter(
+            tr=float(filter_config['BandPassFilter']['tr']),
+            flp=float(filter_config['BandPassFilter']['flp']),
+            fhi=float(filter_config['BandPassFilter']['fhi']),
+            k=int(filter_config['BandPassFilter']['k']),
+            remove_artifacts=filter_config['BandPassFilter']['remove_artifacts'],
+            apply_demean=filter_config['BandPassFilter']['apply_demean'],
+            apply_detrend=filter_config['BandPassFilter']['apply_detrend'],
+            apply_finalDetrend=filter_config['BandPassFilter']['apply_finalDetrend'],
+        )
+        print(f"Filter configuration found in {args.filter_config}")
+    else:
+        filter = None
+        print(f"No filter configuration found in {args.filter_config}")
     data_loader = load_adni(
-        data_dir=args.data_dir
+        data_dir=args.data_dir,
+        filter=filter,
     )
     
     # Print dataset information
@@ -66,6 +99,7 @@ def main():
         data_loader,
         batch_size=args.batch_size,
         flatten=flatten,
+        normalize=False,
     )
     
     print(f"\nDataLoader information:")
@@ -73,6 +107,8 @@ def main():
     print(f"  Number of samples:")
     for split, num in loaders['num_samples'].items():
         print(f"    {split}: {num}")
+
+    breakpoint()
     
     # Mode-specific actions
     if args.mode == 'load':
@@ -99,8 +135,8 @@ def main():
         # running on mac
         device = 'mps'
 
-        from src.models import BasicVAE
-        from src.train import train_vae_basic, plot_training_history
+        from .models import BasicVAE
+        from .train import train_vae_basic, plot_training_history
         model = BasicVAE(input_dim=78800, device=device)
         # train full model first    
         history = train_vae_basic(
@@ -109,7 +145,8 @@ def main():
             loaders['val_loader'],
             num_epochs=40,
             learning_rate=1e-3,
-            device=device
+            device=device,
+            loss_per_feature=False
         )
         os.makedirs('plots', exist_ok=True)
         plot_training_history(history, save_path='plots/basicVAE_training_history.png', show=False)
@@ -125,8 +162,8 @@ def main():
         # running on mac
         device = 'mps'
 
-        from src.models import BasicVAE
-        from src.inference import inference_vae_basic
+        from .models import BasicVAE
+        from .inference import inference_vae_basic
         model = BasicVAE(input_dim=78800, device=device)
         model.load_state_dict(torch.load('checkpoints/best_model.pt'))
         inference_vae_basic(

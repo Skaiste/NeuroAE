@@ -12,10 +12,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
 
-# Add LibBrain to path to import DataLoaders
-libbrain_path = Path(__file__).parent.parent / "LibBrain"
-if str(libbrain_path) not in sys.path:
-    sys.path.insert(0, str(libbrain_path))
+from .utils import *
 
 from DataLoaders.ADNI_B import (
     ADNI_B_N193_no_filt as LibBrain_ADNI_B_N193_no_filt,
@@ -110,11 +107,30 @@ class ADNI_B_N193_no_filt(LibBrain_ADNI_B_N193_no_filt):
         print(f'----------- done loading All --------------')
 
 
+class ADNI_B_N193_filtered(ADNI_B_N193_no_filt):
+    def __init__(self, filter, path=None, discard_AD_ABminus=True, SchaeferSize=400, use_pvc=True):
+        self.filter = filter
+        super().__init__(path=path, discard_AD_ABminus=discard_AD_ABminus, SchaeferSize=SchaeferSize, use_pvc=use_pvc)
+
+    def _loadAllData(self):
+        super()._loadAllData()
+        # apply filtering to the data
+        print(f'----------- Filtering data --------------')
+        for task in self.groups:
+            for subject, data in self.timeseries[task].items():
+                self.timeseries[task][subject] = self.filter.filter(data)
+            print(f'----------- done filtering for {task} --------------')
+        print(f'----------- done filtering All --------------')
+
+
+
+
 def load_adni_n193(
     data_dir=None,
     discard_AD_ABminus=True,
     SchaeferSize=400,
     use_pvc=True,
+    filter=None,
 ):
     """
     Load ADNI-B N193 dataset (no filter).
@@ -127,14 +143,23 @@ def load_adni_n193(
         use_pvc: If True, use partial volume correction for ABeta and Tau.
         
     Returns:
-        ADNI_B_N193_no_filt: DataLoader instance for N193 dataset.
+        ADNI_B_N193_filtered: DataLoader instance for N193 dataset.
     """
-    return ADNI_B_N193_no_filt(
-        path=data_dir,
-        discard_AD_ABminus=discard_AD_ABminus,
-        SchaeferSize=SchaeferSize,
-        use_pvc=use_pvc,
-    )
+    if filter is None:
+        return ADNI_B_N193_no_filt(
+            path=data_dir,
+            discard_AD_ABminus=discard_AD_ABminus,
+            SchaeferSize=SchaeferSize,
+            use_pvc=use_pvc,
+        )
+    else:
+        return ADNI_B_N193_filtered(
+            filter,
+            path=data_dir,
+            discard_AD_ABminus=discard_AD_ABminus,
+            SchaeferSize=SchaeferSize,
+            use_pvc=use_pvc,
+        )
 
 
 def load_adni_alt(
@@ -179,6 +204,7 @@ def load_adni(
     discard_AD_ABminus=True,
     use_pvc=True,
     alt_classification=None,
+    filter=None,
 ):
     """
     Convenience function to load ADNI-B data with common configurations.
@@ -215,6 +241,7 @@ def load_adni(
         discard_AD_ABminus=discard_AD_ABminus,
         SchaeferSize=400,
         use_pvc=use_pvc,
+        filter=filter,
     )
 
     # Apply alternate classification if requested
@@ -231,7 +258,7 @@ class ADNIDataset(Dataset):
     Each sample is a flattened timeseries (N_ROIs * T_timepoints).
     """
     
-    def __init__(self, timeseries_data, labels=None, flatten=True, normalize=True, data_min=None, data_max=None):
+    def __init__(self, timeseries_data, labels=None, flatten=True, normalize=True, data_mean=None, data_std=None):
         """
         Initialize ADNI Dataset.
         
@@ -260,36 +287,31 @@ class ADNIDataset(Dataset):
         
         # Normalize data if requested
         if normalize:
-            self._normalize_data(data_min, data_max)
+            self._normalize_data(data_mean, data_std)
         else:
-            self.data_min = None
-            self.data_max = None
+            self.data_mean = None
+            self.data_std = None
 
         self.labels = labels if labels is not None else [None] * len(self.data)
         
     
-    def _normalize_data(self, data_min=None, data_max=None):
+    def _normalize_data(self, data_mean=None, data_std=None):
         """
-        Normalize data to [0, 1] range using min-max scaling.
+        Normalize data using z-score.
         
         Args:
-            data_min: Minimum value for normalization (if None, computed from data)
-            data_max: Maximum value for normalization (if None, computed from data)
+            data_mean: Mean value for normalization (if None, computed from data)
+            data_std: Standard deviation value for normalization (if None, computed from data)
         """
-        if data_min is None:
-            data_min = self.data.min()
-        if data_max is None:
-            data_max = self.data.max()
+        if data_mean is None:
+            data_mean = self.data.mean()
+        if data_std is None:
+            data_std = self.data.std()
         
-        self.data_min = data_min
-        self.data_max = data_max
-        
-        # Avoid division by zero
-        if data_max > data_min:
-            self.data = (self.data - data_min) / (data_max - data_min)
-        else:
-            # All values are the same, set to 0.5
-            self.data = np.zeros_like(self.data) + 0.5
+        self.data_mean = data_mean
+        self.data_std = data_std
+
+        self.data = (self.data - self.data_mean) / self.data_std
         
     def __len__(self):
         return len(self.data)
@@ -369,7 +391,8 @@ def prepare_data_loaders(
     flatten=True,
     train_split=0.7,
     val_split=0.15,
-    random_seed=42
+    random_seed=42,
+    normalize=True
 ):
     """
     Prepare PyTorch DataLoaders from ADNI DataLoader.
@@ -459,45 +482,45 @@ def prepare_data_loaders(
             ts_array = ts_array.flatten()
         train_data_array.append(ts_array)
     train_data_array = np.array(train_data_array)
-    data_min = train_data_array.min()
-    data_max = train_data_array.max()
+    data_mean = train_data_array.mean()
+    data_std = train_data_array.std()
     
     # Create PyTorch datasets with normalization
     train_dataset = ADNIDataset(train_data, train_labels, flatten=flatten, 
-                                normalize=True, data_min=data_min, data_max=data_max)
+                                normalize=normalize, data_mean=data_mean, data_std=data_std)
     train_loader = DataLoader(
         train_dataset, batch_size=batch_size, shuffle=shuffle_train
     )
-    train_loader.data_min = data_min
-    train_loader.data_max = data_max
+    train_loader.data_mean = data_mean
+    train_loader.data_std = data_std
     
     result = {
         'train_loader': train_loader,
         'input_dim': input_dim,
         'num_samples': {'train': len(train_dataset)},
-        'data_min': data_min,
-        'data_max': data_max
+        'data_mean': data_mean,
+        'data_std': data_std
     }
     
     if val_data:
         val_dataset = ADNIDataset(val_data, val_labels, flatten=flatten,
-                                  normalize=True, data_min=data_min, data_max=data_max)
+                                  normalize=normalize, data_mean=data_mean, data_std=data_std)
         val_loader = DataLoader(
             val_dataset, batch_size=batch_size, shuffle=False
         )
-        val_loader.data_min = data_min
-        val_loader.data_max = data_max
+        val_loader.data_mean = data_mean
+        val_loader.data_std = data_std
         result['val_loader'] = val_loader
         result['num_samples']['val'] = len(val_dataset)
     
     if test_data:
         test_dataset = ADNIDataset(test_data, test_labels, flatten=flatten,
-                                  normalize=True, data_min=data_min, data_max=data_max)
+                                  normalize=normalize, data_mean=data_mean, data_std=data_std)
         test_loader = DataLoader(
             test_dataset, batch_size=batch_size, shuffle=False
         )
-        test_loader.data_min = data_min
-        test_loader.data_max = data_max
+        test_loader.data_mean = data_mean
+        test_loader.data_std = data_std
         result['test_loader'] = test_loader
         result['num_samples']['test'] = len(test_dataset)
     

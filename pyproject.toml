@@ -1,19 +1,40 @@
 [project]
-name = "alzheimers-vaes"
+name = "neuroae"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
-requires-python = ">=3.13"
-dependencies = [
-    "h5py>=3.15.1",
-    "jupyter>=1.1.1",
-    "matplotlib>=3.10.8",
-    "nibabel>=5.3.3",
-    "numpy>=2.4.2",
-    "openpyxl>=3.1.5",
-    "pandas>=3.0.0",
-    "scipy>=1.17.0",
-    "seaborn>=0.13.2",
-    "torch>=2.10.0",
-    "tqdm>=4.67.3",
+description = "Research framework for analysing latent representations in neuroimaging using autoencoders and cross-group decoding."
+authors = [
+  {name = "Skaiste Butkute", email = "butkute.skaiste@gmail.com"}
 ]
+maintainers = [
+  {name = "Skaiste Butkute", email = "butkute.skaiste@gmail.com"}
+]
+readme = "README.md"
+requires-python = "==3.9.25"
+dependencies = [
+    "configparser",
+    "h5py",
+    "jupyter",
+    "matplotlib",
+    "nibabel",
+    "numpy",
+    "openpyxl",
+    "pandas",
+    "scipy",
+    "seaborn",
+    "torch",
+    "tqdm",
+    "neuronumba @ git+https://github.com/neich/neuronumba.git@main#subdirectory=src"
+]
+
+[project.scripts]
+neuroae = "neuroae.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/neuroae"]
+
+[tool.hatch.metadata]
+allow-direct-references = true

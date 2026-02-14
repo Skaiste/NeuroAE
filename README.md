@@ -11,7 +11,7 @@ The data were obtained using fMRI (functional magnetic resonance imaging), a neu
 For data analysis and processing, a Schaefer 2018 400-region partitioning was applied, a brain segmentation method that divides the cerebral cortex into 400 distinct areas based on functional characteristics. This partitioning facilitates the extraction of brain activity patterns in a structured and coherent manner.
 
 ## Setup
-Requirements: python 3.13+ & [uv](https://docs.astral.sh/uv/guides/install-python/)
+Requirements: python 3.9 & [uv](https://docs.astral.sh/uv/guides/install-python/)
 To setup project run:
 ```bash
 uv sync
@@ -19,7 +19,7 @@ uv sync
 
 To run training make sure the data (`.mat` files) are in the `data` directory, then run command:
 ```bash
-uv run main.py
+uv run neuroae
 ```
 
 ## Implementation Checklist
@@ -43,6 +43,7 @@ uv run main.py
 
 In the end report should contain:
 - Cover page
+- Acknowledgements (ADNI & people who parcelated data)
 - Summary
 - Index
 - Introduction, motivation and objectives

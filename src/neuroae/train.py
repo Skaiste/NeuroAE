@@ -23,7 +23,8 @@ def loss_function(x, x_hat, mu, log_var, error_per_feature=True):
     # if selected error per sample, we are summing everything
     else:
         # recon: sum over features per sample, then mean over batch
-        recon = F.mse_loss(x_hat, x, reduction="sum")
+        recon = F.mse_loss(x_hat, x, reduction="none")  # [B, D]
+        recon = recon.sum(dim=1).mean()
 
         # kld: sum over latent dims per sample, then mean over batch
         kld = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
@@ -66,7 +67,7 @@ def train_vae_basic(
     train_loader,
     val_loader,
     num_epochs=100,
-    learning_rate=1e-3,
+    learning_rate=1e-4,
     loss_per_feature=True,
     device='cuda' if torch.cuda.is_available() else 'cpu',
     save_dir='./checkpoints',
@@ -147,15 +148,15 @@ def train_vae_basic(
             
     print("Training complete!")
 
-    print("Calculated denormalised losses for best model:")
-    train_unnorm_losses = denormalise_losses(train_reproduction_loss, train_KLD, train_loader.dataset.data_min, train_loader.dataset.data_max, 78800, 64, loss_per_feature)
-    val_unnorm_losses = denormalise_losses(val_reproduction_loss, val_KLD, train_loader.dataset.data_min, train_loader.dataset.data_max, 78800, 64, loss_per_feature)
-    print(f"Train:")
-    print(f"\tRMSE per feature: {train_unnorm_losses['rmse_orig_per_feature']}")
-    print(f"\tKLD per dim: {train_unnorm_losses['kld_per_dim']}")
-    print(f"Validation:")
-    print(f"\tRMSE per feature: {val_unnorm_losses['rmse_orig_per_feature']}")
-    print(f"\tKLD per dim: {val_unnorm_losses['kld_per_dim']}")
+    # print("Calculated denormalised losses for best model:")
+    # train_unnorm_losses = denormalise_losses(train_reproduction_loss, train_KLD, train_loader.dataset.data_min, train_loader.dataset.data_max, 78800, 64, loss_per_feature)
+    # val_unnorm_losses = denormalise_losses(val_reproduction_loss, val_KLD, train_loader.dataset.data_min, train_loader.dataset.data_max, 78800, 64, loss_per_feature)
+    # print(f"Train:")
+    # print(f"\tRMSE per feature: {train_unnorm_losses['rmse_orig_per_feature']}")
+    # print(f"\tKLD per dim: {train_unnorm_losses['kld_per_dim']}")
+    # print(f"Validation:")
+    # print(f"\tRMSE per feature: {val_unnorm_losses['rmse_orig_per_feature']}")
+    # print(f"\tKLD per dim: {val_unnorm_losses['kld_per_dim']}")
 
 
     return history
