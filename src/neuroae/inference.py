@@ -5,8 +5,8 @@ import numpy as np
 
 from .train import loss_function
 
-def denormalise(a_norm, min_val, max_val):
-    return a_norm * (max_val - min_val) + min_val
+def denormalise(a_norm, mean_val, std_val):
+    return a_norm * std_val + mean_val
 
 def _is_tensor(data):
     # Helper function to check (PyTorch/NumPy) and convert to numpy
@@ -47,7 +47,7 @@ def get_rmse(x, x_hat):
     return np.sqrt(np.mean(error ** 2))
 
 
-def mse_denormalised(x_norm, x_hat_norm, min_val, max_val, per_feature=True):
+def mse_denormalised(x_norm, x_hat_norm, mean_val, std_val, per_feature=True):
     """
     Compute MSE on denormalised data.
 
@@ -64,8 +64,8 @@ def mse_denormalised(x_norm, x_hat_norm, min_val, max_val, per_feature=True):
     """
     x = _is_tensor(x_norm)
     x_hat = _is_tensor(x_hat_norm)
-    x_denorm = denormalise(x, min_val, max_val)
-    x_hat_denorm = denormalise(x_hat, min_val, max_val)
+    x_denorm = denormalise(x, mean_val, std_val)
+    x_hat_denorm = denormalise(x_hat, mean_val, std_val)
     sq_err = (x_denorm - x_hat_denorm) ** 2
     if per_feature:
         return np.mean(sq_err, axis=0)  # shape (n_features,)
@@ -156,11 +156,11 @@ def inference_vae_basic(
     all_klds = []
     errors = torch.tensor([])
     top_n_examples = []
-    min_val = getattr(data_loader, 'data_min', None) or getattr(
-        getattr(data_loader, 'dataset', None), 'data_min', None
+    mean_val = getattr(data_loader, 'data_mean', None) or getattr(
+        getattr(data_loader, 'dataset', None), 'data_mean', None
     )
-    max_val = getattr(data_loader, 'data_max', None) or getattr(
-        getattr(data_loader, 'dataset', None), 'data_max', None
+    std_val = getattr(data_loader, 'data_std', None) or getattr(
+        getattr(data_loader, 'dataset', None), 'data_std', None
     )
 
     with torch.no_grad():
@@ -174,9 +174,9 @@ def inference_vae_basic(
             all_recons.append(recon.item())
             all_klds.append(kld.item())
 
-            if min_val is not None and max_val is not None:
-                x_denorm = denormalise(x, min_val, max_val)
-                x_hat_denorm = denormalise(recon_x, min_val, max_val)
+            if mean_val is not None and std_val is not None:
+                x_denorm = denormalise(x, mean_val, std_val).cpu()
+                x_hat_denorm = denormalise(recon_x, mean_val, std_val).cpu()
                 errors = torch.cat([errors, (x_denorm - x_hat_denorm)])
 
     avg_loss = sum(all_losses) / len(all_losses)
@@ -188,10 +188,11 @@ def inference_vae_basic(
     print(f"Average KLD: {avg_kld}")
 
     top_n_denormed = [
-        (denormalise(x, min_val, max_val), denormalise(recon_x, min_val, max_val))
+        (denormalise(x, mean_val, std_val), denormalise(recon_x, mean_val, std_val))
         for x, recon_x in top_n_examples
-    ] if min_val is not None and max_val is not None else top_n_examples
+    ] if mean_val is not None and std_val is not None else top_n_examples
 
+    breakpoint()
     visualise_error(errors, data_loader, show=plot_dir is None)
     if plot_dir:
         os.makedirs(plot_dir, exist_ok=True)
