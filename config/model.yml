@@ -1,2 +1,2 @@
-[model]
-name: BasicVAE
+model:
+  name: BasicVAE

@@ -8,7 +8,7 @@ import argparse
 import os
 import torch
 import pathlib
-import configparser
+import yaml
 from neuronumba.tools.filters import BandPassFilter
 
 from .utils import *
@@ -16,8 +16,8 @@ from .load_data import load_adni, prepare_data_loaders
 
 
 def load_config(config_path):
-    conf = configparser.ConfigParser()
-    conf.read(config_path)
+    with open(config_path, 'r') as file:
+        conf = yaml.load(file, Loader=yaml.FullLoader)
     return conf
 
 def main():
@@ -110,6 +110,7 @@ def main():
         train_split=float(data_config['data']['train_split']),
         val_split=float(data_config['data']['val_split']),
         random_seed=int(data_config['data']['random_seed']),
+        train_groups=data_config['data']['groups'], # will use the same for val and test
     )
     
     print(f"\nDataLoader information:")
@@ -136,7 +137,6 @@ def main():
         print("=" * 60)
         
     elif args.mode == 'train':
-        # TODO: Add training logic here
         print("\n" + "=" * 60)
         print("Training mode")
         print("=" * 60)
@@ -169,22 +169,24 @@ def main():
         print("=" * 60)
         
     elif args.mode == 'inference':
-        # TODO: Add inference logic here
         print("\n" + "=" * 60)
         print("Inference mode")
-        print("=" * 60) 
+        print("=" * 60)
 
         from .models import BasicVAE
         from .inference import inference_vae_basic
         model = BasicVAE(input_dim=78800, device=args.device)
         model.load_state_dict(torch.load('checkpoints/best_model.pt'))
+        result_dir = args.data_dir / "results"
+        result_dir.mkdir(parents=True, exist_ok=True)
         inference_vae_basic(
             model,
             loaders['test_loader'],
             device=args.device,
             loss_per_feature=True,
             num_examples=3,
-            plot_dir='plots'
+            plot_dir='plots',
+            sample_dir=result_dir
         )
 
 

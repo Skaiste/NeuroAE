@@ -1,12 +1,6 @@
 import torch
-import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
-from tqdm import tqdm
 import torch.nn.functional as F
-import os
-from pathlib import Path
-import numpy as np
 import matplotlib.pyplot as plt
 
 
@@ -31,8 +25,6 @@ def loss_function(x, x_hat, mu, log_var, error_per_feature=True, kld_weight=1.0)
         kld = kld.sum(dim=1).mean() / log_var.size(1)
 
     return recon + kld_weight * kld, recon, kld
-
-import math
 
 
 def train_vae_basic(

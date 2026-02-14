@@ -214,3 +214,6 @@ checkpoints/
 
 .cursorignore
 .codexignore
+
+# exporting sample data to visualise using pyVisfMRI tool uses csv files -> ignore them
+*.csv
