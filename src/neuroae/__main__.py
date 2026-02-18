@@ -208,8 +208,8 @@ def main():
             save_dir=training_config['training']['save_dir'],
             name=experiment_id,
         )
-        os.makedirs('plots', exist_ok=True)
-        plot_training_history(history, save_path=f'plots/{experiment_id}_training_history.png', show=False)
+        # os.makedirs('plots', exist_ok=True)
+        # plot_training_history(history, save_path=f'plots/{experiment_id}_training_history.png', show=False)
         print(f'Training history saved to plots/{experiment_id}_training_history.png')
 
         model_artifact = pathlib.Path(training_config['training']['save_dir']) / f"{experiment_id}_model.pt"
