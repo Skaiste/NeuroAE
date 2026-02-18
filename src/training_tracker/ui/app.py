@@ -186,14 +186,23 @@ def main() -> None:
         "latent_dim",
     ]
     present_cols = [col for col in visible_cols if col in table_df.columns]
-    st.subheader("Experiments")
-    st.dataframe(table_df[present_cols], width="stretch", hide_index=True)
+    top_tabs = st.tabs(["Selected Experiments", "Experiment Details"])
 
-    st.subheader("Selected Experiment")
-    experiment_id = st.selectbox("Experiment", options=[row["experiment_id"] for row in rows], index=0)
+    with top_tabs[0]:
+        st.subheader("Experiments")
+        st.dataframe(table_df[present_cols], width="stretch", hide_index=True)
+
+    with top_tabs[1]:
+        experiment_id = st.selectbox(
+            "Experiment",
+            options=[row["experiment_id"] for row in rows],
+            index=0,
+            key="details_experiment_id",
+        )
+
     metadata = manager.get_experiment(experiment_id)
     history = manager.get_history(experiment_id)
-    tabs = st.tabs(["History", "Overview", "Raw JSON"])
+    tabs = top_tabs[1].tabs(["History", "Overview", "Raw JSON"])
 
     with tabs[0]:
         history_df = _history_to_frame(history)
