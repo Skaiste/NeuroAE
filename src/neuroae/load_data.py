@@ -11,6 +11,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
+from sklearn.preprocessing import StandardScaler
 
 from .utils import *
 
@@ -118,7 +119,7 @@ class ADNI_B_N193_filtered(ADNI_B_N193_no_filt):
         print(f'----------- Filtering data --------------')
         for task in self.groups:
             for subject, data in self.timeseries[task].items():
-                self.timeseries[task][subject] = self.filter.filter(data)
+                self.timeseries[task][subject] = self.filter.filter(data.T).T
             print(f'----------- done filtering for {task} --------------')
         print(f'----------- done filtering All --------------')
 
@@ -258,7 +259,7 @@ class ADNIDataset(Dataset):
     Each sample is a flattened timeseries (N_ROIs * T_timepoints).
     """
     
-    def __init__(self, timeseries_data, labels=None, flatten=True, normalize=True, data_mean=None, data_std=None):
+    def __init__(self, timeseries_data, labels=None, flatten=True, normaliser=None):
         """
         Initialize ADNI Dataset.
         
@@ -273,45 +274,36 @@ class ADNIDataset(Dataset):
             data_max: Maximum value for normalization (if None, computed from data)
         """
         self.flatten = flatten
-        self.normalize = normalize
+        self.normaliser = normaliser
+        self.original_shape = None
         
         # Convert to numpy arrays and store
         self.data = []
         for ts in timeseries_data:
             ts_array = np.array(ts)
+            self.original_shape = ts_array.shape
+            
             if flatten:
                 ts_array = ts_array.flatten()
+
+            # normalise the data per subject
+            # if normaliser is not None:
+            #     mean = ts_array.mean()
+            #     std = ts_array.std()
+            #     ts_array = (ts_array - mean) / std
+
             self.data.append(ts_array)
         
         self.data = np.array(self.data)
         
-        # Normalize data if requested
-        if normalize:
-            self._normalize_data(data_mean, data_std)
-        else:
-            self.data_mean = None
-            self.data_std = None
+        if normaliser is not None:
+            # assuming the normaliser will first be applied to training data, 
+            # therefore it can be fit on the first usage of the normaliser
+            if not hasattr(normaliser, 'mean_'):
+                normaliser.fit(self.data)
+            self.data = normaliser.transform(self.data)
 
         self.labels = labels if labels is not None else [None] * len(self.data)
-        
-    
-    def _normalize_data(self, data_mean=None, data_std=None):
-        """
-        Normalize data using z-score.
-        
-        Args:
-            data_mean: Mean value for normalization (if None, computed from data)
-            data_std: Standard deviation value for normalization (if None, computed from data)
-        """
-        if data_mean is None:
-            data_mean = self.data.mean()
-        if data_std is None:
-            data_std = self.data.std()
-        
-        self.data_mean = data_mean
-        self.data_std = data_std
-
-        self.data = (self.data - self.data_mean) / self.data_std
         
     def __len__(self):
         return len(self.data)
@@ -323,6 +315,16 @@ class ADNIDataset(Dataset):
         if label is not None:
             return sample, label
         return sample
+
+    def describe(self):
+        print(f"Dataset description:")
+        print("="*60)
+        print(f"\tshape: {self.data.shape}")
+        print(f"\tmean: {self.data.mean()}")
+        print(f"\tstd: {self.data.std()}")
+        print(f"\tmin: {self.data.min()}")
+        print(f"\tmax: {self.data.max()}")
+        print("="*60)
 
 
 def extract_timeseries_from_loader(data_loader, groups=None):
@@ -484,15 +486,17 @@ def prepare_data_loaders(
     train_data_array = np.array(train_data_array)
     data_mean = train_data_array.mean()
     data_std = train_data_array.std()
+
+    normaliser = StandardScaler() if normalize else None
     
     # Create PyTorch datasets with normalization
-    train_dataset = ADNIDataset(train_data, train_labels, flatten=flatten, 
-                                normalize=normalize, data_mean=data_mean, data_std=data_std)
+    train_dataset = ADNIDataset(train_data, train_labels, flatten=flatten, normaliser=normaliser)
+    print("Training dataset")
+    train_dataset.describe()
+
     train_loader = DataLoader(
         train_dataset, batch_size=batch_size, shuffle=shuffle_train
     )
-    train_loader.data_mean = data_mean
-    train_loader.data_std = data_std
     
     result = {
         'train_loader': train_loader,
@@ -503,24 +507,18 @@ def prepare_data_loaders(
     }
     
     if val_data:
-        val_dataset = ADNIDataset(val_data, val_labels, flatten=flatten,
-                                  normalize=normalize, data_mean=data_mean, data_std=data_std)
+        val_dataset = ADNIDataset(val_data, val_labels, flatten=flatten, normaliser=normaliser)
         val_loader = DataLoader(
             val_dataset, batch_size=batch_size, shuffle=False
         )
-        val_loader.data_mean = data_mean
-        val_loader.data_std = data_std
         result['val_loader'] = val_loader
         result['num_samples']['val'] = len(val_dataset)
     
     if test_data:
-        test_dataset = ADNIDataset(test_data, test_labels, flatten=flatten,
-                                  normalize=normalize, data_mean=data_mean, data_std=data_std)
+        test_dataset = ADNIDataset(test_data, test_labels, flatten=flatten, normaliser=normaliser)
         test_loader = DataLoader(
             test_dataset, batch_size=batch_size, shuffle=False
         )
-        test_loader.data_mean = data_mean
-        test_loader.data_std = data_std
         result['test_loader'] = test_loader
         result['num_samples']['test'] = len(test_dataset)
     

@@ -1,2 +1,8 @@
 model:
   name: BasicVAE
+  latent_dim: 64
+  hidden_dims: [2048, 1024, 512, 256]
+  # load_path: ./models/basicVAE_general_model.pt
+  freeze_encoder: false
+  reset_decoder: false
+

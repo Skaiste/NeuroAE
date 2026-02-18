@@ -146,13 +146,26 @@ def main():
 
         model_config = load_config(args.model_config)
         model_name = model_config['model']['name']
+        input_dim = loaders['input_dim']
+        hidden_dims = model_config['model'].get('hidden_dims', [1024, 512, 256, 128])
+        latent_dim = model_config['model'].get('latent_dim', 32)
         if model_name == "BasicVAE":
-            model = BasicVAE(input_dim=78800, device=args.device)
+            model = BasicVAE(input_dim=input_dim, hidden_dims=hidden_dims, latent_dim=latent_dim, device=args.device)
         else:
             raise ValueError(f"Model name {model_name} not supported")
 
+        if "load_path" in model_config['model']:
+            model.load_state_dict(torch.load(model_config['model']['load_path']))
+            print(f"Model loaded from {model_config['model']['load_path']}")
+            if model_config['model']['freeze_encoder']:
+                model.freeze_encoder()
+            if model_config['model']['reset_decoder']:
+                model.reset_decoder()
+        else:
+            print("No model load path provided, training from scratch")
+
         training_config = load_config(args.training_config)
-        # train full model first    
+        pathlib.Path(training_config['training']['save_dir']).mkdir(parents=True, exist_ok=True)
         history = train_vae_basic(
             model,
             loaders['train_loader'],
@@ -162,10 +175,12 @@ def main():
             loss_per_feature=training_config['training']['loss_per_feature'],
             kld_weight=float(training_config['training']['kld_weight']),
             device=args.device,
+            save_dir=training_config['training']['save_dir'],
+            name=training_config['training']['name'],
         )
         os.makedirs('plots', exist_ok=True)
-        plot_training_history(history, save_path='plots/basicVAE_training_history.png', show=False)
-        print("Training history saved to plots/basicVAE_training_history.png")
+        plot_training_history(history, save_path=f'plots/{training_config["training"]["name"]}_training_history.png', show=False)
+        print(f'Training history saved to plots/{training_config["training"]["name"]}_training_history.png')
         print("=" * 60)
         
     elif args.mode == 'inference':
@@ -175,8 +190,18 @@ def main():
 
         from .models import BasicVAE
         from .inference import inference_vae_basic
-        model = BasicVAE(input_dim=78800, device=args.device)
-        model.load_state_dict(torch.load('checkpoints/best_model.pt'))
+
+        model_config = load_config(args.model_config)
+
+        input_dim = loaders['input_dim']
+        hidden_dims = model_config['model'].get('hidden_dims', [1024, 512, 256, 128])
+        latent_dim = model_config['model'].get('latent_dim', 32)
+        model = BasicVAE(input_dim=input_dim, hidden_dims=hidden_dims, latent_dim=latent_dim, device=args.device)
+
+        training_config = load_config(args.training_config)
+        model_name = training_config['training']['name'] + "_model.pt"
+        model_path = pathlib.Path(training_config['training']['save_dir']) / model_name
+        model.load_state_dict(torch.load(model_path))
         result_dir = args.data_dir / "results"
         result_dir.mkdir(parents=True, exist_ok=True)
         inference_vae_basic(

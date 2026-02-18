@@ -37,6 +37,7 @@ def train_vae_basic(
     device='cuda' if torch.cuda.is_available() else 'cpu',
     save_dir='./checkpoints',
     kld_weight=1.0,
+    name='basicVAE_general',
 ):
     history = {
         'train_loss': [],
@@ -110,7 +111,7 @@ def train_vae_basic(
             best_model_losses['train_loss'] = train_loss / num_batches
             best_model_losses['train_reproduction_loss'] = train_reproduction_loss / num_batches
             best_model_losses['train_KLD'] = train_KLD / num_batches
-            torch.save(model.state_dict(), f'{save_dir}/best_model.pt')
+            torch.save(model.state_dict(), f'{save_dir}/{name}_model.pt')
             
     print("Training complete!")
     return history

@@ -1,7 +1,7 @@
 training:
   num_epochs: 40
-  learning_rate: 1e-4
+  learning_rate: 5e-4
   loss_per_feature: true
   kld_weight: 1
-  save_dir: ./checkpoints
+  save_dir: ./models
   name: basicVAE_general

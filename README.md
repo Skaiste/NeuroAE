@@ -7,7 +7,7 @@ For this study, real patient data obtained from the ADNI database, specifically 
 2. MCI (Mild Cognitive Impairment): Mild cognitive impairment (90 subjects).
 3. AD (Alzheimer’s Disease): Alzheimer’s disease (39 subjects).
 
-The data were obtained using fMRI (functional magnetic resonance imaging), a neuroimaging technique that measures brain activity by detecting changes in blood flow associated with neuronal activity. This method allows the study of the functional connectivity of the brain and is fundamental for the analysis of neurodegenerative diseases such as Alzheimer’s. It should be noted that the ADNI data were captured with a time interval of 3 seconds between samples. According to the Nyquist theorem, this implies that the maximum frequency that can be reliably analyzed is 0.18 Hz. In this study, however, the analysis was limited to a frequency band between 0.008 Hz and 0.08 Hz, as this range has been shown to contain relevant information for the study of resting-state brain connectivity. 
+The data were obtained using fMRI (functional magnetic resonance imaging), a neuroimaging technique that measures brain activity by detecting changes in blood flow associated with neuronal activity. This method allows the study of the functional connectivity of the brain and is fundamental for the analysis of neurodegenerative diseases such as Alzheimer’s. It should be noted that the ADNI data were captured with a time interval of 3 seconds between samples. According to the Nyquist theorem, this implies that the maximum frequency that can be reliably analyzed is 0.18 Hz. In this study, however, the analysis was limited to a frequency band between 0.01 Hz and 0.08 Hz, as this range has been shown to contain relevant information for the study of resting-state brain connectivity. 
 For data analysis and processing, a Schaefer 2018 400-region partitioning was applied, a brain segmentation method that divides the cerebral cortex into 400 distinct areas based on functional characteristics. This partitioning facilitates the extraction of brain activity patterns in a structured and coherent manner.
 
 ## Setup
@@ -26,11 +26,17 @@ uv run neuroae
 - [x] Data Loading
 - [x] Training Framework base
 - [ ] Inference Framework base
-- [ ] Data pre-processing
+- [x] Data pre-processing (filtering + normalisation)
 - [ ] Baseline models
 - [ ] Model improvements
 - [ ] Framework for parameter tuning
 - [ ] Evaluation framework
+
+#### Todo's:
+- keep reading papers and start looking into other types of autoencoders to implement
+- write a random search script to find best architecture & training parameters for a model
+- look into evaluation
+- for experimentation purposes only, train a general VAE, run inference on all data, to extract latent properties and try out clustering algorithms to see if any most clear clusters could come close to the labels
 
 ## Report Writing Checklist
 - [ ] [ 0% ] State of the art
@@ -55,5 +61,3 @@ In the end report should contain:
 - Conclusions
 - List of references used
 - Annexes with complementary information
-
-

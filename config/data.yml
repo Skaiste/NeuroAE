@@ -1,15 +1,15 @@
 data:
-  batch_size: 32
+  batch_size: 8
   flatten: true
-  normalize: false
+  normalize: true
   train_split: 0.7
   val_split: 0.15
   random_seed: 42
-  groups: [HC, MCI, AD]
+  groups: [HC,MCI,AD]
 
 filter:
   type: BandPassFilter
-  tr: 3
+  tr: 3000
   flp: 0.01
   fhi: 0.08
   k: 2

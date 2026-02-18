@@ -22,7 +22,8 @@ dependencies = [
     "seaborn",
     "torch",
     "tqdm",
-    "neuronumba @ git+https://github.com/neich/neuronumba.git@main#subdirectory=src"
+    "neuronumba @ git+https://github.com/neich/neuronumba.git@main#subdirectory=src",
+    "scikit-learn>=1.6.1",
 ]
 
 [project.scripts]

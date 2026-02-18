@@ -2,11 +2,20 @@ import os
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 
 from .train import loss_function
 
-def denormalise(a_norm, mean_val, std_val):
-    return a_norm * std_val + mean_val
+def denormalise(a_norm, normaliser):
+    if len(a_norm.shape) == 1:
+        a_norm = a_norm.reshape(1, -1)
+    elif len(a_norm.shape) == 2 and a_norm.shape[-1] != normaliser.mean_.shape[-1]:
+        a_norm = a_norm.reshape(1, a_norm.shape[0]*a_norm.shape[1])
+    try:
+        return normaliser.inverse_transform(a_norm)
+    except Exception as e:
+        breakpoint()
+        raise e
 
 def _is_tensor(data):
     # Helper function to check (PyTorch/NumPy) and convert to numpy
@@ -28,14 +37,7 @@ def _guess_and_reshape(array, loader):
             # Already 2D
             orig_shape = sample.shape
         else:
-            # Try to get from length/ROI assumption: (N_ROIs, T_timepoints)
-            # N193 default: 400 x 197  -- input_dim = 78800 = 400*197
-            arr_len = len(sample)
-            for n_roi in [400, 200]:
-                if arr_len % n_roi == 0:
-                    t_tp = arr_len // n_roi
-                    orig_shape = (n_roi, t_tp)
-                    break
+            orig_shape = loader.dataset.original_shape
         if orig_shape is not None:
             return array.reshape(orig_shape)
     # Otherwise, leave as 1D
@@ -112,16 +114,47 @@ def visualise_examples(examples, data_loader, show=True):
     if show:
         plt.show()
 
+def export_examples(examples, data_loader, sample_dir, denormalise=False):
+    """
+    Export examples to CSV files.
+    """
+    for idx, (x, x_hat) in enumerate(examples):
+        x_np = _is_tensor(x.squeeze())
+        x_hat_np = _is_tensor(x_hat.squeeze())
+
+        if denormalise:
+            x_2d = denormalise(x_np, data_loader.dataset.normaliser)
+            x_hat_2d = denormalise(x_hat_np, data_loader.dataset.normaliser)
+        else:
+            x_2d = x_np
+            x_hat_2d = x_hat_np
+
+        # x_2d = denormalise(x_np, data_loader.dataset.normaliser)
+        # x_hat_2d = denormalise(x_hat_np, data_loader.dataset.normaliser)
+
+        x_2d = _guess_and_reshape(x_2d, data_loader)
+        x_hat_2d = _guess_and_reshape(x_hat_2d, data_loader)
+        # denormalise
+
+        # get rmse error
+        error = x_2d - x_hat_2d
+
+        x_df = pd.DataFrame(x_2d.T)
+        x_hat_df = pd.DataFrame(x_hat_2d.T)
+        error_df = pd.DataFrame(error.T)
+        x_df.to_csv(os.path.join(sample_dir, f'example_{idx}_original.csv'), index=False, header=False)
+        x_hat_df.to_csv(os.path.join(sample_dir, f'example_{idx}_reconstructed.csv'), index=False, header=False)
+        error_df.to_csv(os.path.join(sample_dir, f'example_{idx}_error.csv'), index=False, header=False)
 
 def visualise_error(errors, data_loader, show=True):
-    errors = errors.to(device='cpu')
-    bias = torch.mean(errors, axis=0)
-    mse = torch.mean(errors ** 2, axis=0)
-    rmse = torch.sqrt(mse)
+    bias = np.mean(errors, axis=0)
+    mse = np.mean(errors ** 2, axis=0)
+    rmse = np.sqrt(mse)
     
-    bias_map = _guess_and_reshape(bias.numpy(), data_loader)
-    mse_map = _guess_and_reshape(mse.numpy(), data_loader)
-    rmse_map = _guess_and_reshape(rmse.numpy(), data_loader)
+    # breakpoint()
+    bias_map = _guess_and_reshape(bias, data_loader)
+    mse_map = _guess_and_reshape(mse, data_loader)
+    rmse_map = _guess_and_reshape(rmse, data_loader)
 
     fig, axs = plt.subplots(1, 3, figsize=(10, 3))
     im0 = axs[0].imshow(bias_map, aspect='auto', cmap='viridis')
@@ -148,20 +181,15 @@ def inference_vae_basic(
     device='cuda' if torch.cuda.is_available() else 'cpu',
     loss_per_feature=True,
     num_examples=3,
-    plot_dir=None
+    plot_dir=None,
+    sample_dir=None
 ):
     model.eval()
     all_losses = []
     all_recons = []
     all_klds = []
-    errors = torch.tensor([])
+    errors = None
     top_n_examples = []
-    mean_val = getattr(data_loader, 'data_mean', None) or getattr(
-        getattr(data_loader, 'dataset', None), 'data_mean', None
-    )
-    std_val = getattr(data_loader, 'data_std', None) or getattr(
-        getattr(data_loader, 'dataset', None), 'data_std', None
-    )
 
     with torch.no_grad():
         for batch_idx, (data, _) in enumerate(data_loader):
@@ -174,10 +202,13 @@ def inference_vae_basic(
             all_recons.append(recon.item())
             all_klds.append(kld.item())
 
-            if mean_val is not None and std_val is not None:
-                x_denorm = denormalise(x, mean_val, std_val).cpu()
-                x_hat_denorm = denormalise(recon_x, mean_val, std_val).cpu()
-                errors = torch.cat([errors, (x_denorm - x_hat_denorm)])
+            if data_loader.dataset.normaliser is not None:
+                x_denorm = denormalise(x.cpu(), data_loader.dataset.normaliser)
+                x_hat_denorm = denormalise(recon_x.cpu(), data_loader.dataset.normaliser)
+                if errors is None:
+                    errors = x_denorm - x_hat_denorm
+                else:
+                    errors = np.concatenate([errors, (x_denorm - x_hat_denorm)])
 
     avg_loss = sum(all_losses) / len(all_losses)
     avg_recon = sum(all_recons) / len(all_recons)
@@ -187,20 +218,25 @@ def inference_vae_basic(
     print(f"Average reconstruction: {avg_recon}")
     print(f"Average KLD: {avg_kld}")
 
-    top_n_denormed = [
-        (denormalise(x, mean_val, std_val), denormalise(recon_x, mean_val, std_val))
-        for x, recon_x in top_n_examples
-    ] if mean_val is not None and std_val is not None else top_n_examples
+    # breakpoint()
 
-    breakpoint()
+    top_n_denormed = [
+        (denormalise(x.cpu(), data_loader.dataset.normaliser), denormalise(recon_x.cpu(), data_loader.dataset.normaliser))
+        for x, recon_x in top_n_examples
+    ] if data_loader.dataset.normaliser is not None else top_n_examples
+
     visualise_error(errors, data_loader, show=plot_dir is None)
     if plot_dir:
         os.makedirs(plot_dir, exist_ok=True)
         plt.savefig(os.path.join(plot_dir, 'basicVAE_error.png'), dpi=150, bbox_inches='tight')
         plt.close()
+
     visualise_examples(top_n_denormed, data_loader, show=plot_dir is None)
     if plot_dir:
         plt.savefig(os.path.join(plot_dir, 'basicVAE_examples.png'), dpi=150, bbox_inches='tight')
         plt.close()
+
+    if sample_dir:
+        export_examples(top_n_denormed, data_loader, sample_dir)
     
     return avg_loss, avg_recon, avg_kld
