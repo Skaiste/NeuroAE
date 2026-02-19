@@ -497,7 +497,7 @@ def prepare_data_loaders(
     normalize=True,
     timepoints_as_samples=False,
     split_mode="none",
-    export_datasplit=None,
+    datasplit_file=None,
 ):
     """
     Prepare PyTorch DataLoaders from ADNI DataLoader.
@@ -539,10 +539,10 @@ def prepare_data_loaders(
                 f"Unsupported split_mode '{split_mode}'. Expected one of {sorted(supported_split_modes)}"
             )
 
-        split_path = _resolve_split_path(export_datasplit) if export_datasplit else None
+        split_path = _resolve_split_path(datasplit_file) if datasplit_file else None
         if split_mode in {"load", "create"} and split_path is None:
             raise ValueError(
-                "split_mode requires 'export_datasplit' to be set when not using none mode."
+                "split_mode requires 'datasplit_file' to be set when not using none mode."
             )
 
         train_data, train_labels = [], []

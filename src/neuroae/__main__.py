@@ -132,7 +132,7 @@ def main():
     # Prepare PyTorch DataLoaders
     print(f"\nPreparing PyTorch DataLoaders...")
     split_mode = data_config['data'].get('datasplit_mode', 'none')
-    export_datasplit = data_config['data'].get('datasplit_file')
+    datasplit_file = data_config['data'].get('datasplit_file')
     loaders = prepare_data_loaders(
         data_loader,
         batch_size=int(data_config['data'].get('batch_size', 16)),
@@ -147,7 +147,7 @@ def main():
         train_groups=data_config['data'].get('groups', ["HC","MCI","AD"]), # will use the same for val and test
         timepoints_as_samples=data_config['data'].get('timepoints_as_samples', False),
         split_mode=split_mode,
-        export_datasplit=export_datasplit
+        datasplit_file=datasplit_file
     )
     
     print(f"\nDataLoader information:")
@@ -258,8 +258,9 @@ def main():
             model,
             loaders['train_loader'],
             loaders['val_loader'],
-            num_epochs=int(training_config['training']['num_epochs']),
-            learning_rate=float(training_config['training']['learning_rate']),
+            num_epochs=int(training_config['training'].get('num_epochs', 50)),
+            learning_rate=float(training_config['training'].get('learning_rate', 1e-3)),
+            weight_decay=float(training_config['training'].get('weight_decay', 1e-4)),
             device=args.device,
             save_dir=training_config['training']['save_dir'],
             name=experiment_id

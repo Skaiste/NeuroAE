@@ -15,7 +15,8 @@ def train_vae_basic(
     train_loader,
     val_loader,
     num_epochs=100,
-    learning_rate=1e-4,
+    learning_rate=1e-3,
+    weight_decay=1e-4,
     device='cuda' if torch.cuda.is_available() else 'cpu',
     save_dir='./checkpoints',
     name='basicVAE_general',
@@ -28,7 +29,7 @@ def train_vae_basic(
         'val': {}
     }
     best_model_losses = None
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     for epoch in range(num_epochs):
         train_loss_params = {}
 

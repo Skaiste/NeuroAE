@@ -96,13 +96,12 @@ class Perl2023(nn.Module):
     def loss(self, x, model_output):
         x_hat, mu, log_var = model_output
         beta = float(self.loss_fn_params.get("beta", 1.0))
-        recon_distribution = self.loss_fn_params.get("recon_distribution", "gaussian")
 
         # per-sample reconstruction loss
-        if recon_distribution == "gaussian":
+        if self.recon_distribution == "gaussian":
             # mean over features, keep batch
             recon = F.mse_loss(x_hat, x, reduction="none").mean(dim=1)
-        elif recon_distribution == "bernoulli":
+        elif self.recon_distribution == "bernoulli":
             recon = F.binary_cross_entropy_with_logits(x_hat, x, reduction="none").mean(dim=1)
         else:
             raise ValueError("recon_distribution must be 'gaussian' or 'bernoulli'")
