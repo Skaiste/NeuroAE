@@ -3,7 +3,13 @@ import torch.nn as nn
 from typing import Sequence, Optional
 
 
-class Pinaya2018AE(nn.Module):
+"""
+Pinaya WHL, Mechelli A, Sato JR. Using deep autoencoders to identify abnormal brain structural 
+patterns in neuropsychiatric disorders: A large-scale multi-sample study. Hum Brain Mapp. 
+2019 Feb 15;40(3):944-954. doi: 10.1002/hbm.24423. Epub 2018 Oct 11. PMID: 30311316; PMCID: PMC6492107.
+"""
+
+class Pinaya2018(nn.Module):
     def __init__(
         self,
         input_dim: int,
@@ -22,6 +28,9 @@ class Pinaya2018AE(nn.Module):
         self.hidden_dims = tuple(hidden_dims)
         self.latent_dim = latent_dim
         self.final_activation = final_activation
+
+        # for loss
+        self.criterion = nn.MSELoss()
 
         def block(in_f: int, out_f: int) -> nn.Sequential:
             layers = [nn.Linear(in_f, out_f)]
@@ -81,3 +90,10 @@ class Pinaya2018AE(nn.Module):
         z = self.encode(x)
         x_hat = self.decode(z)
         return x_hat, z
+    
+    # a placeholder since the loss function doesn't have any parameters
+    def set_loss_fn_params(self, params):
+        pass
+
+    def loss(self, x, model_output):
+        return {'loss': self.criterion(model_output[0], x)}

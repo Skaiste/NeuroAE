@@ -22,6 +22,10 @@ To run training make sure the data (`.mat` files) are in the `data` directory, t
 uv run neuroae
 ```
 
+## Configuration
+Full configuration reference for all models and config files:
+- `docs/configuration.md`
+
 ## Implementation Checklist
 - [x] Data Loading
 - [x] Training Framework base

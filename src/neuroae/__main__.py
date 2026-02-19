@@ -181,7 +181,7 @@ def main():
         model_config = load_config(args.model_config)
         model_name = model_config['model']['name']
         if model_name == "BasicVAE":
-            from .models import BasicVAE
+            from .models.basic import BasicVAE
             hidden_dims = model_config['model'].get('hidden_dims', [1024, 512, 256, 128])
             hidden_dims = [int(i) for i in hidden_dims]
             latent_dim = int(model_config['model'].get('latent_dim', 32))
@@ -192,21 +192,34 @@ def main():
                 spatial_dims=1,
                 in_channels=input_dim[0],
                 out_channels=input_dim[0],
-                num_res_blocks=1,
-                channels=(64, 128, 256),
-                attention_levels=(False, False, False),
-                latent_channels=8,
-                norm_num_groups=32,
-                norm_eps=1e-6,
+                num_res_blocks=int(model_config['model'].get('num_res_blocks', 1)),
+                channels=[int(i) for i in model_config['model'].get('channels', [64, 128, 256])],
+                attention_levels=[int(i) for i in model_config['model'].get('attention_levels', [False]*3)],
+                latent_channels=int(model_config['model'].get('latent_channels', 8)),
+                norm_num_groups=int(model_config['model'].get('norm_num_groups', 32)),
+                norm_eps=float(model_config['model'].get('norm_eps', 1e-6)),
                 with_encoder_nonlocal_attn=False,
                 with_decoder_nonlocal_attn=False,
             )
         elif model_name == "Pinaya2018":
-            from .models import Pinaya2018AE
-            model = Pinaya2018AE(
+            from .models.pinaya2018 import Pinaya2018
+            model = Pinaya2018(
                 input_dim=input_dim[0],
                 hidden_dims=[int(i) for i in model_config['model'].get('hidden_dims', [1024, 256])],
-                latent_dim=int(model_config['model'].get('latent_dim', 32))
+                latent_dim=int(model_config['model'].get('latent_dim', 32)),
+                dropout=float(model_config['model'].get('dropout', 0.0)),
+                use_batchnorm=model_config['model'].get('use_batchnorm', False),
+                final_activation=model_config['model'].get('final_activation', None),
+            )
+        elif model_name == "Perl2023":
+            from .models.perl2023 import Perl2023
+            model = Perl2023(
+                input_dim=input_dim[0],
+                latent_dim=int(model_config['model'].get('latent_dim', 10)),
+                hidden_dims=[int(i) for i in model_config['model'].get('hidden_dims', [256, 128])],
+                dropout=float(model_config['model'].get('dropout', 0.0)),
+                use_layernorm=model_config['model'].get('use_layernorm', True),
+                recon_distribution=model_config['model'].get('recon_distribution', 'gaussian')
             )
         else:
             raise ValueError(f"Model name {model_name} not supported")
@@ -225,6 +238,8 @@ def main():
         model = model.to(device)
 
         training_config = load_config(args.training_config)
+        model.set_loss_fn_params(training_config['training'].get('loss_params', None))
+
         tracker = TrainingResultsManager(results_dir=project_path / "results")
         experiment_id = tracker.build_experiment_id(
             model_type=model_name,
@@ -243,9 +258,7 @@ def main():
             learning_rate=float(training_config['training']['learning_rate']),
             device=args.device,
             save_dir=training_config['training']['save_dir'],
-            name=experiment_id,
-            loss_fn_name=training_config['training'].get('loss_function', "recon_kld_loss"),
-            loss_fn_params=training_config['training'].get('loss_params', {})
+            name=experiment_id
         )
         # os.makedirs('plots', exist_ok=True)
         # plot_training_history(history, save_path=f'plots/{experiment_id}_training_history.png', show=False)

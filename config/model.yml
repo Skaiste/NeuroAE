@@ -1,6 +1,6 @@
 model:
   freeze_encoder: false
   reset_decoder: false
-  name: BasicVAE
-  hidden_dims: [512, 128]
-  latent_dim: 32
+  name: Perl2023
+  hidden_dims: [256, 128]
+  latent_dim: 10

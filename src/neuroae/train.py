@@ -1,12 +1,10 @@
 import torch
 import torch.optim as optim
-import matplotlib.pyplot as plt
 
-from .loss import LossFunction
 
 def loss_params2str(train_params, train_batches, val_params, val_batches):
     def _format_loss_dict(params, type, batches):
-        return " | ".join(f"{type} {k}: {float(v/batches):.3f}" for k, v in params.items())
+        return " | ".join(f"{type} {k}: {float(v/batches):.4f}" for k, v in params.items())
 
     train_pstr = _format_loss_dict(train_params, "Train", train_batches)
     val_pstr = _format_loss_dict(val_params, "Val", val_batches)
@@ -21,13 +19,9 @@ def train_vae_basic(
     device='cuda' if torch.cuda.is_available() else 'cpu',
     save_dir='./checkpoints',
     name='basicVAE_general',
-    loss_fn_name="recon_kld",
-    loss_fn_params={}
 ):
     device = torch.device(device)
     model = model.to(device)
-
-    loss_fn = LossFunction(loss_fn_name, loss_fn_params)
 
     history = {
         'train': {},
@@ -45,7 +39,7 @@ def train_vae_basic(
             optimizer.zero_grad()
 
             output = model(x)
-            loss = loss_fn.run(x, output)
+            loss = model.loss(x, output)
             for p in loss:
                 if p not in train_loss_params:
                     train_loss_params[p] = 0
@@ -68,7 +62,7 @@ def train_vae_basic(
             for batch_idx, (data, _) in enumerate(val_loader):
                 x = data.to(device)
                 output = model(x)
-                loss = loss_fn.run(x, output)
+                loss = model.loss(x, output)
 
                 for p in loss:
                     if p not in val_loss_params:
