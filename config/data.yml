@@ -1,5 +1,5 @@
 data:
-  batch_size: 32
+  batch_size: 64
   groups: [HC, MCI, AD]
   random_seed: 42
   train_split: 0.7
@@ -7,11 +7,12 @@ data:
   datasplit_file: data/train_val_test_split.csv
   datasplit_mode: load
   normalize: true
-  transpose: true
+  transpose: false
   pad_features: false
   truncate_features: false
-  flatten: false
+  flatten: true
   timepoints_as_samples: false
+  fc_input: false
 
 filter:
   apply_demean: true

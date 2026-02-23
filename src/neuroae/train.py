@@ -1,5 +1,6 @@
 import torch
 import torch.optim as optim
+import torch.nn.functional as F
 
 
 def loss_params2str(train_params, train_batches, val_params, val_batches):
@@ -98,8 +99,9 @@ def train_vae_basic(
             x = data if len(data.shape) == 2 else data.reshape(data.shape[0],-1)
             z_pca = pca.transform(x)
             x_recon_pca = pca.inverse_transform(z_pca)
-            mse_pca = torch.mean((x - x_recon_pca) ** 2)
-            total_mse_pca += mse_pca
+            x_recon_pca = torch.as_tensor(x_recon_pca, dtype=x.dtype, device=x.device)
+            mse_pca = F.mse_loss(x_recon_pca, x, reduction="mean")
+            total_mse_pca += mse_pca.item()
             num_batches += 1
         mse_pca = float(total_mse_pca / num_batches)
         

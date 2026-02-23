@@ -24,6 +24,8 @@ class BasicVAE(nn.Module):
             h = self.fc(x)
             mean = self.fc_mean(h)
             log_var = self.fc_logvar(h)
+            # clamp log_var to stabilise
+            log_var = torch.clamp(log_var, -10.0, 10.0)
             return mean, log_var
     
     class Decoder(nn.Module):
@@ -90,7 +92,7 @@ class BasicVAE(nn.Module):
     def loss(self, x, model_output):
         x_hat, mu, log_var, _ = model_output
         error_per_feature = self.loss_fn_params.get("loss_per_feature", True)
-        kld_weight = float(self.loss_fn_params.get("kld_weight", 1.0))
+        beta = float(self.loss_fn_params.get("beta", 1.0))
         # if selected error per feature, we are averaging everything
         if error_per_feature:
             # recon: mean mse loss
@@ -111,7 +113,7 @@ class BasicVAE(nn.Module):
             kld = kld.sum(dim=1).mean() / log_var.size(1)
 
         return {
-            'loss': recon + kld_weight * kld,
+            'loss': recon + beta * kld,
             'recon': recon, 
             'kld': kld
         }

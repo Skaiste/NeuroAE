@@ -147,6 +147,7 @@ def main():
         random_seed=int(data_config['data'].get('random_seed', 42)),
         train_groups=data_config['data'].get('groups', ["HC","MCI","AD"]), # will use the same for val and test
         timepoints_as_samples=data_config['data'].get('timepoints_as_samples', False),
+        fc_input=data_config['data'].get('fc_input', False),
         split_mode=split_mode,
         datasplit_file=datasplit_file
     )
@@ -208,10 +209,10 @@ def main():
                 with_encoder_nonlocal_attn=False,
                 with_decoder_nonlocal_attn=False,
             )
-        elif model_name == "Pinaya2018":
-            from .models.pinaya2018 import Pinaya2018
+        elif model_name == "DeterministicAE":
+            from .models.determAE import DeterministicAE
             latent_dim = int(model_config['model'].get('latent_dim', 32))
-            model = Pinaya2018(
+            model = DeterministicAE(
                 input_dim=input_dim[0],
                 hidden_dims=[int(i) for i in model_config['model'].get('hidden_dims', [1024, 256])],
                 latent_dim=latent_dim,
@@ -221,14 +222,23 @@ def main():
             )
         elif model_name == "Perl2023":
             from .models.perl2023 import Perl2023
-            latent_dim = int(model_config['model'].get('latent_dim', 10))
+            latent_dim = int(model_config['model'].get('latent_dim', 2))
             model = Perl2023(
                 input_dim=input_dim[0],
+                intermediate_dim=int(model_config['model'].get('intermediate_dim', 1028)),
                 latent_dim=latent_dim,
-                hidden_dims=[int(i) for i in model_config['model'].get('hidden_dims', [256, 128])],
+                output_activation=model_config['model'].get('output_activation', 'sigmoid'),
+            )
+        elif model_name == "SequentialAE":
+            from .models.seqAE import SequentialAE
+            latent_dim = int(model_config['model'].get('latent_dim', 2))
+            model = SequentialAE(
+                regions=input_dim[1],
+                hidden_dim=int(model_config['model'].get('hidden_dim', 256)),
+                latent_dim=latent_dim,
+                num_layers=int(model_config['model'].get('num_layers', 1)),
                 dropout=float(model_config['model'].get('dropout', 0.0)),
-                use_layernorm=model_config['model'].get('use_layernorm', True),
-                recon_distribution=model_config['model'].get('recon_distribution', 'gaussian')
+                cell=model_config['model'].get('cell', 'lstm')
             )
         else:
             raise ValueError(f"Model name {model_name} not supported")

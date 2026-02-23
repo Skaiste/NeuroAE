@@ -268,7 +268,8 @@ class ADNIDataset(Dataset):
         normaliser=None, 
         pad_features=False, 
         truncate_features=False,
-        timepoints_as_samples=False
+        timepoints_as_samples=False,
+        fc_input=False
     ):
         """
         Initialize ADNI Dataset.
@@ -289,6 +290,7 @@ class ADNIDataset(Dataset):
         self.pad_features = pad_features
         self.truncate_features = truncate_features
         self.timepoints_as_samples = timepoints_as_samples
+        self.fc_input = fc_input
         self.original_shape = None
 
         assert not (self.truncate_features and self.pad_features), 'Can only choose to pad or truncate features not both.'
@@ -303,20 +305,20 @@ class ADNIDataset(Dataset):
 
             self.original_shape = ts_array.shape
             
-            if flatten and not timepoints_as_samples:
+            if flatten and not timepoints_as_samples and not fc_input:
                 ts_array = ts_array.flatten()
 
             self.data.append(ts_array)
         
         self.data = np.array(self.data)
 
-        if timepoints_as_samples:
+        if timepoints_as_samples and not fc_input:
             timepoint_dim = self.data.shape[1]
             self.data = self.data.reshape(-1, self.data.shape[-1])
             labels = np.repeat(labels, timepoint_dim).tolist()
 
         if normaliser is not None:
-            if not flatten and not timepoints_as_samples:
+            if fc_input or not flatten and not timepoints_as_samples:
                 # shape it for normaliser
                 N, P, T = self.data.shape
                 data_reshaped = self.data.transpose(0, 2, 1)
@@ -328,10 +330,13 @@ class ADNIDataset(Dataset):
                 normaliser.fit(self.data)
             self.data = normaliser.transform(self.data)
 
-            if not flatten and not timepoints_as_samples:
+            if fc_input or not flatten and not timepoints_as_samples:
                 # reshape back
                 data_scaled = self.data.reshape(N, T, P)
                 self.data = data_scaled.transpose(0, 2, 1)
+
+        if fc_input:
+            self.timeseries_to_fc(flatten_output=self.flatten)
 
         if pad_features and self.data.shape[-1]%4 != 0:
             pad_by = 4 - self.data.shape[-1]%4
@@ -363,6 +368,88 @@ class ADNIDataset(Dataset):
         print(f"\tmin: {self.data.min()}")
         print(f"\tmax: {self.data.max()}")
         print("="*60)
+
+    def timeseries_to_fc(
+        self,
+        roi_axis: int = 0,
+        fisher: bool = False,
+        flatten_output: bool = False,
+        upper_triangle: bool = True,
+        include_diagonal: bool = False,
+        scale_to_unit_interval: bool = False,
+    ):
+        """
+        Convert each sample from timeseries to a functional connectivity matrix.
+
+        This transforms ``self.data`` in place from shape ``(N, R, T)`` (or
+        flattened timeseries ``(N, R*T)``) to FC matrices ``(N, R, R)`` and
+        optionally flattens to ``(N, R*R)``.
+
+        Args:
+            roi_axis: Axis index of ROI dimension for each sample (0 or 1).
+                      If ``0``, each sample is interpreted as ``(R, T)``.
+                      If ``1``, each sample is interpreted as ``(T, R)``.
+            fisher: If True, applies Fisher transform and inverse transform to
+                    average-like behavior and numerical stability:
+                    ``FC = tanh(atanh(corrcoef))``.
+            flatten_output: If True, flattens each FC matrix to 1D.
+            upper_triangle: If True, keep only upper-triangular entries.
+            include_diagonal: If True and ``upper_triangle=True``, include diagonal.
+            scale_to_unit_interval: If True, clip FC to ``[-1, 1]`` and map
+                    values to ``[0, 1]`` via ``(x + 1) / 2``.
+        """
+        if self.timepoints_as_samples:
+            raise ValueError(
+                "Cannot compute FC when timepoints_as_samples=True because each row is one timepoint."
+            )
+        if roi_axis not in (0, 1):
+            raise ValueError("roi_axis must be 0 or 1.")
+
+        if self.data.ndim == 3:
+            ts_data = self.data
+        elif self.data.ndim == 2 and self.flatten:
+            if self.original_shape is None:
+                raise ValueError("original_shape is required to reshape flattened timeseries.")
+            expected_features = int(np.prod(self.original_shape))
+            if self.data.shape[1] != expected_features:
+                raise ValueError(
+                    f"Cannot reshape data of shape {self.data.shape} into (-1, {self.original_shape})."
+                )
+            ts_data = self.data.reshape((-1,) + tuple(self.original_shape))
+        else:
+            raise ValueError(
+                f"Expected timeseries data with ndim=3, or flattened timeseries with ndim=2. Got shape {self.data.shape}."
+            )
+
+        fc_mats = []
+        for sample in ts_data:
+            ts = sample if roi_axis == 0 else sample.T
+            fc = np.corrcoef(ts)
+            fc = np.nan_to_num(fc, nan=0.0, posinf=0.0, neginf=0.0)
+            if fisher:
+                # Keep values finite for atanh when diagonal or near-perfect correlations appear.
+                fc = np.clip(fc, -0.999999, 0.999999)
+                fc = np.tanh(np.arctanh(fc))
+            if scale_to_unit_interval:
+                fc = np.clip(fc, -1.0, 1.0)
+                fc = (fc + 1.0) / 2.0
+            fc_mats.append(fc.astype(np.float32))
+
+        self.data = np.asarray(fc_mats, dtype=np.float32)
+        self.original_shape = self.data.shape[1:]
+
+        if upper_triangle:
+            k = 0 if include_diagonal else 1
+            tri = np.triu_indices(self.data.shape[1], k=k)
+            self.data = self.data[:, tri[0], tri[1]]
+            self.flatten = True
+            return self.data
+
+        if flatten_output:
+            self.data = self.data.reshape(self.data.shape[0], -1)
+            self.flatten = True
+        else:
+            self.flatten = False
 
 
 def extract_timeseries_from_loader(data_loader, groups=None):
@@ -496,6 +583,7 @@ def prepare_data_loaders(
     random_seed=42,
     normalize=True,
     timepoints_as_samples=False,
+    fc_input=False,
     split_mode="none",
     datasplit_file=None,
 ):
@@ -647,7 +735,8 @@ def prepare_data_loaders(
         transpose=transpose, flatten=flatten, 
         normaliser=normaliser, pad_features=pad_features,
         truncate_features=truncate_features,
-        timepoints_as_samples=timepoints_as_samples
+        timepoints_as_samples=timepoints_as_samples,
+        fc_input=fc_input
     )
     print("Training dataset")
     train_dataset.describe()
@@ -669,7 +758,8 @@ def prepare_data_loaders(
             transpose=transpose, flatten=flatten, 
             normaliser=normaliser, pad_features=pad_features,
             truncate_features=truncate_features,
-            timepoints_as_samples=timepoints_as_samples
+            timepoints_as_samples=timepoints_as_samples,
+            fc_input=fc_input
         )
         val_loader = DataLoader(
             val_dataset, batch_size=batch_size, shuffle=False
@@ -682,7 +772,8 @@ def prepare_data_loaders(
             transpose=transpose, flatten=flatten, 
             normaliser=normaliser, pad_features=pad_features,
             truncate_features=truncate_features,
-            timepoints_as_samples=timepoints_as_samples
+            timepoints_as_samples=timepoints_as_samples,
+            fc_input=fc_input
         )
         test_loader = DataLoader(
             test_dataset, batch_size=batch_size, shuffle=False

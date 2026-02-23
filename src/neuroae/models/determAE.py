@@ -3,13 +3,8 @@ import torch.nn as nn
 from typing import Sequence, Optional
 
 
-"""
-Pinaya WHL, Mechelli A, Sato JR. Using deep autoencoders to identify abnormal brain structural 
-patterns in neuropsychiatric disorders: A large-scale multi-sample study. Hum Brain Mapp. 
-2019 Feb 15;40(3):944-954. doi: 10.1002/hbm.24423. Epub 2018 Oct 11. PMID: 30311316; PMCID: PMC6492107.
-"""
 
-class Pinaya2018(nn.Module):
+class DeterministicAE(nn.Module):
     def __init__(
         self,
         input_dim: int,
