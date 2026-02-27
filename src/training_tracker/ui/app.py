@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 import yaml
@@ -28,8 +28,39 @@ def _default_config_dir() -> Path:
     return Path("config")
 
 
-def _parse_iso(ts: str) -> datetime:
-    return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+def _default_experiments_config_path() -> Path:
+    return Path("config") / "experiments.yml"
+
+
+def _results_fingerprint(results_dir: Path) -> int:
+    """Return a lightweight cache key that changes when tracker files change."""
+    candidates = [results_dir / "index.jsonl"]
+    candidates.extend(results_dir.glob("experiments/*/metadata.json"))
+    candidates.extend(results_dir.glob("experiments/*/history.json"))
+
+    latest_mtime_ns = 0
+    for file_path in candidates:
+        if file_path.exists():
+            latest_mtime_ns = max(latest_mtime_ns, file_path.stat().st_mtime_ns)
+    return latest_mtime_ns
+
+
+@st.cache_data(show_spinner=False)
+def _load_rows_cached(results_dir_str: str, fingerprint: int) -> list[dict]:
+    # `fingerprint` is only used for cache invalidation.
+    _ = fingerprint
+    manager = TrainingResultsManager(results_dir=Path(results_dir_str))
+    rows = manager.list_experiments(
+        sort_by="created_at",
+        ascending=False,
+        limit=None,
+    )
+    rows = _attach_significance(rows, manager)
+    for row in rows:
+        category = _classify_vs_pca(row)
+        row["pca_class"] = _classification_label(category)
+    _add_scores(rows)
+    return rows
 
 
 def _history_to_frame(history: dict) -> pd.DataFrame:
@@ -146,36 +177,95 @@ def _short_experiment_id(experiment_id: str, keep: int = 8) -> str:
     return tail if len(tail) <= keep else tail[:keep]
 
 
-def _build_sidebar(manager: TrainingResultsManager) -> dict:
-    st.sidebar.header("Filters")
-    rows = manager.list_experiments(limit=None)
+def _build_compare_labels(selected_rows: list[dict]) -> list[str]:
+    """
+    Build labels from parameters that differ across selected experiments.
+    Falls back to model + short experiment id if needed.
+    """
+    fields = [
+        ("model_type", "model"),
+        ("latent_dim", "latent"),
+        ("model_hidden_dim", "hidden"),
+        ("training_beta", "beta"),
+        ("data_flatten", "flatten"),
+        ("data_transpose", "transpose"),
+        ("data_timepoints_as_samples", "timepts"),
+        ("data_fc_input", "fc_input"),
+    ]
 
-    model_types = sorted({row.get("model_type") for row in rows if row.get("model_type")})
+    varying_fields: list[tuple[str, str]] = []
+    for key, alias in fields:
+        values = {_encode_group_value(row.get(key)) for row in selected_rows}
+        if len(values) > 1:
+            varying_fields.append((key, alias))
 
-    selected_model_types = st.sidebar.multiselect("Model type", options=model_types, default=model_types)
+    labels: list[str] = []
+    for row in selected_rows:
+        parts: list[str] = []
+        for key, alias in varying_fields:
+            value = row.get(key)
+            if isinstance(value, bool):
+                value_text = "yes" if value else "no"
+            elif value is None:
+                value_text = "NA"
+            else:
+                value_text = str(value)
+            parts.append(f"{alias}={value_text}")
 
-    max_best_val_loss = st.sidebar.number_input("Max best val loss", min_value=0.0, value=10.0, step=0.1)
-    min_epochs = st.sidebar.number_input("Min epochs", min_value=0, value=0, step=1)
-    max_days_old = st.sidebar.number_input("Max age (days)", min_value=1, value=3650, step=1)
+        if parts:
+            label = " | ".join(parts)
+        else:
+            model_name = str(row.get("model_type", "model"))
+            exp_id = str(row.get("experiment_id", "exp"))
+            label = f"model={model_name} | id={_short_experiment_id(exp_id)}"
+        labels.append(label)
 
-    if st.sidebar.button("Rebuild index"):
-        manager.rebuild_index()
-        st.sidebar.success("Index rebuilt")
+    # Ensure uniqueness in case two experiments share identical varying params.
+    counts: dict[str, int] = {}
+    unique_labels: list[str] = []
+    for label, row in zip(labels, selected_rows):
+        counts[label] = counts.get(label, 0) + 1
+        if counts[label] == 1 and labels.count(label) == 1:
+            unique_labels.append(label)
+            continue
+        exp_id = str(row.get("experiment_id", "exp"))
+        unique_labels.append(f"{label} | id={_short_experiment_id(exp_id)}")
+    return unique_labels
 
-    filters: dict = {}
-    if selected_model_types and len(selected_model_types) != len(model_types):
-        filters["model_type"] = selected_model_types[0] if len(selected_model_types) == 1 else None
 
-    filters["best_val_loss_max"] = max_best_val_loss
-    filters["num_epochs_min"] = int(min_epochs)
+def _build_compare_param_details(selected_rows: list[dict]) -> list[str]:
+    """Build hover details from varying parameters across selected experiments."""
+    fields = [
+        ("model_type", "model"),
+        ("latent_dim", "latent"),
+        ("model_hidden_dim", "hidden"),
+        ("training_beta", "beta"),
+        ("data_flatten", "flatten"),
+        ("data_transpose", "transpose"),
+        ("data_timepoints_as_samples", "timepts"),
+        ("data_fc_input", "fc_input"),
+    ]
 
-    created_after = datetime.now(timezone.utc) - timedelta(days=int(max_days_old))
-    filters["created_after"] = created_after.isoformat().replace("+00:00", "Z")
+    varying_fields: list[tuple[str, str]] = []
+    for key, alias in fields:
+        values = {_encode_group_value(row.get(key)) for row in selected_rows}
+        if len(values) > 1:
+            varying_fields.append((key, alias))
 
-    # Additional in-memory filters for multi-select model/status.
-    filters["_selected_model_types"] = set(selected_model_types)
-
-    return filters
+    details: list[str] = []
+    for row in selected_rows:
+        parts = []
+        for key, alias in varying_fields:
+            value = row.get(key)
+            if isinstance(value, bool):
+                value_text = "true" if value else "false"
+            elif value is None:
+                value_text = "NA"
+            else:
+                value_text = str(value)
+            parts.append(f"{alias}={value_text}")
+        details.append(" | ".join(parts) if parts else "No varying params")
+    return details
 
 
 def _to_display_value(value):
@@ -220,6 +310,416 @@ def _overwrite_configs_from_metadata(metadata: dict, config_dir: Path) -> None:
     _write_yaml(config_dir / "data.yml", data_params)
 
 
+def _render_evaluation_tab(metadata: dict) -> None:
+    evaluation = metadata.get("evaluation")
+    if not isinstance(evaluation, dict):
+        st.info("No evaluation metrics available for this experiment.")
+        return
+
+    model_metrics = evaluation.get("model")
+    pca_metrics = evaluation.get("pca")
+    if not isinstance(model_metrics, dict) or not isinstance(pca_metrics, dict):
+        st.info("Evaluation metrics are incomplete (model and/or pca missing).")
+        return
+
+    updated_at = evaluation.get("updated_at")
+    if updated_at:
+        st.caption(f"Evaluation updated: {updated_at}")
+
+    metric_keys = sorted(set(model_metrics.keys()).intersection(pca_metrics.keys()))
+    numeric_metric_keys = []
+    for key in metric_keys:
+        model_value = _to_float(model_metrics.get(key))
+        pca_value = _to_float(pca_metrics.get(key))
+        if model_value is None or pca_value is None:
+            continue
+        numeric_metric_keys.append(key)
+
+    if not numeric_metric_keys:
+        st.info("No shared numeric metrics found between model and PCA.")
+        return
+
+    for idx in range(0, len(numeric_metric_keys), 4):
+        row_metrics = numeric_metric_keys[idx:idx + 4]
+        row_cols = st.columns(4)
+        for col, metric_name in zip(row_cols, row_metrics):
+            model_value = _to_float(model_metrics.get(metric_name))
+            pca_value = _to_float(pca_metrics.get(metric_name))
+            metric_label = metric_name.replace('_', ' ').title()
+            metric_df = pd.DataFrame(
+                {
+                    "parameter_value": ["Model", "PCA"],
+                    "avg_metric": [model_value, pca_value],
+                }
+            )
+            with col:
+                st.bar_chart(
+                    metric_df,
+                    x="parameter_value",
+                    y="avg_metric",
+                    y_label=metric_label,
+                    color="parameter_value"
+                )
+
+
+def _attach_significance(rows: list[dict], manager: TrainingResultsManager) -> list[dict]:
+    output: list[dict] = []
+    for row in rows:
+        row_copy = dict(row)
+        try:
+            metadata = manager.get_experiment(row_copy["experiment_id"])
+        except Exception:
+            metadata = {}
+        model_params = metadata.get("model_params", {}) if isinstance(metadata, dict) else {}
+        training_params = metadata.get("training_params", {}) if isinstance(metadata, dict) else {}
+        data_params = metadata.get("data_params", {}) if isinstance(metadata, dict) else {}
+        row_copy["_model_params"] = model_params if isinstance(model_params, dict) else {}
+        row_copy["_training_params"] = training_params if isinstance(training_params, dict) else {}
+        row_copy["_data_params"] = data_params if isinstance(data_params, dict) else {}
+        significance = _to_float(metadata.get("summary", {}).get("significance"))
+        row_copy["significance"] = significance
+        model_eval = metadata.get("evaluation", {}).get("model", {}) if isinstance(metadata, dict) else {}
+        pca_eval = metadata.get("evaluation", {}).get("pca", {}) if isinstance(metadata, dict) else {}
+        comparison_eval = metadata.get("evaluation", {}).get("comparison", {}) if isinstance(metadata, dict) else {}
+        if isinstance(model_eval, dict):
+            row_copy["test_mse"] = _to_float(model_eval.get("mse"))
+            row_copy["test_fc_preservation"] = _to_float(model_eval.get("fc_preservation"))
+            row_copy["test_silhouette"] = _to_float(model_eval.get("silhouette"))
+            row_copy["test_logreg_accuracy"] = _to_float(model_eval.get("logreg_accuracy"))
+        else:
+            row_copy["test_mse"] = None
+            row_copy["test_fc_preservation"] = None
+            row_copy["test_silhouette"] = None
+            row_copy["test_logreg_accuracy"] = None
+        if isinstance(pca_eval, dict):
+            row_copy["pca_mse"] = _to_float(pca_eval.get("mse"))
+            row_copy["pca_fc_preservation"] = _to_float(pca_eval.get("fc_preservation"))
+            row_copy["pca_silhouette"] = _to_float(pca_eval.get("silhouette"))
+            row_copy["pca_logreg_accuracy"] = _to_float(pca_eval.get("logreg_accuracy"))
+        else:
+            row_copy["pca_mse"] = None
+            row_copy["pca_fc_preservation"] = None
+            row_copy["pca_silhouette"] = None
+            row_copy["pca_logreg_accuracy"] = None
+
+        # Prefer explicitly stored comparison deltas when available; otherwise derive.
+        if isinstance(comparison_eval, dict):
+            row_copy["delta_mse"] = _to_float(comparison_eval.get("mse_delta_model_minus_pca"))
+            row_copy["delta_fc_preservation"] = _to_float(comparison_eval.get("fc_delta_model_minus_pca"))
+            row_copy["delta_silhouette"] = _to_float(comparison_eval.get("silhouette_delta_model_minus_pca"))
+            row_copy["delta_logreg_accuracy"] = _to_float(comparison_eval.get("logreg_delta_model_minus_pca"))
+        else:
+            row_copy["delta_mse"] = None
+            row_copy["delta_fc_preservation"] = None
+            row_copy["delta_silhouette"] = None
+            row_copy["delta_logreg_accuracy"] = None
+
+        if row_copy["delta_mse"] is None and row_copy["test_mse"] is not None and row_copy["pca_mse"] is not None:
+            row_copy["delta_mse"] = row_copy["test_mse"] - row_copy["pca_mse"]
+        if row_copy["delta_fc_preservation"] is None and row_copy["test_fc_preservation"] is not None and row_copy["pca_fc_preservation"] is not None:
+            row_copy["delta_fc_preservation"] = row_copy["test_fc_preservation"] - row_copy["pca_fc_preservation"]
+        if row_copy["delta_silhouette"] is None and row_copy["test_silhouette"] is not None and row_copy["pca_silhouette"] is not None:
+            row_copy["delta_silhouette"] = row_copy["test_silhouette"] - row_copy["pca_silhouette"]
+        if row_copy["delta_logreg_accuracy"] is None and row_copy["test_logreg_accuracy"] is not None and row_copy["pca_logreg_accuracy"] is not None:
+            row_copy["delta_logreg_accuracy"] = row_copy["test_logreg_accuracy"] - row_copy["pca_logreg_accuracy"]
+        if isinstance(model_params, dict):
+            # Standard models expose latent_dim/hidden_dim.
+            if row_copy.get("latent_dim") is None:
+                row_copy["latent_dim"] = model_params.get("latent_dim")
+            if row_copy.get("latent_dim") is None:
+                # AutoencoderKL-style naming.
+                row_copy["latent_dim"] = model_params.get("latent_channels")
+
+            row_copy["model_hidden_dim"] = model_params.get("hidden_dim")
+            if row_copy["model_hidden_dim"] is None:
+                # AutoencoderKL-style naming.
+                row_copy["model_hidden_dim"] = model_params.get("channels")
+        else:
+            row_copy["model_hidden_dim"] = None
+
+        data_cfg = data_params.get("data", {}) if isinstance(data_params, dict) else {}
+        if not isinstance(data_cfg, dict):
+            data_cfg = {}
+        row_copy["data_flatten"] = bool(data_cfg.get("flatten", False))
+        row_copy["data_transpose"] = bool(data_cfg.get("transpose", False))
+        row_copy["data_timepoints_as_samples"] = bool(data_cfg.get("timepoints_as_samples", False))
+        row_copy["data_fc_input"] = bool(data_cfg.get("fc_input", False))
+
+        loss_params = training_params.get("loss_params", {}) if isinstance(training_params, dict) else {}
+        if not isinstance(loss_params, dict):
+            loss_params = {}
+        row_copy["training_beta"] = _to_float(loss_params.get("beta"))
+        output.append(row_copy)
+    return output
+
+
+def _metric_outcome(model_value: float | None, pca_value: float | None, lower_is_better: bool) -> int | None:
+    """
+    Compare model vs PCA for a metric.
+    Returns:
+      1 -> model better
+      0 -> around same
+     -1 -> model worse
+    """
+    if model_value is None or pca_value is None:
+        return None
+    tolerance = max(1e-6, abs(pca_value) * 0.05)
+    delta = model_value - pca_value
+    if abs(delta) <= tolerance:
+        return 0
+    if lower_is_better:
+        return 1 if model_value < pca_value else -1
+    return 1 if model_value > pca_value else -1
+
+
+def _classify_vs_pca(row: dict) -> str | None:
+    outcomes = [
+        _metric_outcome(row.get("test_mse"), row.get("pca_mse"), lower_is_better=True),
+        _metric_outcome(row.get("test_fc_preservation"), row.get("pca_fc_preservation"), lower_is_better=False),
+        _metric_outcome(row.get("test_silhouette"), row.get("pca_silhouette"), lower_is_better=False),
+        _metric_outcome(row.get("test_logreg_accuracy"), row.get("pca_logreg_accuracy"), lower_is_better=False),
+    ]
+    if any(outcome is None for outcome in outcomes):
+        return None
+    if all(outcome == 1 for outcome in outcomes):
+        return "better"
+    if all(outcome == -1 for outcome in outcomes):
+        return "worse"
+    return "same"
+
+
+def _classification_label(category: str | None) -> str:
+    if category == "better":
+        return ">PCA"
+    if category == "worse":
+        return "<PCA"
+    if category == "same":
+        return "~PCA"
+    return "N/A"
+
+
+def _minmax_normalize(values: list[float | None]) -> list[float | None]:
+    valid = [v for v in values if v is not None]
+    if not valid:
+        return [None for _ in values]
+    vmin = min(valid)
+    vmax = max(valid)
+    if vmax == vmin:
+        return [0.0 if v is not None else None for v in values]
+    return [((v - vmin) / (vmax - vmin)) if v is not None else None for v in values]
+
+
+def _add_scores(rows: list[dict]) -> None:
+    """Compute PCA score (from deltas) and score (from raw test metrics)."""
+    mse_deltas = [_to_float(row.get("delta_mse")) for row in rows]
+    fc_deltas = [_to_float(row.get("delta_fc_preservation")) for row in rows]
+    sil_deltas = [_to_float(row.get("delta_silhouette")) for row in rows]
+    logreg_deltas = [_to_float(row.get("delta_logreg_accuracy")) for row in rows]
+
+    mse_norm = _minmax_normalize(mse_deltas)
+    fc_norm = _minmax_normalize(fc_deltas)
+    sil_norm = _minmax_normalize(sil_deltas)
+    logreg_norm = _minmax_normalize(logreg_deltas)
+
+    for idx, row in enumerate(rows):
+        fc_input_enabled = row.get("data_fc_input")
+        if isinstance(fc_input_enabled, str):
+            fc_input_enabled = fc_input_enabled.strip().lower() == "true"
+        fc_component = 0.5 if fc_input_enabled else fc_norm[idx]
+        silhouette_component = 0.0
+        if (
+            mse_norm[idx] is None
+            or fc_component is None
+            or logreg_norm[idx] is None
+        ):
+            row["pca_score"] = None
+            continue
+        row["pca_score"] = (1.0 - mse_norm[idx]) + fc_component + silhouette_component + logreg_norm[idx]
+
+    test_mse = [_to_float(row.get("test_mse")) for row in rows]
+    test_fc = [_to_float(row.get("test_fc_preservation")) for row in rows]
+    test_sil = [_to_float(row.get("test_silhouette")) for row in rows]
+    test_logreg = [_to_float(row.get("test_logreg_accuracy")) for row in rows]
+
+    test_mse_norm = _minmax_normalize(test_mse)
+    test_fc_norm = _minmax_normalize(test_fc)
+    test_sil_norm = _minmax_normalize(test_sil)
+    test_logreg_norm = _minmax_normalize(test_logreg)
+
+    for idx, row in enumerate(rows):
+        fc_input_enabled = row.get("data_fc_input")
+        if isinstance(fc_input_enabled, str):
+            fc_input_enabled = fc_input_enabled.strip().lower() == "true"
+        fc_component = 0.5 if fc_input_enabled else test_fc_norm[idx]
+        silhouette_component = 0.0
+        if (
+            test_mse_norm[idx] is None
+            or fc_component is None
+            or test_logreg_norm[idx] is None
+        ):
+            row["score"] = None
+            continue
+        row["score"] = (1.0 - test_mse_norm[idx]) + fc_component + silhouette_component + test_logreg_norm[idx]
+
+
+def _value_sort_key(value):
+    if isinstance(value, bool):
+        return (0, int(value))
+    if isinstance(value, (int, float)):
+        return (1, float(value))
+    return (2, str(value))
+
+
+def _value_label(value) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _load_experiments_spec(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _collect_param_paths(node, prefix: tuple[str, ...] = ()) -> set[tuple[str, ...]]:
+    paths: set[tuple[str, ...]] = set()
+    if isinstance(node, dict):
+        for key, value in node.items():
+            paths |= _collect_param_paths(value, prefix + (str(key),))
+        return paths
+    if isinstance(node, list):
+        if all(isinstance(item, dict) for item in node):
+            for item in node:
+                paths |= _collect_param_paths(item, prefix)
+            return paths
+        paths.add(prefix)
+        return paths
+    paths.add(prefix)
+    return paths
+
+
+PATH_TO_ROW_KEY = {
+    ("model", "latent_dim"): "latent_dim",
+    ("model", "hidden_dim"): "model_hidden_dim",
+    ("training", "loss_params", "beta"): "training_beta",
+    ("data", "data", "flatten"): "data_flatten",
+    ("data", "data", "transpose"): "data_transpose",
+    ("data", "data", "timepoints_as_samples"): "data_timepoints_as_samples",
+    ("data", "data", "fc_input"): "data_fc_input",
+}
+
+ROW_KEY_LABEL = {
+    "latent_dim": "Latent dim",
+    "model_hidden_dim": "Hidden dim",
+    "training_beta": "Beta",
+    "data_flatten": "Flattened data",
+    "data_transpose": "Transposed data",
+    "data_timepoints_as_samples": "Timepoints as samples",
+    "data_fc_input": "FC input",
+}
+
+
+def _parameter_options_for_model_type(model_type: str, experiments_spec: dict, rows: list[dict]) -> dict[str, str]:
+    model_spec = experiments_spec.get(model_type, {})
+    exp_params = model_spec.get("exp_params", {}) if isinstance(model_spec, dict) else {}
+    paths = _collect_param_paths(exp_params) if isinstance(exp_params, dict) else set()
+
+    options: dict[str, str] = {}
+    for path in sorted(paths):
+        path_key = ".".join(path)
+        if all(_get_param_value_from_row(row, path) is None for row in rows):
+            continue
+        options[path_key] = " / ".join(path)
+    return options
+
+
+def _get_param_value_from_row(row: dict, path: tuple[str, ...]):
+    if not path:
+        return None
+    root = path[0]
+    if root == "model":
+        current = row.get("_model_params")
+    elif root == "training":
+        current = row.get("_training_params")
+    elif root == "data":
+        current = row.get("_data_params")
+    else:
+        return None
+
+    for key in path[1:]:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _encode_group_value(value):
+    if isinstance(value, list):
+        return tuple(_encode_group_value(item) for item in value)
+    if isinstance(value, dict):
+        return tuple(sorted((str(k), _encode_group_value(v)) for k, v in value.items()))
+    return value
+
+
+def _display_group_value(value) -> str:
+    if isinstance(value, (list, dict, tuple)):
+        return json.dumps(value, sort_keys=True)
+    return _value_label(value)
+
+
+def _extract_selected_row(selection) -> int | None:
+    """Handle Streamlit dataframe selection payload variants."""
+    if selection is None:
+        return None
+
+    rows = None
+    cells = None
+    if isinstance(selection, dict):
+        rows = selection.get("rows")
+        cells = selection.get("cells")
+    else:
+        rows = getattr(selection, "rows", None)
+        cells = getattr(selection, "cells", None)
+
+    if isinstance(cells, list) and cells:
+        cell = cells[0]
+        if isinstance(cell, dict):
+            row = cell.get("row")
+            if isinstance(row, int):
+                return row
+
+    if isinstance(rows, list) and rows:
+        row = rows[0]
+        if isinstance(row, int):
+            return row
+
+    return None
+
+
+def _parse_optional_float(text: str) -> float | None:
+    stripped = text.strip()
+    if not stripped:
+        return None
+    return float(stripped)
+
+
+def _in_range(value, min_value: float | None, max_value: float | None) -> bool:
+    numeric = _to_float(value)
+    if numeric is None:
+        return False
+    if min_value is not None and numeric < min_value:
+        return False
+    if max_value is not None and numeric > max_value:
+        return False
+    return True
+
+
 def main() -> None:
     st.set_page_config(page_title="Training Tracker", layout="wide")
     st.markdown(
@@ -233,39 +733,37 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
-    manager = TrainingResultsManager(results_dir=_default_results_dir())
-    filters = _build_sidebar(manager)
+    results_dir = _default_results_dir()
+    manager = TrainingResultsManager(results_dir=results_dir)
+    experiments_spec = _load_experiments_spec(_default_experiments_config_path())
+    rows = _load_rows_cached(str(results_dir), _results_fingerprint(results_dir))
 
-    rows = manager.list_experiments(
-        filters={
-            "model_type": filters.get("model_type"),
-            "best_val_loss_max": filters.get("best_val_loss_max"),
-            "num_epochs_min": filters.get("num_epochs_min"),
-            "created_after": filters.get("created_after"),
-        },
-        sort_by="created_at",
-        ascending=False,
-        limit=None,
-    )
-
-    selected_model_types = filters.get("_selected_model_types", set())
-    rows = [
-        row for row in rows
-        if (not selected_model_types or row.get("model_type") in selected_model_types)
-    ]
-
-    total_rows = manager.list_experiments(limit=None)
     st.title("Training Tracker")
-    best_loss = min((row.get("best_val_loss") for row in rows if row.get("best_val_loss") is not None), default=None)
-    st.caption(
-        f"Experiments: {len(total_rows)}   |   "
-        f"Filtered: {len(rows)}   |   "
-        f"Best val loss: {best_loss:.4f}" if best_loss is not None else
-        f"Experiments: {len(total_rows)}   |   Filtered: {len(rows)}   |   Best val loss: N/A"
+    pca_categories = [_classify_vs_pca(row) for row in rows]
+    worse_count = sum(1 for category in pca_categories if category == "worse")
+    same_count = sum(1 for category in pca_categories if category == "same")
+    better_count = sum(1 for category in pca_categories if category == "better")
+    best_row = max(
+        (row for row in rows if row.get("significance") is not None),
+        key=lambda row: row["significance"],
+        default=None,
     )
 
+    best_model_text = "N/A"
+    if best_row is not None:
+        best_model_text = (
+            f"{best_row.get('model_type', 'unknown')} "
+            f"({best_row.get('experiment_id')}, significance={best_row.get('significance'):.4f})"
+        )
+
+    st.caption(
+        f"All experiments: {len(rows)}   |   "
+        f"Worse than PCA: {worse_count}   |   "
+        f"Same as PCA: {same_count}   |   "
+        f"Better than PCA: {better_count}"
+    )
     if not rows:
-        st.info("No experiments match the selected filters.")
+        st.info("No experiments available.")
         return
 
     table_df = pd.DataFrame(rows)
@@ -273,172 +771,403 @@ def main() -> None:
         "experiment_id",
         "created_at",
         "model_type",
-        "best_val_loss",
-        "num_epochs",
-        "learning_rate",
         "latent_dim",
+        "score",
+        "pca_score",
+        "pca_class",
+        "best_val_loss",
+        "test_mse",
+        "test_fc_preservation",
+        "test_silhouette",
+        "test_logreg_accuracy",
+        "delta_mse",
+        "delta_fc_preservation",
+        "delta_silhouette",
+        "delta_logreg_accuracy",
     ]
     present_cols = [col for col in visible_cols if col in table_df.columns]
-    top_tabs = st.tabs(["Selected Experiments", "Experiment Details", "Compare Experiments"])
+    view_options = ["All Experiments", "Experiment Details", "Compare Experiments", "Parameter Comparison"]
 
-    with top_tabs[0]:
+    if "pending_main_view" in st.session_state:
+        st.session_state["main_view"] = st.session_state.pop("pending_main_view")
+    if "main_view" not in st.session_state:
+        st.session_state["main_view"] = "All Experiments"
+    active_view = st.segmented_control(
+        "View",
+        options=view_options,
+        default=st.session_state["main_view"],
+        key="main_view",
+        label_visibility="collapsed",
+    )
+
+    experiment_options = [row["experiment_id"] for row in rows]
+    if "details_experiment_id" not in st.session_state or st.session_state["details_experiment_id"] not in experiment_options:
+        st.session_state["details_experiment_id"] = experiment_options[0]
+
+    if active_view == "All Experiments":
         st.subheader("Experiments")
-        st.dataframe(table_df[present_cols], width="stretch", hide_index=True)
+        st.caption("Data filters")
+        filter_cols = st.columns(4)
+        with filter_cols[0]:
+            st.markdown("**Flatten**")
+            flatten_true = st.checkbox("True", value=False, key="allf_flatten_true")
+            flatten_false = st.checkbox("False", value=False, key="allf_flatten_false")
+        with filter_cols[1]:
+            st.markdown("**Transpose**")
+            transpose_true = st.checkbox("True", value=False, key="allf_transpose_true")
+            transpose_false = st.checkbox("False", value=False, key="allf_transpose_false")
+        with filter_cols[2]:
+            st.markdown("**Timepoints as samples**")
+            tas_true = st.checkbox("True", value=False, key="allf_tas_true")
+            tas_false = st.checkbox("False", value=False, key="allf_tas_false")
+        with filter_cols[3]:
+            st.markdown("**FC input**")
+            fc_input_true = st.checkbox("True", value=False, key="allf_fc_input_true")
+            fc_input_false = st.checkbox("False", value=False, key="allf_fc_input_false")
 
-    with top_tabs[1]:
+        def _bool_match(value: bool, want_true: bool, want_false: bool) -> bool:
+            if want_true and want_false:
+                return True
+            if want_true:
+                return value is True
+            if want_false:
+                return value is False
+            return True
+
+        filtered_table_df = table_df[
+            table_df.apply(
+                lambda row: _bool_match(bool(row.get("data_flatten", False)), flatten_true, flatten_false)
+                and _bool_match(bool(row.get("data_transpose", False)), transpose_true, transpose_false)
+                and _bool_match(bool(row.get("data_timepoints_as_samples", False)), tas_true, tas_false)
+                and _bool_match(bool(row.get("data_fc_input", False)), fc_input_true, fc_input_false),
+                axis=1,
+            )
+        ]
+        if filtered_table_df.empty:
+            st.info("No experiments match the selected data filters.")
+            return
+
+        table_state = st.dataframe(
+            filtered_table_df[present_cols],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "score": "score",
+                "pca_score": "PCA score",
+            },
+            on_select="rerun",
+            selection_mode="single-cell",
+            key="all_experiments_table",
+        )
+        selected_row = _extract_selected_row(getattr(table_state, "selection", None))
+        if selected_row is not None:
+            selected_experiment_id = filtered_table_df.iloc[selected_row]["experiment_id"]
+            if (
+                st.session_state.get("details_experiment_id") != selected_experiment_id
+                or st.session_state.get("main_view") != "Experiment Details"
+            ):
+                st.session_state["details_experiment_id"] = selected_experiment_id
+                st.session_state["pending_main_view"] = "Experiment Details"
+
+    elif active_view == "Experiment Details":
         experiment_id = st.selectbox(
             "Experiment",
-            options=[row["experiment_id"] for row in rows],
-            index=0,
+            options=experiment_options,
+            index=experiment_options.index(st.session_state["details_experiment_id"]),
             key="details_experiment_id",
         )
 
-    metadata = manager.get_experiment(experiment_id)
-    history = manager.get_history(experiment_id)
-    tabs = top_tabs[1].tabs(["History", "Overview", "Raw JSON"])
+        metadata = manager.get_experiment(experiment_id)
+        history = manager.get_history(experiment_id)
+        tabs = st.tabs(["Evaluation", "History", "Overview", "Raw JSON"])
 
-    with tabs[0]:
-        history_df = _history_to_frame(history)
-        if history_df.empty:
-            st.warning("No history metrics available.")
-        else:
-            metric_suffixes = _available_metric_suffixes(list(history_df.columns))
-            visible_metrics = metric_suffixes[:3] if metric_suffixes else []
-            if not visible_metrics:
-                st.warning("No train/val metrics available.")
+        with tabs[0]:
+            _render_evaluation_tab(metadata)
+
+        with tabs[1]:
+            history_df = _history_to_frame(history)
+            if history_df.empty:
+                st.warning("No history metrics available.")
             else:
-                summary = metadata.get("summary", {})
-                val_pca_mse = _to_float(summary.get("val_pca_mse"))
-                recon_metrics = [metric for metric in visible_metrics if _is_recon_metric(metric)]
-                if recon_metrics:
-                    pca_target_metrics = set(recon_metrics)
-                elif "loss" in visible_metrics:
-                    pca_target_metrics = {"loss"}
+                metric_suffixes = _available_metric_suffixes(list(history_df.columns))
+                visible_metrics = metric_suffixes[:3] if metric_suffixes else []
+                if not visible_metrics:
+                    st.warning("No train/val metrics available.")
                 else:
-                    pca_target_metrics = set()
+                    summary = metadata.get("summary", {})
+                    val_pca_mse = _to_float(summary.get("val_pca_mse"))
+                    recon_metrics = [metric for metric in visible_metrics if _is_recon_metric(metric)]
+                    if recon_metrics:
+                        pca_target_metrics = set(recon_metrics)
+                    elif "loss" in visible_metrics:
+                        pca_target_metrics = {"loss"}
+                    else:
+                        pca_target_metrics = set()
 
-                plot_columns = st.columns(len(visible_metrics))
-                for container, metric_suffix in zip(plot_columns, visible_metrics):
-                    _render_pair_plot(
-                        container,
-                        history_df,
-                        _metric_title(metric_suffix),
-                        train_candidates=[f"train_{metric_suffix}"],
-                        val_candidates=[f"val_{metric_suffix}"],
-                        pca_reference=val_pca_mse if metric_suffix in pca_target_metrics else None,
-                    )
+                    plot_columns = st.columns(len(visible_metrics))
+                    for container, metric_suffix in zip(plot_columns, visible_metrics):
+                        _render_pair_plot(
+                            container,
+                            history_df,
+                            _metric_title(metric_suffix),
+                            train_candidates=[f"train_{metric_suffix}"],
+                            val_candidates=[f"val_{metric_suffix}"],
+                            pca_reference=val_pca_mse if metric_suffix in pca_target_metrics else None,
+                        )
 
-    with tabs[1]:
-        left_meta, right_meta = st.columns(2)
-        with left_meta:
-            st.markdown("**Run Info**")
-            st.write(f"Experiment ID: `{metadata.get('experiment_id', 'N/A')}`")
-            st.write(f"Created: `{metadata.get('created_at', 'N/A')}`")
-            st.write(f"Model type: `{metadata.get('model_type', 'N/A')}`")
-            st.write(f"Schema version: `{metadata.get('schema_version', 'N/A')}`")
-        with right_meta:
-            summary = metadata.get("summary", {})
-            st.markdown("**Summary**")
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Best val loss", f"{summary.get('best_val_loss', 'N/A')}")
-            c2.metric("Best epoch", f"{summary.get('best_epoch', 'N/A')}")
-            c3.metric("Epochs", f"{summary.get('num_epochs', 'N/A')}")
+        with tabs[2]:
+            left_meta, right_meta = st.columns(2)
+            with left_meta:
+                st.markdown("**Run Info**")
+                st.write(f"Experiment ID: `{metadata.get('experiment_id', 'N/A')}`")
+                st.write(f"Created: `{metadata.get('created_at', 'N/A')}`")
+                st.write(f"Model type: `{metadata.get('model_type', 'N/A')}`")
+                st.write(f"Schema version: `{metadata.get('schema_version', 'N/A')}`")
+            with right_meta:
+                summary = metadata.get("summary", {})
+                st.markdown("**Summary**")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Best val loss", f"{summary.get('best_val_loss', 'N/A')}")
+                c2.metric("Best epoch", f"{summary.get('best_epoch', 'N/A')}")
+                c3.metric("Epochs", f"{summary.get('num_epochs', 'N/A')}")
 
-        _render_kv_section("Model Parameters", metadata.get("model_params"))
-        _render_kv_section("Training Parameters", metadata.get("training_params"))
-        data_params = metadata.get("data_params")
-        if isinstance(data_params, dict) and ("data" in data_params or "filter" in data_params):
-            if "data" in data_params:
-                _render_kv_section("Data Parameters: data", data_params.get("data"))
-            if "filter" in data_params:
-                _render_kv_section("Data Parameters: filter", data_params.get("filter"))
-            remaining = {k: v for k, v in data_params.items() if k not in {"data", "filter"}}
-            if remaining:
-                _render_kv_section("Data Parameters: other", remaining)
-        else:
-            _render_kv_section("Data Parameters", data_params)
-        _render_kv_section("Artifacts", metadata.get("artifacts"))
-        st.markdown("**Tags**")
-        st.write(", ".join(metadata.get("tags", [])) or "None")
-
-        st.markdown("---")
-        if st.button("Overwrite current config with this experiment", key=f"overwrite_{experiment_id}"):
-            try:
-                _overwrite_configs_from_metadata(metadata, _default_config_dir())
-            except Exception as exc:
-                st.error(f"Failed to overwrite configs: {exc}")
+            _render_kv_section("Model Parameters", metadata.get("model_params"))
+            _render_kv_section("Training Parameters", metadata.get("training_params"))
+            data_params = metadata.get("data_params")
+            if isinstance(data_params, dict) and ("data" in data_params or "filter" in data_params):
+                if "data" in data_params:
+                    _render_kv_section("Data Parameters: data", data_params.get("data"))
+                if "filter" in data_params:
+                    _render_kv_section("Data Parameters: filter", data_params.get("filter"))
+                remaining = {k: v for k, v in data_params.items() if k not in {"data", "filter"}}
+                if remaining:
+                    _render_kv_section("Data Parameters: other", remaining)
             else:
-                st.success("Updated config/model.yml, config/training.yml, and config/data.yml")
+                _render_kv_section("Data Parameters", data_params)
+            _render_kv_section("Artifacts", metadata.get("artifacts"))
+            st.markdown("**Tags**")
+            st.write(", ".join(metadata.get("tags", [])) or "None")
 
-    with tabs[2]:
-        st.subheader("Metadata JSON")
-        st.code(json.dumps(metadata, indent=2), language="json")
-        st.subheader("History JSON")
-        st.code(json.dumps(history, indent=2), language="json")
+            st.markdown("---")
+            if st.button("Overwrite current config with this experiment", key=f"overwrite_{experiment_id}"):
+                try:
+                    _overwrite_configs_from_metadata(metadata, _default_config_dir())
+                except Exception as exc:
+                    st.error(f"Failed to overwrite configs: {exc}")
+                else:
+                    st.success("Updated config/model.yml, config/training.yml, and config/data.yml")
 
-    with top_tabs[2]:
+        with tabs[3]:
+            st.subheader("Metadata JSON")
+            st.code(json.dumps(metadata, indent=2), language="json")
+            st.subheader("History JSON")
+            st.code(json.dumps(history, indent=2), language="json")
+
+    elif active_view == "Compare Experiments":
         st.subheader("Compare Experiments")
-        experiment_options = [row["experiment_id"] for row in rows]
-        id_to_model = {row["experiment_id"]: row.get("model_type", "model") for row in rows}
+        row_by_id = {row["experiment_id"]: row for row in rows}
         default_compare = experiment_options[:2] if len(experiment_options) >= 2 else experiment_options[:1]
         selected_compare_ids = st.multiselect(
             "Experiments to compare",
             options=experiment_options,
-            default=default_compare,
+            default=st.session_state.get("compare_experiment_ids", default_compare),
             key="compare_experiment_ids",
         )
 
+        selected_compare_ids = [exp_id for exp_id in selected_compare_ids if exp_id in row_by_id]
         if not selected_compare_ids:
             st.info("Select at least one experiment.")
             return
 
-        base_colors = [
-            "#1f77b4",
-            "#2ca02c",
-            "#9467bd",
-            "#8c564b",
-            "#17becf",
-            "#bcbd22",
-            "#ff7f0e",
-            "#d62728",
-            "#7f7f7f",
-            "#e377c2",
+        metric_specs = [
+            ("test_mse", "MSE"),
+            ("test_fc_preservation", "FC Preservation"),
+            ("test_silhouette", "Silhouette"),
+            ("test_logreg_accuracy", "LogReg Accuracy"),
         ]
+        pca_metric_by_model_metric = {
+            "test_mse": "pca_mse",
+            "test_fc_preservation": "pca_fc_preservation",
+            "test_silhouette": "pca_silhouette",
+            "test_logreg_accuracy": "pca_logreg_accuracy",
+        }
+        selected_rows = [row_by_id[exp_id] for exp_id in selected_compare_ids]
+        display_labels = [str(row.get("experiment_id", "exp")) for row in selected_rows]
+        param_details = _build_compare_param_details(selected_rows)
 
-        series_map: dict[str, pd.Series] = {}
-        series_colors: list[str] = []
-        missing_loss: list[str] = []
-        for idx, compare_id in enumerate(selected_compare_ids):
-            compare_history = manager.get_history(compare_id)
-            compare_df = _history_to_frame(compare_history)
-            color_train = base_colors[idx % len(base_colors)]
-            color_val = _lighten_hex(color_train, factor=0.5)
-            short_id = _short_experiment_id(compare_id)
-            model_name = str(id_to_model.get(compare_id, "model")).lower()
+        for idx in range(0, len(metric_specs), 2):
+            row_metrics = metric_specs[idx:idx + 2]
+            row_cols = st.columns(2)
+            for col, (metric_key, metric_title) in zip(row_cols, row_metrics):
+                plot_rows = []
+                for label, detail, exp_row in zip(display_labels, param_details, selected_rows):
+                    metric_value = _to_float(exp_row.get(metric_key))
+                    if metric_value is None:
+                        continue
+                    pca_metric_value = _to_float(exp_row.get(pca_metric_by_model_metric[metric_key]))
+                    plot_rows.append(
+                        {
+                            "model": label,
+                            "model_value": metric_value,
+                            "pca_value": pca_metric_value,
+                            "parameters": detail,
+                        }
+                    )
 
-            has_metric = False
-            if "train_loss" in compare_df.columns:
-                series_map[f"train_{model_name}_{short_id}"] = compare_df.set_index("epoch")["train_loss"]
-                series_colors.append(color_train)
-                has_metric = True
-            if "val_loss" in compare_df.columns:
-                series_map[f"val_{model_name}_{short_id}"] = compare_df.set_index("epoch")["val_loss"]
-                series_colors.append(color_val)
-                has_metric = True
-            if not has_metric:
-                missing_loss.append(compare_id)
+                with col:
+                    st.markdown(f"**{metric_title}**")
+                    if not plot_rows:
+                        st.info("No data")
+                    else:
+                        metric_df = pd.DataFrame(plot_rows)
+                        bars = alt.Chart(metric_df).mark_bar().encode(
+                            x=alt.X("model:N", sort=None, title=None),
+                            y=alt.Y("model_value:Q", title=metric_title),
+                            color=alt.Color("model:N", legend=None),
+                            tooltip=[
+                                alt.Tooltip("model:N", title="Experiment"),
+                                alt.Tooltip("model_value:Q", title=f"Model {metric_title}", format=".6f"),
+                                alt.Tooltip("pca_value:Q", title=f"PCA {metric_title}", format=".6f"),
+                                alt.Tooltip("parameters:N", title="Unique params"),
+                            ],
+                        )
+                        pca_ticks = alt.Chart(metric_df).mark_tick(
+                            color="#111111",
+                            thickness=2,
+                            size=28,
+                        ).encode(
+                            x=alt.X("model:N", sort=None, title=None),
+                            y=alt.Y("pca_value:Q", title=metric_title),
+                            tooltip=[
+                                alt.Tooltip("model:N", title="Experiment"),
+                                alt.Tooltip("pca_value:Q", title=f"PCA {metric_title}", format=".6f"),
+                            ],
+                        )
+                        st.altair_chart(
+                            (bars + pca_ticks).properties(height=320),
+                            use_container_width=True,
+                        )
 
-        if not series_map:
-            st.warning("None of the selected experiments contain train_loss or val_loss.")
-            return
+    elif active_view == "Parameter Comparison":
+        st.subheader("Parameter Comparison")
+        filter_col, charts_col = st.columns([1, 3], gap="large")
 
-        combined_df = pd.DataFrame(series_map)
-        st.line_chart(combined_df, color=series_colors)
-        if missing_loss:
-            st.caption(
-                "Skipped experiments without total loss metrics: "
-                + ", ".join(missing_loss)
+        with filter_col:
+            st.markdown("**Filters**")
+            model_type_options = sorted({str(row.get("model_type", "unknown")) for row in rows})
+            selected_model_type = st.selectbox(
+                "Model type",
+                options=model_type_options,
+                key="param_filter_model_type",
             )
+            parameter_options = _parameter_options_for_model_type(
+                model_type=selected_model_type,
+                experiments_spec=experiments_spec,
+                rows=rows,
+            )
+            if not parameter_options:
+                parameter_options = {
+                    ".".join(path): ROW_KEY_LABEL.get(row_key, ".".join(path))
+                    for path, row_key in PATH_TO_ROW_KEY.items()
+                }
+            parameter_keys = list(parameter_options.keys())
+            if (
+                "param_filter_param_key" in st.session_state
+                and st.session_state["param_filter_param_key"] not in parameter_keys
+            ):
+                st.session_state["param_filter_param_key"] = parameter_keys[0]
+            selected_param_key = st.selectbox(
+                "Parameter",
+                options=parameter_keys,
+                format_func=lambda key: parameter_options.get(key, key),
+                key="param_filter_param_key",
+            )
+            selected_param_path = tuple(selected_param_key.split("."))
+
+            candidate_rows = [
+                row for row in rows
+                if str(row.get("model_type", "unknown")) == selected_model_type
+                and _get_param_value_from_row(row, selected_param_path) is not None
+            ]
+            st.caption(f"Selected for comparison: {len(candidate_rows)}")
+            if st.button("Load for comparison", key="param_filter_load"):
+                st.session_state["param_compare_model_type"] = selected_model_type
+                st.session_state["param_compare_key"] = selected_param_key
+
+        with charts_col:
+            loaded_model_type = st.session_state.get("param_compare_model_type")
+            loaded_param_key = st.session_state.get("param_compare_key")
+            if not loaded_model_type or not loaded_param_key:
+                st.info("Select model + parameter and click Load for comparison.")
+                return
+
+            selected_rows = [
+                row for row in rows
+                if str(row.get("model_type", "unknown")) == loaded_model_type
+                and _get_param_value_from_row(row, tuple(loaded_param_key.split("."))) is not None
+            ]
+            if not selected_rows:
+                st.info("No runs available for loaded model/parameter selection.")
+                return
+
+            st.caption(
+                f"Loaded: model={loaded_model_type}, "
+                f"parameter={parameter_options.get(loaded_param_key, loaded_param_key)}"
+            )
+
+            metric_specs = [
+                ("test_mse", "MSE"),
+                ("test_fc_preservation", "FC Preservation"),
+                ("test_silhouette", "Silhouette"),
+                ("test_logreg_accuracy", "LogReg Accuracy"),
+            ]
+
+            # Aggregate each metric by parameter value.
+            grouped: dict[object, dict[str, list[float]]] = {}
+            loaded_param_path = tuple(loaded_param_key.split("."))
+            for row in selected_rows:
+                param_value = _get_param_value_from_row(row, loaded_param_path)
+                encoded_param_value = _encode_group_value(param_value)
+                if encoded_param_value not in grouped:
+                    grouped[encoded_param_value] = {metric_key: [] for metric_key, _ in metric_specs}
+                for metric_key, _ in metric_specs:
+                    metric_value = _to_float(row.get(metric_key))
+                    if metric_value is not None:
+                        grouped[encoded_param_value][metric_key].append(metric_value)
+
+            sorted_param_values = sorted(grouped.keys(), key=_value_sort_key)
+
+            for idx in range(0, len(metric_specs), 2):
+                row_metrics = metric_specs[idx:idx + 2]
+                row_cols = st.columns(2)
+                for col, (metric_key, metric_title) in zip(row_cols, row_metrics):
+                    x_values = []
+                    y_values = []
+                    for param_value in sorted_param_values:
+                        values = grouped[param_value].get(metric_key, [])
+                        if not values:
+                            continue
+                        x_values.append(_display_group_value(param_value))
+                        y_values.append(sum(values) / len(values))
+
+                    with col:
+                        st.markdown(f"**{metric_title}**")
+                        if not y_values:
+                            st.info("No data")
+                        else:
+                            metric_df = pd.DataFrame(
+                                {
+                                    "parameter_value": x_values,
+                                    "avg_metric": y_values,
+                                }
+                            )
+                            st.bar_chart(
+                                metric_df,
+                                x="parameter_value",
+                                y="avg_metric",
+                                y_label=metric_title,
+                                color="parameter_value"
+                            )
 
 
 if __name__ == "__main__":

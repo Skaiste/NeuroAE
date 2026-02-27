@@ -98,6 +98,36 @@ class TrainingResultsManager:
 
         return read_json(self._resolve_from_base(history_path))
 
+    def set_evaluation_metrics(
+        self,
+        experiment_id: str,
+        model_metrics: dict,
+        pca_metrics: Optional[dict] = None,
+    ) -> None:
+        """Store evaluation metrics on an existing experiment metadata record."""
+        index_entry = find_index_entry(self.index_path, experiment_id)
+        if index_entry is None:
+            raise FileNotFoundError(f"Experiment not found in index: {experiment_id}")
+
+        metadata_path = self._resolve_from_base(index_entry["metadata_path"])
+        metadata = read_json(metadata_path)
+
+        metadata["evaluation"] = {
+            "model": deepcopy(model_metrics) if isinstance(model_metrics, dict) else {},
+            "pca": deepcopy(pca_metrics) if isinstance(pca_metrics, dict) else None,
+            "updated_at": self._now_iso(),
+        }
+
+        write_json_atomic(metadata_path, metadata)
+
+    def get_evaluation_metrics(self, experiment_id: str) -> dict:
+        """Return stored evaluation metrics for an experiment, if present."""
+        metadata = self.get_experiment(experiment_id)
+        evaluation = metadata.get("evaluation")
+        if not isinstance(evaluation, dict):
+            return {}
+        return evaluation
+
     def rebuild_index(self) -> None:
         entries: list[dict[str, Any]] = []
         for metadata_path in sorted(self.experiments_dir.glob("*/metadata.json")):
