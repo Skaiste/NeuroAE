@@ -11,8 +11,3 @@ trd_party_path = src_path / "3rd_party"
 libbrain_path = trd_party_path / "LibBrain"
 if str(libbrain_path) not in sys.path:
     sys.path.insert(0, str(libbrain_path))
-
-# add rsfMRI-VAE to path to import BetaVEA
-rsfMRI_path = trd_party_path / "rsfMRI-VAE"
-if str(rsfMRI_path) not in sys.path:
-    sys.path.insert(0, str(rsfMRI_path))

@@ -29,18 +29,15 @@ Full configuration reference for all models and config files:
 ## Implementation Checklist
 - [x] Data Loading
 - [x] Training Framework base
-- [ ] Inference Framework base
+- [x] Evaluation Framework base
 - [x] Data pre-processing (filtering + normalisation)
-- [ ] Baseline models
+- [x] Baseline models
 - [ ] Model improvements
-- [ ] Framework for parameter tuning
-- [ ] Evaluation framework
+- [x] Framework for parameter tuning
 
 #### Todo's:
 - keep reading papers and start looking into other types of autoencoders to implement
 - explore normalisation region based and not per feature when flattening a sample
-- write a hyperparameter search script to find best training parameters for each architecture
-- look into evaluation
 - for experimentation purposes only, train a general VAE, run inference on all data, to extract latent properties and try out clustering algorithms to see if any most clear clusters could come close to the labels
 
 ## Report Writing Checklist

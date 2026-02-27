@@ -11,7 +11,7 @@ def loss_params2str(train_params, train_batches, val_params, val_batches):
     val_pstr = _format_loss_dict(val_params, "Val", val_batches)
     return f"{train_pstr} | {val_pstr}"
 
-def train_vae_basic(
+def train_vae(
     model,
     train_loader,
     val_loader,
@@ -21,10 +21,14 @@ def train_vae_basic(
     device='cuda' if torch.cuda.is_available() else 'cpu',
     save_dir='./checkpoints',
     name='basicVAE_general',
-    pca=None
+    pca=None,
+    noise=None
 ):
     device = torch.device(device)
     model = model.to(device)
+
+    if noise is not None:
+        noise = {k:v for p in noise for k,v in p.items()}
 
     history = {
         'train': {},
@@ -38,6 +42,14 @@ def train_vae_basic(
         model.train()
         for batch_idx, (data, _) in enumerate(train_loader):
             x = data.to(device)
+
+            if noise is not None:
+                if noise['type'] == 'gaussian':
+                    n = torch.randn_like(x) + float(noise['std'])
+                    x += n
+                elif noise['type'] == 'mask':
+                    n = (torch.rand_like(x) > float(noise['ratio'])).float()
+                    x *= n
 
             optimizer.zero_grad()
 
@@ -104,7 +116,6 @@ def train_vae_basic(
             total_mse_pca += mse_pca.item()
             num_batches += 1
         mse_pca = float(total_mse_pca / num_batches)
-        
             
     print("Training complete!")
     return history, mse_pca

@@ -125,8 +125,6 @@ class ADNI_B_N193_filtered(ADNI_B_N193_no_filt):
         print(f'----------- done filtering All --------------')
 
 
-
-
 def load_adni_n193(
     data_dir=None,
     discard_AD_ABminus=True,
@@ -263,6 +261,7 @@ class ADNIDataset(Dataset):
     def __init__(self, 
         timeseries_data, 
         labels=None, 
+        subject_ids=None,
         transpose=False, 
         flatten=True, 
         normaliser=None, 
@@ -292,6 +291,7 @@ class ADNIDataset(Dataset):
         self.timepoints_as_samples = timepoints_as_samples
         self.fc_input = fc_input
         self.original_shape = None
+        self.subject_ids = subject_ids
 
         assert not (self.truncate_features and self.pad_features), 'Can only choose to pad or truncate features not both.'
         assert not (self.timepoints_as_samples and self.flatten), 'Can only choose to flatten or to treat timepoints as samples, not both.'
@@ -316,6 +316,8 @@ class ADNIDataset(Dataset):
             timepoint_dim = self.data.shape[1]
             self.data = self.data.reshape(-1, self.data.shape[-1])
             labels = np.repeat(labels, timepoint_dim).tolist()
+            if subject_ids is not None:
+                self.subject_ids = np.repeat(subject_ids, timepoint_dim).tolist()
 
         if normaliser is not None:
             if fc_input or not flatten and not timepoints_as_samples:
@@ -347,6 +349,8 @@ class ADNIDataset(Dataset):
             self.data = self.data[:,:,:ft_size]
 
         self.labels = labels if labels is not None else [None] * len(self.data)
+        if self.subject_ids is None:
+            self.subject_ids = [None] * len(self.data)
         
     def __len__(self):
         return len(self.data)
@@ -633,9 +637,9 @@ def prepare_data_loaders(
                 "split_mode requires 'datasplit_file' to be set when not using none mode."
             )
 
-        train_data, train_labels = [], []
-        val_data, val_labels = [], []
-        test_data, test_labels = [], []
+        train_data, train_ids, train_labels = [], [], []
+        val_data, val_ids, val_labels = [], [], []
+        test_data, test_ids, test_labels = [], [], []
 
         split_loaded = False
         if split_mode == "load" and split_path.exists():
@@ -653,12 +657,15 @@ def prepare_data_loaders(
                 seen_subjects.add(subject_id)
                 if split_name == "train":
                     train_data.append(timeseries)
+                    train_ids.append(subject_id)
                     train_labels.append(label)
                 elif split_name == "val":
                     val_data.append(timeseries)
+                    val_ids.append(subject_id)
                     val_labels.append(label)
                 else:
                     test_data.append(timeseries)
+                    test_ids.append(subject_id)
                     test_labels.append(label)
 
             missing_subjects = set(split_assignments.keys()).difference(seen_subjects)
@@ -683,12 +690,15 @@ def prepare_data_loaders(
             test_indices = indices[n_train + n_val:]
 
             train_data = [all_timeseries[i] for i in train_indices]
+            train_ids = [all_subject_ids[i] for i in train_indices]
             train_labels = [all_labels[i] for i in train_indices]
 
             val_data = [all_timeseries[i] for i in val_indices]
+            val_ids = [all_subject_ids[i] for i in val_indices]
             val_labels = [all_labels[i] for i in val_indices]
 
             test_data = [all_timeseries[i] for i in test_indices]
+            test_ids = [all_subject_ids[i] for i in test_indices]
             test_labels = [all_labels[i] for i in test_indices]
 
             if split_mode == "create":
@@ -731,7 +741,7 @@ def prepare_data_loaders(
     
     # Create PyTorch datasets with normalization
     train_dataset = ADNIDataset(
-        train_data, train_labels, 
+        train_data, train_labels, train_ids,
         transpose=transpose, flatten=flatten, 
         normaliser=normaliser, pad_features=pad_features,
         truncate_features=truncate_features,
@@ -754,7 +764,7 @@ def prepare_data_loaders(
     }
     
     if val_data:
-        val_dataset = ADNIDataset(val_data, val_labels,
+        val_dataset = ADNIDataset(val_data, val_labels, val_ids,
             transpose=transpose, flatten=flatten, 
             normaliser=normaliser, pad_features=pad_features,
             truncate_features=truncate_features,
@@ -768,7 +778,7 @@ def prepare_data_loaders(
         result['num_samples']['val'] = len(val_dataset)
     
     if test_data:
-        test_dataset = ADNIDataset(test_data, test_labels,
+        test_dataset = ADNIDataset(test_data, test_labels, test_ids,
             transpose=transpose, flatten=flatten, 
             normaliser=normaliser, pad_features=pad_features,
             truncate_features=truncate_features,

@@ -1,7 +1,7 @@
 model:
   freeze_encoder: false
   reset_decoder: false
-  name: DeterministicAE
-  hidden_dims: [256]
-  latent_dim: 16
-  final_activation: sigmoid
+  name: AutoencoderKL
+  channels: [256]
+  num_res_blocks: 2
+  latent_channels: 16

@@ -1,0 +1,127 @@
+default:
+  data:
+    data:
+      batch_size: 32
+      groups: [HC, MCI, AD]
+      random_seed: 42
+      datasplit_file: data/train_val_test_split.csv
+      datasplit_mode: load
+      normalize: true
+      transpose: false
+      pad_features: false
+      truncate_features: false
+      flatten: true
+      timepoints_as_samples: false
+      fc_input: false
+
+    filter:
+      apply_demean: true1
+      apply_detrend: true
+      apply_finalDetrend: false
+      fhi: 0.08
+      flp: 0.01
+      k: 2
+      remove_artifacts: true
+      tr: 3000
+      type: BandPassFilter
+  model:
+    freeze_encoder: false
+    reset_decoder: false
+  training:
+    num_epochs: 20
+    save_dir: ./models
+    learning_rate: 1e-3
+    weight_decay: 1e-4
+    loss_params:
+      loss_per_feature: true
+
+LinearAE:
+  static_params:
+    model:
+      name: LinearAE
+
+  exp_params:
+    data:
+      data:
+      - transpose: true
+        flatten: true
+      - flatten: true
+      - flatten: false
+        timepoints_as_samples: true
+      - flatten: false
+        fc_input: true
+    model:
+      hidden_dim: [1024, 512, 256, 128]
+      latent_dim: [64, 32, 10, 4]
+    training:
+      loss_params:
+        beta: [1.0, 0.75, 0.5]
+
+BasicVAE:
+  static_params:
+    model:
+      name: BasicVAE
+
+  exp_params:
+    data:
+      data:
+      - transpose: true
+        flatten: true
+      - flatten: true
+      - flatten: false
+        timepoints_as_samples: true
+      - flatten: false
+        fc_input: true
+    model:
+      hidden_dim: [[1024, 512, 256, 128], [512, 256, 128], [512, 256], [256, 128]]
+      latent_dim: [64, 32, 10, 4]
+    training:
+      loss_params:
+        beta: [1.0, 0.75, 0.5]
+
+
+AutoencoderKL:
+  static_params:
+    data:
+      data:
+        flatten: false
+        timepoints_as_samples: false
+        fc_input: false
+        pad_features: true
+    model:
+      name: AutoencoderKL
+
+  exp_params:
+    data:
+      data:
+      - transpose: false
+      - transpose: true
+    model:
+      channels: [[256, 128], [256], [128]]
+      latent_channels: [64, 32, 10, 4]
+      num_res_blocks: [1, 2, 4]
+    training:
+      loss_params:
+        beta: [1.0, 0.75, 0.5]
+
+SequentialAE:
+  static_params:
+    data:
+      data:
+        transpose: true
+        flatten: false
+        timepoints_as_samples: false
+        fc_input: false
+    model:
+      name: SequentialAE
+
+  exp_params:
+    model:
+      channels: [256, 128]
+      latent_channels: [64, 32, 10, 4]
+      dropout: [0.3, 0.5, 0.7]
+      cell: ['lstm', 'gru']
+
+    training:
+      loss_params:
+        beta: [1.0, 0.75, 0.5]

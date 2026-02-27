@@ -51,7 +51,7 @@ class BasicVAE(nn.Module):
     def __init__(self, 
         input_dim=784, 
         hidden_dims=[1024, 512, 256, 128], 
-        latent_dim=32, 
+        latent_dim=32,
         device='cuda' if torch.cuda.is_available() else 'cpu'
     ):
         super(BasicVAE, self).__init__()
@@ -84,10 +84,7 @@ class BasicVAE(nn.Module):
         return x_hat, mean, log_var, z
 
     def set_loss_fn_params(self, params):
-        if params is not None:
-            self.loss_fn_params = {k:v for p in params for k,v in p.items()}
-        else:
-            self.loss_fn_params = {}
+        self.loss_fn_params = params
     
     def loss(self, x, model_output):
         x_hat, mu, log_var, _ = model_output

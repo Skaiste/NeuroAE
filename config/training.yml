@@ -1,9 +1,9 @@
 training:
   learning_rate: 1e-3
   weight_decay: 1e-4
-  num_epochs: 60
+  num_epochs: 20
   save_dir: ./models
   loss_params:
-  - loss_per_feature: true
-  - beta: 0.5
-  - recon_distribution: bernoulli
+    loss_per_feature: true
+    beta: 1
+    recon_distribution: bernoulli

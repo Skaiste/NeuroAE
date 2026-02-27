@@ -15,10 +15,7 @@ class AutoencoderKL(MonaiAEKL):
         return reconstruction, z_mu, z_sigma, z
         
     def set_loss_fn_params(self, params):
-        if params is not None:
-            self.loss_fn_params = {k:v for p in params for k,v in p.items()}
-        else:
-            self.loss_fn_params = {}
+        self.loss_fn_params = params
     
     def loss(self, x, model_output):
         x_hat, z_mu, z_sigma, _ = model_output

@@ -8,9 +8,9 @@ data:
   datasplit_mode: load
   normalize: true
   transpose: false
-  pad_features: false
+  pad_features: true
   truncate_features: false
-  flatten: true
+  flatten: false
   timepoints_as_samples: false
   fc_input: false
 
