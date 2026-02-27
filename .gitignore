@@ -211,6 +211,7 @@ models/
 !src/neuroae/models/
 checkpoints/
 results/
+archive/
 
 .DS_Store
 

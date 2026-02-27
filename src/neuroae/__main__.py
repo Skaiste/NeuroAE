@@ -13,13 +13,15 @@ import yaml
 import itertools
 from copy import deepcopy
 from neuronumba.tools.filters import BandPassFilter
-from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
 
 from .utils import *
 from .load_data import load_adni, prepare_data_loaders
+from .models.pca import PCA
 from training_tracker import TrainingResultsManager
 
 CACHED_ADNI = None
+
 
 def load_config(config_path):
     def _normalize_numeric_values(value):
@@ -61,9 +63,15 @@ def load_data_from_config(data_dir, data_config):
         else:
             filter = None
 
+        if data_config['data'].get('normalize', False):
+            normaliser = StandardScaler()
+        else:
+            normaliser = None
+
         data_loader = load_adni(
             data_dir=data_dir,
             filter=filter,
+            normaliser=normaliser
         )
         CACHED_ADNI = data_loader
 
@@ -87,7 +95,6 @@ def load_data_from_config(data_dir, data_config):
         batch_size=data_config['data'].get('batch_size', 16),
         transpose=data_config['data'].get('transpose', False),
         flatten=data_config['data'].get('flatten', False),
-        normalize=data_config['data'].get('normalize', False),
         pad_features=data_config['data'].get('pad_features', False),
         truncate_features=data_config['data'].get('truncate_features', False),
         train_split=data_config['data'].get('train_split', 0.7),
@@ -141,7 +148,7 @@ def _build_training_summary(history, mse_pca):
     }
 
 
-def load_model_from_config(model_config, input_dim, device):
+def load_model_from_config(model_config, input_dim, timepoint_dim, device):
     model_name = model_config['model']['name']
     latent_dim = 0
 
@@ -157,8 +164,8 @@ def load_model_from_config(model_config, input_dim, device):
             device=device)
     elif model_name == "AutoencoderKL":
         from .models.monaiAEKL import AutoencoderKL
-        latent_dim = model_config['model'].get('latent_channels', 8)
-        channels = model_config['model'].get('channels', [64, 128, 256])
+        latent_dim = model_config['model'].get('latent_dim', 8)
+        channels = model_config['model'].get('hidden_dims', [64, 128, 256])
         attention_levels = model_config['model'].get('attention_levels', [False] * len(channels))
         model = AutoencoderKL(
             spatial_dims=1,
@@ -189,7 +196,7 @@ def load_model_from_config(model_config, input_dim, device):
         latent_dim = model_config['model'].get('latent_dim', 2)
         model = Perl2023(
             input_dim=input_dim[0],
-            intermediate_dim=model_config['model'].get('intermediate_dim', 1028),
+            intermediate_dim=model_config['model'].get('hidden_dim', 1028),
             latent_dim=latent_dim,
             output_activation=model_config['model'].get('output_activation', 'sigmoid'),
         )
@@ -209,7 +216,7 @@ def load_model_from_config(model_config, input_dim, device):
         latent_dim = model_config['model'].get('latent_dim', 2)
         model = LinearAE(
             input_dim=input_dim[0],
-            latent_dim=latent_dim,
+            latent_dim=latent_dim * timepoint_dim,
         )
     else:
         raise ValueError(f"Model name {model_name} not supported")
@@ -261,11 +268,8 @@ def run_training(model, model_name, latent_dim, loaders, training_config, model_
     print(f"Experiment ID: {experiment_id}")
 
     # PCA for validation fit on the training data
-    pca = PCA(latent_dim)
-    if len(loaders['train_loader'].dataset.data.shape) > 2:
-        pca.fit(loaders['train_loader'].dataset.data.reshape(loaders['train_loader'].dataset.data.shape[0], -1))
-    else:
-        pca.fit(loaders['train_loader'].dataset.data)
+    pca = PCA(loaders['train_loader'].dataset, latent_dim)
+    pca.fit(loaders['train_loader'].dataset.data)
 
     pathlib.Path(training_config['training']['save_dir']).mkdir(parents=True, exist_ok=True)
     history, mse_pca = train_vae(
@@ -306,7 +310,7 @@ def run_evaluation(model, latent_dim, loaders, training_config, device, experime
     from .eval import eval_vae
 
     # Fit PCA on training data and pass it into evaluation for baseline comparison.
-    pca = PCA(latent_dim)
+    pca = PCA(loaders['train_loader'].dataset, latent_dim)
     train_data = loaders['train_loader'].dataset.data
     if len(train_data.shape) > 2:
         pca.fit(train_data.reshape(train_data.shape[0], -1))
@@ -410,7 +414,6 @@ def main():
             print(f"  Batch shape: {batch_data.shape}")
             print(f"  Batch labels: {batch_labels[:5]}...")  # Show first 5 labels
         else:
-            breakpoint()
             print(f"  Batch shape: {sample_batch.shape}")
         
         print("\n" + "=" * 60)
@@ -429,11 +432,13 @@ def main():
         )
 
         input_dim = loaders['input_dim']
+        timepoint_dim = loaders['timepoint_dim']
 
         model_config = load_config(args.model_config)
         model, model_name, latent_dim = load_model_from_config(
             model_config=model_config,
             input_dim=input_dim,
+            timepoint_dim=timepoint_dim,
             device=args.device,
         )
         training_config = load_config(args.training_config)
@@ -461,10 +466,12 @@ def main():
         )
 
         input_dim = loaders['input_dim']
+        timepoint_dim = loaders['timepoint_dim']
         model_config = load_config(args.model_config)
         model, model_name, latent_dim = load_model_from_config(
             model_config=model_config,
             input_dim=input_dim,
+            timepoint_dim=timepoint_dim,
             device=args.device,
         )
         training_config = load_config(args.training_config)
@@ -493,7 +500,6 @@ def main():
             
         def set_var_value(node, name, value):
             if '.' in name and isinstance(node, dict) and name.split('.')[0] in node:
-                # breakpoint()
                 node_name = name.split('.')[0]
                 ch_name = '.'.join(name.split('.')[1:])
                 set_var_value(node[node_name], ch_name, value)

@@ -108,8 +108,7 @@ def train_vae(
         total_mse_pca = 0
         num_batches = 0
         for batch_idx, (data, _) in enumerate(val_loader):
-            x = data if len(data.shape) == 2 else data.reshape(data.shape[0],-1)
-            z_pca = pca.transform(x)
+            z_pca = pca.transform(x.detach().cpu().numpy())
             x_recon_pca = pca.inverse_transform(z_pca)
             x_recon_pca = torch.as_tensor(x_recon_pca, dtype=x.dtype, device=x.device)
             mse_pca = F.mse_loss(x_recon_pca, x, reduction="mean")

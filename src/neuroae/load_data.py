@@ -12,7 +12,6 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
-from sklearn.preprocessing import StandardScaler
 
 from .utils import *
 
@@ -110,17 +109,31 @@ class ADNI_B_N193_no_filt(LibBrain_ADNI_B_N193_no_filt):
 
 
 class ADNI_B_N193_filtered(ADNI_B_N193_no_filt):
-    def __init__(self, filter, path=None, discard_AD_ABminus=True, SchaeferSize=400, use_pvc=True):
+    def __init__(self, filter, path=None, discard_AD_ABminus=True, SchaeferSize=400, use_pvc=True, normaliser=None):
         self.filter = filter
+        self.normaliser = normaliser
         super().__init__(path=path, discard_AD_ABminus=discard_AD_ABminus, SchaeferSize=SchaeferSize, use_pvc=use_pvc)
 
     def _loadAllData(self):
         super()._loadAllData()
+        # normalise the data
+        # create flattened representation of all the data
+        flattened_data = np.array([d.flatten() for task in self.groups for d in self.timeseries[task].values()])
+        flattened_data = self.normaliser.fit_transform(flattened_data)
+        # reverse flattening back into the same format timeseries[task][subject]
+        flattened_reshaped = flattened_data.reshape(193, 400, 197)
+        index = 0
+        reversed = {task:{} for task in self.groups}
+        for task in self.groups:
+            for subject in self.timeseries[task]:
+                reversed[task][subject] = flattened_reshaped[index]
+                index += 1
+
         # apply filtering to the data
         print(f'----------- Filtering data --------------')
         for task in self.groups:
             for subject, data in self.timeseries[task].items():
-                self.timeseries[task][subject] = self.filter.filter(data.T).T
+                self.timeseries[task][subject] = self.filter.filter(reversed[task][subject].T).T
             print(f'----------- done filtering for {task} --------------')
         print(f'----------- done filtering All --------------')
 
@@ -131,6 +144,7 @@ def load_adni_n193(
     SchaeferSize=400,
     use_pvc=True,
     filter=None,
+    normaliser=None,
 ):
     """
     Load ADNI-B N193 dataset (no filter).
@@ -159,6 +173,7 @@ def load_adni_n193(
             discard_AD_ABminus=discard_AD_ABminus,
             SchaeferSize=SchaeferSize,
             use_pvc=use_pvc,
+            normaliser=normaliser,
         )
 
 
@@ -201,10 +216,11 @@ def get_data_dir():
 
 def load_adni(
     data_dir=None,
-    discard_AD_ABminus=True,
+    discard_AD_ABminus=False,
     use_pvc=True,
     alt_classification=None,
     filter=None,
+    normaliser=None
 ):
     """
     Convenience function to load ADNI-B data with common configurations.
@@ -242,6 +258,7 @@ def load_adni(
         SchaeferSize=400,
         use_pvc=use_pvc,
         filter=filter,
+        normaliser=normaliser,
     )
 
     # Apply alternate classification if requested
@@ -263,8 +280,7 @@ class ADNIDataset(Dataset):
         labels=None, 
         subject_ids=None,
         transpose=False, 
-        flatten=True, 
-        normaliser=None, 
+        flatten=True,
         pad_features=False, 
         truncate_features=False,
         timepoints_as_samples=False,
@@ -285,7 +301,6 @@ class ADNIDataset(Dataset):
         """
         self.flatten = flatten
         self.transpose = transpose
-        self.normaliser = normaliser
         self.pad_features = pad_features
         self.truncate_features = truncate_features
         self.timepoints_as_samples = timepoints_as_samples
@@ -318,24 +333,6 @@ class ADNIDataset(Dataset):
             labels = np.repeat(labels, timepoint_dim).tolist()
             if subject_ids is not None:
                 self.subject_ids = np.repeat(subject_ids, timepoint_dim).tolist()
-
-        if normaliser is not None:
-            if fc_input or not flatten and not timepoints_as_samples:
-                # shape it for normaliser
-                N, P, T = self.data.shape
-                data_reshaped = self.data.transpose(0, 2, 1)
-                data_flat = data_reshaped.reshape(-1, P)
-                self.data = data_flat
-            # assuming the normaliser will first be applied to training data, 
-            # therefore it can be fit on the first usage of the normaliser
-            if not hasattr(normaliser, 'mean_'):
-                normaliser.fit(self.data)
-            self.data = normaliser.transform(self.data)
-
-            if fc_input or not flatten and not timepoints_as_samples:
-                # reshape back
-                data_scaled = self.data.reshape(N, T, P)
-                self.data = data_scaled.transpose(0, 2, 1)
 
         if fc_input:
             self.timeseries_to_fc(flatten_output=self.flatten)
@@ -585,7 +582,6 @@ def prepare_data_loaders(
     train_split=0.7,
     val_split=0.15,
     random_seed=42,
-    normalize=True,
     timepoints_as_samples=False,
     fc_input=False,
     split_mode="none",
@@ -736,14 +732,12 @@ def prepare_data_loaders(
             test_data, test_ids, test_labels = extract_timeseries_from_loader(
                 data_loader, groups=test_groups
             )
-
-    normaliser = StandardScaler() if normalize else None
     
     # Create PyTorch datasets with normalization
     train_dataset = ADNIDataset(
         train_data, train_labels, train_ids,
         transpose=transpose, flatten=flatten, 
-        normaliser=normaliser, pad_features=pad_features,
+        pad_features=pad_features,
         truncate_features=truncate_features,
         timepoints_as_samples=timepoints_as_samples,
         fc_input=fc_input
@@ -760,13 +754,14 @@ def prepare_data_loaders(
     result = {
         'train_loader': train_loader,
         'input_dim': input_dim,
+        'timepoint_dim': train_dataset.original_shape[1],
         'num_samples': {'train': len(train_dataset)},
     }
     
     if val_data:
         val_dataset = ADNIDataset(val_data, val_labels, val_ids,
             transpose=transpose, flatten=flatten, 
-            normaliser=normaliser, pad_features=pad_features,
+            pad_features=pad_features,
             truncate_features=truncate_features,
             timepoints_as_samples=timepoints_as_samples,
             fc_input=fc_input
@@ -780,7 +775,7 @@ def prepare_data_loaders(
     if test_data:
         test_dataset = ADNIDataset(test_data, test_labels, test_ids,
             transpose=transpose, flatten=flatten, 
-            normaliser=normaliser, pad_features=pad_features,
+            pad_features=pad_features,
             truncate_features=truncate_features,
             timepoints_as_samples=timepoints_as_samples,
             fc_input=fc_input
