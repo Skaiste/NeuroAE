@@ -24,8 +24,8 @@ class LinearAE(ModelBase):
         if self.swfcd is not None:
             swfcd = self.swfcd.apply(x, model_output[0])
             swfcd_beta = self.loss_fn_params.get("swfcd_beta", 1.0)
-            loss['swfcd_pearson'] = swfcd['pearson']
-            loss['loss'] += swfcd_beta * (1 - loss['swfcd_pearson'])
+            loss['swfcd_rmse'] = swfcd['rmse']
+            loss['loss'] += swfcd_beta * swfcd['rmse']
 
         return loss
 
