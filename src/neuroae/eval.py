@@ -1,11 +1,12 @@
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn.functional as F
 
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import silhouette_score
-from sklearn.model_selection import StratifiedKFold, cross_val_score
+
+from .utils.np_utils import to_numpy
+from .metrics.fc_preservation import fc_preservation_score
+from .metrics.silhouette import silhouette
+from .metrics.logreg_accuracy import logreg_accuracy_cv
 
 
 def _dataset_valid_last_dim(dataset):
@@ -18,13 +19,6 @@ def _dataset_valid_last_dim(dataset):
     if valid_last_dim <= 0:
         return None
     return valid_last_dim
-
-
-def _trim_last_dim(x, dataset):
-    valid_last_dim = _dataset_valid_last_dim(dataset)
-    if valid_last_dim is None or x.shape[-1] <= valid_last_dim:
-        return x
-    return x[..., :valid_last_dim]
 
 
 def _build_valid_mask(x, dataset):
@@ -85,14 +79,6 @@ def _masked_mse_numpy(x_hat, x, mask):
     return float(np.sum(se) / denom)
 
 
-def _to_numpy(data):
-    if isinstance(data, torch.Tensor):
-        return data.detach().cpu().numpy()
-    if isinstance(data, np.ndarray):
-        return data
-    return np.asarray(data)
-
-
 def _extract_model_outputs(model_out):
     """Return reconstruction and latent matrix from model outputs."""
     if isinstance(model_out, dict):
@@ -119,162 +105,6 @@ def _extract_model_outputs(model_out):
     return recon_x, latent
 
 
-def _reshape_for_timeseries(sample, dataset):
-    """Try to recover (R, T) for FC-preservation computation."""
-    x = _to_numpy(sample)
-
-    if getattr(dataset, "fc_input", False):
-        return None
-
-    if x.ndim == 2:
-        return x
-
-    if x.ndim == 1 and getattr(dataset, "flatten", False):
-        original_shape = getattr(dataset, "original_shape", None)
-        if original_shape is None:
-            return None
-        expected = int(np.prod(original_shape))
-        if x.size != expected:
-            return None
-        return x.reshape(original_shape)
-
-    return None
-
-
-def _vector_correlation(a, b):
-    a = _to_numpy(a).reshape(-1)
-    b = _to_numpy(b).reshape(-1)
-
-    if a.size != b.size or a.size < 2:
-        return np.nan
-
-    a_std = float(np.std(a))
-    b_std = float(np.std(b))
-    if a_std == 0.0 or b_std == 0.0:
-        return np.nan
-
-    return float(np.corrcoef(a, b)[0, 1])
-
-
-def _fc_upper_vector_from_timeseries(ts, roi_axis=0):
-    ts = _to_numpy(ts)
-    if ts.ndim != 2:
-        return None
-    if roi_axis == 1:
-        ts = ts.T
-
-    fc = np.corrcoef(ts)
-    fc = np.nan_to_num(fc, nan=0.0, posinf=0.0, neginf=0.0)
-    tri = np.triu_indices(fc.shape[0], k=1)
-    return fc[tri]
-
-
-def _fc_vector(sample, dataset):
-    ts = _reshape_for_timeseries(sample, dataset)
-    if ts is None:
-        # fallback: treat sample as already FC-like feature vector
-        return _to_numpy(sample).reshape(-1)
-
-    # dataset.transpose=True means sample orientation is (T, R), so ROI axis is 1.
-    roi_axis = 1 if getattr(dataset, "transpose", False) else 0
-    fc_vec = _fc_upper_vector_from_timeseries(ts, roi_axis=roi_axis)
-    if fc_vec is None:
-        return _to_numpy(sample).reshape(-1)
-    return fc_vec
-
-
-def _fc_preservation_score(x, x_hat, dataset):
-    x_np = _to_numpy(x)
-    x_hat_np = _to_numpy(x_hat)
-
-    if getattr(dataset, "timepoints_as_samples", False):
-        subject_ids = np.asarray(getattr(dataset, "subject_ids", []))
-        if subject_ids.size != x_np.shape[0]:
-            return np.nan
-
-        scores = []
-        unique_subjects = pd.unique(subject_ids)
-        for sid in unique_subjects:
-            idx = np.where(subject_ids == sid)[0]
-            if idx.size < 2:
-                continue
-
-            # In timepoints_as_samples mode each row is one timepoint vector of ROIs.
-            ts_x = x_np[idx]
-            ts_hat = x_hat_np[idx]
-            v1 = _fc_upper_vector_from_timeseries(ts_x, roi_axis=1)
-            v2 = _fc_upper_vector_from_timeseries(ts_hat, roi_axis=1)
-            if v1 is None or v2 is None:
-                continue
-
-            corr = _vector_correlation(v1, v2)
-            if np.isfinite(corr):
-                scores.append(corr)
-        return float(np.mean(scores)) if scores else np.nan
-
-    scores = []
-    for i in range(x_np.shape[0]):
-        v1 = _fc_vector(x_np[i], dataset)
-        v2 = _fc_vector(x_hat_np[i], dataset)
-        corr = _vector_correlation(v1, v2)
-        if np.isfinite(corr):
-            scores.append(corr)
-
-    return float(np.mean(scores)) if scores else np.nan
-
-
-def _encode_labels(labels):
-    labels = np.asarray(labels)
-    valid_mask = pd.notna(labels)
-    labels = labels[valid_mask]
-    if labels.size == 0:
-        return np.array([]), valid_mask
-
-    classes, encoded = np.unique(labels.astype(str), return_inverse=True)
-    return encoded.astype(int), valid_mask
-
-
-def _silhouette(latents, labels):
-    if len(latents.shape) > 2: # if the latent space is 2D
-        latents = latents.reshape(latents.shape[0], -1)
-    y, valid_mask = _encode_labels(labels)
-    if y.size == 0:
-        return np.nan
-    z = latents[valid_mask]
-    if len(np.unique(y)) < 2 or z.shape[0] <= len(np.unique(y)):
-        return np.nan
-    return float(silhouette_score(z, y))
-
-
-def _logreg_accuracy_cv(latents, labels, random_seed=42):
-    y, valid_mask = _encode_labels(labels)
-    if y.size == 0:
-        return np.nan
-
-    z = latents[valid_mask]
-    classes, counts = np.unique(y, return_counts=True)
-    if len(classes) < 2:
-        return np.nan
-
-    min_count = int(np.min(counts))
-    if min_count < 2:
-        return np.nan
-
-    n_splits = min(5, min_count)
-    clf = LogisticRegression(max_iter=5000)
-    cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_seed)
-    if len(z.shape) > 2: # if the latent space is 2D
-        z = z.reshape(z.shape[0], -1)
-    scores = cross_val_score(clf, z, y, cv=cv, scoring="accuracy")
-    return float(np.mean(scores))
-
-
-def _flatten_batch(batch):
-    batch_np = _to_numpy(batch)
-    if batch_np.ndim == 1:
-        return batch_np.reshape(1, -1)
-    return batch_np.reshape(batch_np.shape[0], -1)
-
 
 def _compute_pca_metrics(pca, inputs, latents, labels, dataset, valid_mask=None):
     mse = np.nan
@@ -282,10 +112,10 @@ def _compute_pca_metrics(pca, inputs, latents, labels, dataset, valid_mask=None)
     if inputs.size > 0:
         recon = pca.inverse_transform(pca.transform(inputs))
         mse = _masked_mse_numpy(recon, inputs, valid_mask)
-        fc = _fc_preservation_score(inputs, recon, dataset)
+        fc = fc_preservation_score(inputs, recon, dataset)
 
-    sil = _silhouette(latents, labels)
-    logreg_acc = _logreg_accuracy_cv(latents, labels)
+    sil = silhouette(latents, labels)
+    logreg_acc = logreg_accuracy_cv(latents, labels)
     return {
         "mse": mse,
         "fc_preservation": fc,
@@ -339,12 +169,12 @@ def eval_vae(
     valid_mask_all = torch.cat(all_masks, dim=0) if all_masks else None
 
     mse = _masked_mse_torch(x_hat_all, x_all, valid_mask_all)
-    fc_preservation = _fc_preservation_score(x_all, x_hat_all, data_loader.dataset)
+    fc_preservation = fc_preservation_score(x_all, x_hat_all, data_loader.dataset)
 
-    z_np = _to_numpy(z_all)
+    z_np = to_numpy(z_all)
     labels = np.asarray(getattr(data_loader.dataset, "labels", []))
-    silhouette = _silhouette(z_np, labels)
-    logreg_acc = _logreg_accuracy_cv(z_np, labels)
+    silhouette = silhouette(z_np, labels)
+    logreg_acc = logreg_accuracy_cv(z_np, labels)
 
     metrics = {
         "model": {
@@ -363,7 +193,7 @@ def eval_vae(
 
     if pca is not None:
         x_all = x_all.detach().cpu().numpy()
-        valid_mask_np = _to_numpy(valid_mask_all) if valid_mask_all is not None else None
+        valid_mask_np = to_numpy(valid_mask_all) if valid_mask_all is not None else None
         z_pca = pca.transform(x_all)
 
         pca_metrics = _compute_pca_metrics(

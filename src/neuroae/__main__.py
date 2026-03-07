@@ -297,6 +297,12 @@ def run_training(model, model_name, latent_dim, loaders, training_config, model_
     from .train import train_vae
 
     model.set_loss_fn_params(training_config['training'].get('loss_params', None))
+    if training_config['training']['loss_params'].get("swfcd_beta", 0.0) > 0:
+        from .metrics.swfcd_torch import SwFCD
+        window = training_config['training']['loss_params'].get("swfcd_window", 30)
+        step = training_config['training']['loss_params'].get("swfcd_step", 3)
+        swfcd = SwFCD(loaders['train_loader'].dataset, window, step)
+        model.set_swfcd(swfcd)
 
     tracker = TrainingResultsManager(results_dir=project_path / "results")
     experiment_id = tracker.build_experiment_id(
@@ -468,15 +474,16 @@ def main():
         print("=" * 60)
 
         data_config = load_config(args.data_config)
+        model_config = load_config(args.model_config)
+        training_config = load_config(args.training_config)
+        
         loaders = load_data_from_config(
             data_dir=args.data_dir,
             data_config=data_config,
         )
-
         input_dim = loaders['input_dim']
         timepoint_dim = loaders['timepoint_dim']
-
-        model_config = load_config(args.model_config)
+        
         model, model_name, latent_dim = load_model_from_config(
             model_config=model_config,
             input_dim=input_dim,
@@ -484,7 +491,7 @@ def main():
             device=args.device,
             preserve_timepoints=loaders.get('preserve_timepoints', False)
         )
-        training_config = load_config(args.training_config)
+
         run_training(
             model,
             model_name,
@@ -493,7 +500,7 @@ def main():
             training_config,
             model_config,
             data_config,
-            device=args.device,
+            device=args.device
         )
         print("=" * 60)
         

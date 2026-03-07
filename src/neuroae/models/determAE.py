@@ -2,9 +2,10 @@ import torch
 import torch.nn as nn
 from typing import Sequence, Optional
 
+from . import ModelBase
 
 
-class DeterministicAE(nn.Module):
+class DeterministicAE(ModelBase):
     def __init__(
         self,
         input_dim: int,
@@ -85,10 +86,6 @@ class DeterministicAE(nn.Module):
         z = self.encode(x)
         x_hat = self.decode(z)
         return x_hat, z
-    
-    # a placeholder since the loss function doesn't have any parameters
-    def set_loss_fn_params(self, params):
-        pass
 
     def loss(self, x, model_output):
         return {'loss': self.criterion(model_output[0], x)}

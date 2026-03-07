@@ -21,6 +21,8 @@ import torch.nn.functional as F
 from monai.networks.blocks import Convolution
 from monai.utils import ensure_tuple_rep
 
+from . import ModelBase
+
 # To install xformers, use pip install xformers==0.0.16rc401
 if importlib.util.find_spec("xformers") is not None:
     import xformers
@@ -608,7 +610,7 @@ class Decoder(nn.Module):
         return x
 
 
-class AutoencoderKLv2(nn.Module):
+class AutoencoderKLv2(ModelBase):
     """
     Autoencoder model with KL-regularized latent space based on
     Rombach et al. "High-Resolution Image Synthesis with Latent Diffusion Models" https://arxiv.org/abs/2112.10752

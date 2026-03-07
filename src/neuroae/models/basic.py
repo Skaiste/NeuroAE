@@ -2,8 +2,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from . import ModelBase
 
-class BasicVAE(nn.Module):
+
+class BasicVAE(ModelBase):
     class Encoder(nn.Module):
         def __init__(self, input_dim, hidden_dims, latent_dim):
             super().__init__()
@@ -61,6 +63,7 @@ class BasicVAE(nn.Module):
         self.input_dim = input_dim
         self.hidden_dims = hidden_dims
         self.latent_dim = latent_dim
+        self.swfcd = None
 
     def freeze_encoder(self):
         for param in self.encoder.parameters():
@@ -82,14 +85,11 @@ class BasicVAE(nn.Module):
         x_hat = self.decoder(z)
 
         return x_hat, mean, log_var, z
-
-    def set_loss_fn_params(self, params):
-        self.loss_fn_params = params
     
     def loss(self, x, model_output):
         x_hat, mu, log_var, _ = model_output
         error_per_feature = self.loss_fn_params.get("loss_per_feature", True)
-        beta = float(self.loss_fn_params.get("beta", 1.0))
+        beta = self.loss_fn_params.get("beta", 1.0)
         # if selected error per feature, we are averaging everything
         if error_per_feature:
             # recon: mean mse loss
@@ -109,14 +109,22 @@ class BasicVAE(nn.Module):
             kld = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
             kld = kld.sum(dim=1).mean() / log_var.size(1)
 
-        return {
+        loss = {
             'loss': recon + beta * kld,
             'recon': recon, 
             'kld': kld
         }
 
+        if self.swfcd is not None:
+            swfcd = self.swfcd.apply(x, x_hat)
+            swfcd_beta = self.loss_fn_params.get("swfcd_beta", 1.0)
+            loss['swfcd_pearson'] = swfcd['pearson']
+            loss['loss'] += swfcd_beta * (1 - loss['swfcd_pearson'])
 
-class BasicVAETimeShared(nn.Module):
+        return loss
+
+
+class BasicVAETimeShared(ModelBase):
     class Encoder(nn.Module):
         def __init__(self, feature_dim, hidden_dims, latent_dim):
             super().__init__()
@@ -257,9 +265,6 @@ class BasicVAETimeShared(nn.Module):
         x_hat = self._flatten_recon(x_hat_time)
         return x_hat, mean, log_var, z
 
-    def set_loss_fn_params(self, params):
-        self.loss_fn_params = params
-
     def loss(self, x, model_output):
         x_hat, mu, log_var, _ = model_output
         error_per_feature = self.loss_fn_params.get("loss_per_feature", True)
@@ -274,8 +279,16 @@ class BasicVAETimeShared(nn.Module):
             kld = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
             kld = kld.sum(dim=1).mean() / log_var.size(1)
 
-        return {
+        loss = {
             'loss': recon + beta * kld,
-            'recon': recon,
+            'recon': recon, 
             'kld': kld
         }
+
+        if self.swfcd is not None:
+            swfcd = self.swfcd.apply(x, x_hat)
+            swfcd_beta = self.loss_fn_params.get("swfcd_beta", 1.0)
+            loss['swfcd_pearson'] = swfcd['pearson']
+            loss['loss'] += swfcd_beta * (1 - loss['swfcd_pearson'])
+
+        return loss

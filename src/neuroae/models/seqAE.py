@@ -2,8 +2,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from . import ModelBase
 
-class SequentialAE(nn.Module):
+
+class SequentialAE(ModelBase):
     """
     Input per sample: (T, R)  where
       T = timepoints, R = regions
@@ -50,6 +52,8 @@ class SequentialAE(nn.Module):
         # Optional: learned start token in region-space
         self.start_token = nn.Parameter(torch.zeros(1, 1, regions))
 
+        self.swfcd = None
+
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         # x: (B, T, R)
         if self.cell == "lstm":
@@ -88,10 +92,16 @@ class SequentialAE(nn.Module):
         z = self.encode(x)
         x_hat = self.decode(z, T=x.shape[1])
         return x_hat, z
-    
-    # a placeholder since the loss function doesn't have any parameters
-    def set_loss_fn_params(self, params):
-        pass
 
     def loss(self, x, model_output):
-        return {'loss': F.mse_loss(model_output[0], x)}
+        loss = {
+            'loss': F.mse_loss(model_output[0], x)
+        }
+
+        if self.swfcd is not None:
+            swfcd = self.swfcd.apply(x, model_output[0])
+            swfcd_beta = self.loss_fn_params.get("swfcd_beta", 1.0)
+            loss['swfcd_pearson'] = swfcd['pearson']
+            loss['loss'] += swfcd_beta * (1 - loss['swfcd_pearson'])
+
+        return loss
