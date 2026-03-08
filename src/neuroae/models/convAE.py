@@ -798,3 +798,35 @@ class AutoencoderKLv2(nn.Module):
             # print all remaining keys in old_state_dict
             print("remaining keys in old_state_dict:", old_state_dict.keys())
         self.load_state_dict(new_state_dict, strict=True)
+    
+    def loss(self, x, model_output):
+        x_hat, z_mu, z_sigma, _ = model_output
+        error_per_feature = self.loss_fn_params.get("loss_per_feature", True)
+        beta = float(self.loss_fn_params.get("beta", 1.0))
+        # if selected error per feature, we are averaging everything
+        if error_per_feature:
+            # recon: mean mse loss
+            recon = F.mse_loss(x_hat, x, reduction="mean")
+
+        # if selected error per sample, we are summing everything
+        else:
+            # recon: sum over features per sample, then mean over batch
+            recon = F.mse_loss(x_hat, x, reduction="none")  # [B, D]
+            recon = recon.sum(dim=1).mean()
+
+        kld = -0.5 * (1 + z_sigma - z_mu.pow(2) - z_sigma.exp())
+        kld = kld.flatten(1).sum(dim=1).mean() / z_sigma.size(1)
+
+        loss = {
+            'loss': recon + beta * kld,
+            'recon': recon, 
+            'kld': kld
+        }
+
+        if self.swfcd is not None:
+            swfcd = self.swfcd.apply(x, x_hat)
+            swfcd_beta = self.loss_fn_params.get("swfcd_beta", 1.0)
+            loss['swfcd_rmse'] = swfcd['rmse']
+            loss['loss'] += swfcd_beta * swfcd['rmse']
+
+        return loss
