@@ -209,6 +209,7 @@ def load_model_from_config(model_config, input_dim, timepoint_dim, device, prese
         )
         if model_name == "AutoencoderKLv2":
             aekl_kwargs["time_shared"] = preserve_timepoints
+            latent_dim *= preserve_timepoints
         model = AutoencoderKL(**aekl_kwargs)
     elif model_name == "DeterministicAE":
         if preserve_timepoints:
