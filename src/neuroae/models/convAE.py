@@ -602,6 +602,13 @@ class AutoencoderKLv2(nn.Module):
         self.latent_channels = latent_channels
         self.time_shared = time_shared
         self.use_checkpoint = use_checkpoint
+        self.swfcd = None
+
+    def set_loss_fn_params(self, params):
+        self.loss_fn_params = params
+
+    def set_swfcd(self, swfcd):
+        self.swfcd = swfcd
 
     @staticmethod
     def _fold_time_into_batch(x: torch.Tensor) -> tuple[torch.Tensor, tuple[int, int, int]]:
