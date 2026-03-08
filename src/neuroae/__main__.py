@@ -6,6 +6,7 @@ This script loads ADNI-B data and can be used for training models or running inf
 
 import argparse
 import concurrent.futures
+import hashlib
 import json
 import math
 import pathlib
@@ -293,6 +294,51 @@ def get_most_recent_experiment_id(index_path):
     if latest_entry is None or "experiment_id" not in latest_entry:
         raise ValueError(f"No experiment entries found in {index_path}")
     return latest_entry["experiment_id"]
+
+
+def build_experiment_signature(model_type, model_params, training_params, data_params):
+    canonical = {
+        "model_type": model_type,
+        "model_params": model_params,
+        "training_params": training_params,
+        "data_params": data_params,
+    }
+    payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:8]
+
+
+def _has_evaluation_results(metadata):
+    evaluation = metadata.get("evaluation")
+    if not isinstance(evaluation, dict):
+        return False
+    model_metrics = evaluation.get("model")
+    return isinstance(model_metrics, dict) and len(model_metrics) > 0
+
+
+def load_completed_experiment_signatures(results_dir):
+    print("Loading already existing experiments")
+    tracker = TrainingResultsManager(results_dir=results_dir)
+    completed_signatures = set()
+    for entry in tracker.list_experiments():
+        experiment_id = entry.get("experiment_id")
+        if not experiment_id:
+            continue
+        try:
+            metadata = tracker.get_experiment(experiment_id)
+        except FileNotFoundError:
+            continue
+
+        if not _has_evaluation_results(metadata):
+            continue
+
+        signature = build_experiment_signature(
+            model_type=metadata.get("model_type", "unknown"),
+            model_params=metadata.get("model_params", {}),
+            training_params=metadata.get("training_params", {}),
+            data_params=metadata.get("data_params", {}),
+        )
+        completed_signatures.add(signature)
+    return completed_signatures
 
 
 def run_training(model, model_name, latent_dim, loaders, training_config, model_config, data_config, device):
@@ -648,6 +694,10 @@ def main():
                     node[name] = value
 
         experiment_specs = []
+        completed_signatures = load_completed_experiment_signatures(project_path / "results")
+        seen_signatures = set()
+        skipped_completed = 0
+        skipped_duplicates = 0
         for set_name, ec in exp_config.items():
             if set_name == 'default':
                 continue
@@ -675,10 +725,26 @@ def main():
                     set_var_value({'data':dc}, vn, var)
                     set_var_value(mc, vn, var)
                     set_var_value(tc, vn, var)
+
+                signature = build_experiment_signature(
+                    model_type=mc["model"]["name"],
+                    model_params=mc.get("model", {}),
+                    training_params=tc.get("training", {}),
+                    data_params=dc,
+                )
+                if signature in completed_signatures:
+                    skipped_completed += 1
+                    continue
+                if signature in seen_signatures:
+                    skipped_duplicates += 1
+                    continue
+                seen_signatures.add(signature)
                 experiment_specs.append((dc, mc, tc))
 
         total_experiments = len(experiment_specs)
         print(f"Prepared {total_experiments} experiments")
+        print(f"Skipped {skipped_completed} experiments with existing evaluation results")
+        print(f"Skipped {skipped_duplicates} duplicated experiments in current config")
         if total_experiments == 0:
             print("No experiments were generated from the provided config.")
             return
