@@ -15,7 +15,7 @@ default:
       fc_input: false
 
     filter:
-      apply_demean: true1
+      apply_demean: true
       apply_detrend: true
       apply_finalDetrend: false
       fhi: 0.08
@@ -51,7 +51,6 @@ LinearAE:
       - flatten: false
         fc_input: true
     model:
-      hidden_dim: [1024, 512, 256, 128]
       latent_dim: [64, 32, 10, 4]
     training:
       loss_params:
@@ -73,7 +72,7 @@ BasicVAE:
       - flatten: false
         fc_input: true
     model:
-      hidden_dim: [[1024, 512, 256, 128], [512, 256, 128], [512, 256], [256, 128]]
+      hidden_dims: [[1024, 512, 256, 128], [512, 256, 128], [512, 256], [256, 128]]
       latent_dim: [64, 32, 10, 4]
     training:
       loss_params:
@@ -89,16 +88,17 @@ AutoencoderKL:
         fc_input: false
         pad_features: true
     model:
-      name: AutoencoderKL
-
+      name: AutoencoderKLv1
+    training:
+      num_epochs: 40
   exp_params:
     data:
       data:
       - transpose: false
       - transpose: true
     model:
-      channels: [[256, 128], [256], [128]]
-      latent_channels: [64, 32, 10, 4]
+      hidden_dims: [[256, 128], [256], [128]]
+      latent_dim: [64, 32, 10, 4]
       num_res_blocks: [1, 2, 4]
     training:
       loss_params:
@@ -110,15 +110,13 @@ SequentialAE:
       data:
         transpose: true
         flatten: false
-        timepoints_as_samples: false
-        fc_input: false
     model:
       name: SequentialAE
 
   exp_params:
     model:
-      channels: [256, 128]
-      latent_channels: [64, 32, 10, 4]
+      hidden_dim: [256, 128]
+      latent_dim: [64, 32, 10, 4]
       dropout: [0.3, 0.5, 0.7]
       cell: ['lstm', 'gru']
 
