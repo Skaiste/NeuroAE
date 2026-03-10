@@ -25,6 +25,7 @@ from .models.pca import PCA, PCA_multi
 from training_tracker import TrainingResultsManager
 
 CACHED_ADNI = None
+CACHED_FILTER = None
 
 
 def load_config(config_path):
@@ -51,31 +52,7 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
     if CACHED_ADNI is None:
         # Load ADNI data
         print(f"\nLoading ADNI-B dataset...")
-
-        if 'filter' in data_config and data_config['filter']['type'] == 'BandPassFilter':
-            filter_config = data_config['filter']
-            filter = BandPassFilter(
-                tr=filter_config['tr'],
-                flp=filter_config['flp'],
-                fhi=filter_config['fhi'],
-                k=filter_config['k'],
-                remove_artifacts=filter_config['remove_artifacts'],
-                apply_demean=filter_config['apply_demean'],
-                apply_detrend=filter_config['apply_detrend'],
-                apply_finalDetrend=filter_config['apply_finalDetrend'],
-            )
-        else:
-            filter = None
-
-        normaliser = None
-        if data_config['data'].get('normalize', False):
-            normaliser = StandardScaler()
-
-        data_loader = load_adni(
-            data_dir=data_dir,
-            filter=filter,
-            normaliser=normaliser
-        )
+        data_loader = load_adni(data_dir=data_dir)
         CACHED_ADNI = data_loader
 
         # Print dataset information
@@ -89,10 +66,35 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
     else:
         data_loader = CACHED_ADNI
 
+    # setup filter
+    global CACHED_FILTER
+    if CACHED_FILTER is None and 'filter' in data_config and data_config['filter']['type'] == 'BandPassFilter':
+        filter_config = data_config['filter']
+        filter = BandPassFilter(
+            tr=filter_config['tr'],
+            flp=filter_config['flp'],
+            fhi=filter_config['fhi'],
+            k=filter_config['k'],
+            remove_artifacts=filter_config['remove_artifacts'],
+            apply_demean=filter_config['apply_demean'],
+            apply_detrend=filter_config['apply_detrend'],
+            apply_finalDetrend=filter_config['apply_finalDetrend'],
+        )
+        CACHED_FILTER = filter
+    elif CACHED_FILTER is not None:
+        filter = CACHED_FILTER
+    else:
+        filter = None
+
+
     # Prepare PyTorch DataLoaders
     print(f"\nPreparing PyTorch DataLoaders...")
     split_mode = data_config['data'].get('datasplit_mode', 'none')
     datasplit_file = data_config['data'].get('datasplit_file')
+    # setup normaliser
+    normaliser = None
+    if data_config['data'].get('normalize', False):
+        normaliser = StandardScaler()
     loaders = prepare_data_loaders(
         data_loader,
         batch_size=data_config['data'].get('batch_size', 16),
@@ -109,7 +111,10 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
         fc_input=data_config['data'].get('fc_input', False),
         preserve_timepoints=data_config['data'].get('preserve_timepoints', False),
         split_mode=split_mode,
-        datasplit_file=datasplit_file
+        datasplit_file=datasplit_file,
+        filter=filter,
+        normaliser=normaliser,
+        use_abeta_tau=data_config['data'].get('use_abeta_tau', False),
     )
 
     print(f"\nDataLoader information:")
@@ -190,14 +195,14 @@ def load_model_from_config(model_config, input_dim, timepoint_dim, device, prese
         if model_name == "AutoencoderKLv1":
             from .models.monaiAEKL import AutoencoderKLv1 as AutoencoderKL
         elif model_name == "AutoencoderKLv2":
-            from .models.convAE import AutoencoderKLv2 as AutoencoderKL
+            from .models.autoencoderkl import AutoencoderKLv2 as AutoencoderKL
         latent_dim = model_config['model']['latent_dim']
         hidden_dim = model_config['model']['hidden_dims']
         attention_levels = model_config['model'].get('attention_levels', [False] * len(hidden_dim))
         aekl_kwargs = dict(
             spatial_dims=1,
-            in_channels=1 if preserve_timepoints else input_dim[0],
-            out_channels=1 if preserve_timepoints else input_dim[0],
+            in_channels=input_dim[0],
+            out_channels=input_dim[0],
             num_res_blocks=model_config['model'].get('num_res_blocks', 1),
             channels=hidden_dim,
             attention_levels=attention_levels,
@@ -208,8 +213,7 @@ def load_model_from_config(model_config, input_dim, timepoint_dim, device, prese
             with_decoder_nonlocal_attn=False,
         )
         if model_name == "AutoencoderKLv2":
-            aekl_kwargs["time_shared"] = preserve_timepoints
-            latent_dim *= preserve_timepoints
+            latent_dim *= timepoint_dim
         model = AutoencoderKL(**aekl_kwargs)
     elif model_name == "DeterministicAE":
         if preserve_timepoints:
@@ -384,7 +388,8 @@ def run_training(model, model_name, latent_dim, loaders, training_config, model_
         save_dir=training_config['training']['save_dir'],
         name=experiment_id,
         pca=pca,
-        noise=training_config['training'].get("noise", None)
+        noise=training_config['training'].get("noise", None),
+        use_abeta_tau=training_config['training'].get('use_abeta_tau', False),
     )
     model_artifact = pathlib.Path(training_config['training']['save_dir']) / f"{experiment_id}_model.pt"
     experiment_metadata = {

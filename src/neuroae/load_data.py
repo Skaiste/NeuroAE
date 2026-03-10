@@ -13,6 +13,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
+from sklearn.exceptions import NotFittedError
+from sklearn.preprocessing import StandardScaler
 
 from .utils import *
 
@@ -74,71 +76,14 @@ class ADNI_B_N193_no_filt(LibBrain_ADNI_B_N193_no_filt):
         # Apply discard if needed
         if discard_AD_ABminus:
             self.discardSubjects(['116_S_6543','168_S_6754','022_S_6013','126_S_6721'])
-        
+
         print(self.get_subject_count())
+
 
     def set_basePath(self, path):  #, prefiltered_fMRI):
         super().set_basePath(path)
         # adjust the base path to assume the path already contains the required data
         self.base_193_folder = path
-        self.base_238_folder = path
-        self.fMRI_path = str(Path(path) / Path(self.fMRI_path).name)
-        self.ID_path = str(Path(path) / Path(self.ID_path).name)
-
-    def _loadAllData(self):
-        """
-        Override to call LibBrain_ADNI_B_N193_no_filt's fMRI/burden loading logic
-        but skip ADNI_B's metadata loading.
-        """
-        # Copy the fMRI/burden loading logic from LibBrain_ADNI_B_N193_no_filt._loadAllData()
-        # but skip the super()._loadAllData() call that would call ADNI_B._loadAllData()
-        for task in self.groups:
-            print(f'----------- Checking: {task} --------------')
-            taskRealName = task
-            taskBatch = '123' if task == 'AD' or task == 'HC' else '1'
-            ID_path = self.ID_path.format(taskRealName, taskBatch)
-            fMRI_task_path = self.fMRI_path.format(taskRealName, taskBatch)
-            PTIDs = loadmat(ID_path)
-            PTIDs_name = f'combined_PTIDS_ADNI3_{task}_MPRAGE' if task == 'HC' or task == 'AD' \
-                else f'PTID_BIDS_MPRAGE_60_89_batch_1_{task}'
-            PTIDs = PTIDs[PTIDs_name]
-            IDs = [id[0] for id in np.squeeze(PTIDs).tolist()]
-            self.timeseries[task] = self._loadSubjects_fMRI(IDs, fMRI_task_path, task)
-            self.burdens[task] = self._loadSubjects_burden(IDs)
-            print(f'----------- done {task} --------------')
-        print(f'----------- done loading All --------------')
-
-
-class ADNI_B_N193_filtered(ADNI_B_N193_no_filt):
-    def __init__(self, filter, path=None, discard_AD_ABminus=True, SchaeferSize=400, use_pvc=True, normaliser=None):
-        self.filter = filter
-        self.normaliser = normaliser
-        super().__init__(path=path, discard_AD_ABminus=discard_AD_ABminus, SchaeferSize=SchaeferSize, use_pvc=use_pvc)
-
-    def _loadAllData(self):
-        super()._loadAllData()
-        # normalise the data
-        total_data = sum([len(self.timeseries[task]) for task in self.groups])
-        initial_shape = list(self.timeseries[self.groups[0]].values())[0].shape
-        # create flattened representation of all the data
-        flattened_data = np.array([d.flatten() for task in self.groups for d in self.timeseries[task].values()])
-        flattened_data = self.normaliser.fit_transform(flattened_data)
-        # reverse flattening back into the same format timeseries[task][subject]
-        flattened_reshaped = flattened_data.reshape(total_data, initial_shape[0], initial_shape[1])
-        index = 0
-        reversed = {task:{} for task in self.groups}
-        for task in self.groups:
-            for subject in self.timeseries[task]:
-                reversed[task][subject] = flattened_reshaped[index]
-                index += 1
-
-        # apply filtering to the data
-        print(f'----------- Filtering data --------------')
-        for task in self.groups:
-            for subject, data in self.timeseries[task].items():
-                self.timeseries[task][subject] = self.filter.filter(reversed[task][subject].T).T
-            print(f'----------- done filtering for {task} --------------')
-        print(f'----------- done filtering All --------------')
 
 
 def load_adni_n193(
@@ -146,8 +91,6 @@ def load_adni_n193(
     discard_AD_ABminus=True,
     SchaeferSize=400,
     use_pvc=True,
-    filter=None,
-    normaliser=None,
 ):
     """
     Load ADNI-B N193 dataset (no filter).
@@ -160,24 +103,14 @@ def load_adni_n193(
         use_pvc: If True, use partial volume correction for ABeta and Tau.
         
     Returns:
-        ADNI_B_N193_filtered: DataLoader instance for N193 dataset.
+        ADNI_B_N193_no_filt: DataLoader instance for N193 dataset.
     """
-    if filter is None:
-        return ADNI_B_N193_no_filt(
-            path=data_dir,
-            discard_AD_ABminus=discard_AD_ABminus,
-            SchaeferSize=SchaeferSize,
-            use_pvc=use_pvc,
-        )
-    else:
-        return ADNI_B_N193_filtered(
-            filter,
-            path=data_dir,
-            discard_AD_ABminus=discard_AD_ABminus,
-            SchaeferSize=SchaeferSize,
-            use_pvc=use_pvc,
-            normaliser=normaliser,
-        )
+    return ADNI_B_N193_no_filt(
+        path=data_dir,
+        discard_AD_ABminus=discard_AD_ABminus,
+        SchaeferSize=SchaeferSize,
+        use_pvc=use_pvc,
+    )
 
 
 def load_adni_alt(
@@ -221,9 +154,7 @@ def load_adni(
     data_dir=None,
     discard_AD_ABminus=False,
     use_pvc=True,
-    alt_classification=None,
-    filter=None,
-    normaliser=None
+    alt_classification=None
 ):
     """
     Convenience function to load ADNI-B data with common configurations.
@@ -259,9 +190,7 @@ def load_adni(
         data_dir=data_dir,
         discard_AD_ABminus=discard_AD_ABminus,
         SchaeferSize=400,
-        use_pvc=use_pvc,
-        filter=filter,
-        normaliser=normaliser,
+        use_pvc=use_pvc
     )
 
     # Apply alternate classification if requested
@@ -282,6 +211,9 @@ class ADNIDataset(Dataset):
         timeseries_data, 
         labels=None, 
         subject_ids=None,
+        filter=None,
+        normaliser=None,
+        fit_normaliser=False,
         transpose=False, 
         flatten=True,
         pad_features=False, 
@@ -311,6 +243,8 @@ class ADNIDataset(Dataset):
         self.fc_input = fc_input
         self.original_shape = None
         self.subject_ids = subject_ids
+        self.filter = filter
+        self.normaliser = normaliser
 
         self.preserve_timepoints = preserve_timepoints
         self.timepoint_dim = None
@@ -318,10 +252,29 @@ class ADNIDataset(Dataset):
         assert not (self.truncate_features and self.pad_features), 'Can only choose to pad or truncate features not both.'
         assert not (self.timepoints_as_samples and self.flatten), 'Can only choose to flatten or to treat timepoints as samples, not both.'
         
+        processed_timeseries = [np.asarray(ts) for ts in timeseries_data]
+        if self.normaliser is not None and len(processed_timeseries) > 0:
+            flattened_data = np.asarray([ts.reshape(-1) for ts in processed_timeseries])
+            sample_shape = processed_timeseries[0].shape
+            if fit_normaliser:
+                flattened_data = self.normaliser.fit_transform(flattened_data)
+            else:
+                try:
+                    flattened_data = self.normaliser.transform(flattened_data)
+                except NotFittedError as exc:
+                    raise ValueError(
+                        "Received an unfitted normaliser with fit_normaliser=False. "
+                        "Fit on train first and reuse the same normaliser for val/test."
+                    ) from exc
+            processed_timeseries = [
+                flattened_data[i].reshape(sample_shape) for i in range(flattened_data.shape[0])
+            ]
+        if self.filter is not None:
+            processed_timeseries = [self.filter.filter(ts.T).T for ts in processed_timeseries]
+
         # Convert to numpy arrays and store
         self.data = []
-        for ts in timeseries_data:
-            ts_array = np.array(ts)
+        for ts_array in processed_timeseries:
             
             self.timepoint_dim = ts_array.shape[-1]
 
@@ -463,6 +416,52 @@ class ADNIDataset(Dataset):
             self.flatten = False
 
 
+class ADNIDatasetABT(ADNIDataset):
+    def __init__(self, 
+                 data,
+                 labels=None,
+                 subject_ids=None, 
+                 filter=None, 
+                 normaliser=None, 
+                 fit_normaliser=False, 
+                 transpose=False, 
+                 flatten=True, 
+                 pad_features=False, 
+                 truncate_features=False, 
+                 timepoints_as_samples=False, 
+                 fc_input=False, 
+                 preserve_timepoints=False):
+        timeseries_data, self.abeta_data, self.tau_data = data
+        super().__init__(timeseries_data, labels, subject_ids, filter, normaliser, fit_normaliser, transpose, flatten, pad_features, truncate_features, timepoints_as_samples, fc_input, preserve_timepoints)
+
+    def normalise_abeta_tau(self, abeta_normaliser, tau_normaliser, fit=False):
+        """
+        Normalises ABeta and Tau levels using z-score
+        If values are missing, sets them as 0s
+        """
+        is_none = lambda n:(n==None).all()
+        data_size = max([ab.size for ab in self.abeta_data if not is_none(ab)])
+        abeta_data = [np.asarray(ts) if not is_none(ts) else np.asarray([np.nan]*data_size) for ts in self.abeta_data]
+        tau_data = [np.asarray(ts) if not is_none(ts) else np.asarray([np.nan]*data_size) for ts in self.tau_data]
+
+        abeta_data = np.array(abeta_data, dtype=np.float32)
+        tau_data = np.array(tau_data, dtype=np.float32)
+
+        if fit:
+            abeta_data = abeta_normaliser.fit_transform(abeta_data)
+            tau_data = tau_normaliser.fit_transform(tau_data)
+        else:
+            abeta_data = abeta_normaliser.transform(abeta_data)
+            tau_data = tau_normaliser.transform(tau_data)
+
+        self.abeta_data = np.nan_to_num(abeta_data)
+        self.tau_data = np.nan_to_num(tau_data)
+
+    def __getitem__(self, idx):
+        data, label = super().__getitem__(idx)
+        return data, (label, self.abeta_data[idx], self.tau_data[idx])
+
+
 def extract_timeseries_from_loader(data_loader, groups=None):
     """
     Extract timeseries data from ADNI DataLoader.
@@ -477,46 +476,48 @@ def extract_timeseries_from_loader(data_loader, groups=None):
         labels: List of group labels for each subject
     """
     timeseries_list = []
+    abeta_list = []
+    tau_list = []
     subject_ids = []
     labels = []
     
     if groups is None:
         groups = data_loader.get_groupLabels()
     
-    classification = data_loader.get_classification()
-    
     for group in groups:
         group_subjects = data_loader.get_groupSubjects(group)
         
         for subject_id in group_subjects:
-            # Access timeseries directly from data_loader.timeseries instead of using get_subjectData
-            # This avoids the need for meta_information which may not exist
-            # First try the group we're iterating over
-            if group in data_loader.timeseries and subject_id in data_loader.timeseries[group]:
-                timeseries = data_loader.timeseries[group][subject_id]
-            else:
-                # Fallback: try to get from classification if timeseries structure is different
-                # (e.g., for ADNI_B_Alt which may have different group names)
-                group_from_classification = classification.get(subject_id)
-                if group_from_classification and group_from_classification in data_loader.timeseries:
-                    if subject_id in data_loader.timeseries[group_from_classification]:
-                        timeseries = data_loader.timeseries[group_from_classification][subject_id]
-                    else:
-                        print(f"Warning: Subject {subject_id} not found in timeseries for group {group_from_classification}")
-                        continue
-                else:
-                    print(f"Warning: Subject {subject_id} not found in timeseries for group {group}")
-                    continue
+            subject_data = data_loader.get_subjectData(subject_id)
+            if subject_id not in subject_data:
+                print(f"Warning: Subject {subject_id} not found in get_subjectData for group {group}")
+                continue
+            timeseries = subject_data[subject_id].get("timeseries")
+            abeta = subject_data[subject_id].get("ABeta")
+            tau = subject_data[subject_id].get("Tau")
+            if timeseries is None:
+                print(f"Warning: Missing 'timeseries' for subject {subject_id} in group {group}")
+                continue
             
             # Ensure timeseries is numpy array
             if not isinstance(timeseries, np.ndarray):
                 timeseries = np.array(timeseries)
+
+            # Ensure abeta is numpy array
+            if not isinstance(abeta, np.ndarray):
+                abeta = np.array(abeta)
+                
+            # Ensure tau is numpy array
+            if not isinstance(tau, np.ndarray):
+                tau = np.array(tau)
             
             timeseries_list.append(timeseries)
+            abeta_list.append(abeta)
+            tau_list.append(tau)
             subject_ids.append(subject_id)
             labels.append(group)
     
-    return timeseries_list, subject_ids, labels
+    return timeseries_list, abeta_list, tau_list, subject_ids, labels
 
 
 def _resolve_split_path(split_path):
@@ -598,6 +599,9 @@ def prepare_data_loaders(
     datasplit_file=None,
     preserve_timepoints=False,
     num_workers=0,
+    filter=None,
+    normaliser=None,
+    use_abeta_tau=False
 ):
     """
     Prepare PyTorch DataLoaders from ADNI DataLoader.
@@ -626,7 +630,7 @@ def prepare_data_loaders(
     if train_groups is None:
         train_groups = data_loader.get_groupLabels()
     
-    all_timeseries, all_subject_ids, all_labels = extract_timeseries_from_loader(
+    all_timeseries, all_abeta, all_tau, all_subject_ids, all_labels = extract_timeseries_from_loader(
         data_loader, groups=train_groups
     )
     
@@ -645,9 +649,9 @@ def prepare_data_loaders(
                 "split_mode requires 'datasplit_file' to be set when not using none mode."
             )
 
-        train_data, train_ids, train_labels = [], [], []
-        val_data, val_ids, val_labels = [], [], []
-        test_data, test_ids, test_labels = [], [], []
+        train_data, train_abeta, train_tau, train_ids, train_labels = [], [], [], [], []
+        val_data, val_abeta, val_tau, val_ids, val_labels = [], [], [], [], []
+        test_data, test_abeta, test_tau, test_ids, test_labels = [], [], [], [], []
 
         split_loaded = False
         if split_mode == "load" and split_path.exists():
@@ -655,7 +659,7 @@ def prepare_data_loaders(
                 split_path,
             )
             seen_subjects = set()
-            for timeseries, subject_id, label in zip(all_timeseries, all_subject_ids, all_labels):
+            for timeseries, abeta, tau, subject_id, label in zip(all_timeseries, all_abeta, all_tau, all_subject_ids, all_labels):
                 assignment = split_assignments.get(subject_id)
                 if assignment is None:
                     raise ValueError(
@@ -665,14 +669,20 @@ def prepare_data_loaders(
                 seen_subjects.add(subject_id)
                 if split_name == "train":
                     train_data.append(timeseries)
+                    train_abeta.append(abeta)
+                    train_tau.append(tau)
                     train_ids.append(subject_id)
                     train_labels.append(label)
                 elif split_name == "val":
                     val_data.append(timeseries)
+                    val_abeta.append(abeta)
+                    val_tau.append(tau)
                     val_ids.append(subject_id)
                     val_labels.append(label)
                 else:
                     test_data.append(timeseries)
+                    test_abeta.append(abeta)
+                    test_tau.append(tau)
                     test_ids.append(subject_id)
                     test_labels.append(label)
 
@@ -698,14 +708,20 @@ def prepare_data_loaders(
             test_indices = indices[n_train + n_val:]
 
             train_data = [all_timeseries[i] for i in train_indices]
+            train_abeta = [all_abeta[i] for i in train_indices]
+            train_tau = [all_tau[i] for i in train_indices]
             train_ids = [all_subject_ids[i] for i in train_indices]
             train_labels = [all_labels[i] for i in train_indices]
 
             val_data = [all_timeseries[i] for i in val_indices]
+            val_abeta = [all_abeta[i] for i in val_indices]
+            val_tau = [all_tau[i] for i in val_indices]
             val_ids = [all_subject_ids[i] for i in val_indices]
             val_labels = [all_labels[i] for i in val_indices]
 
             test_data = [all_timeseries[i] for i in test_indices]
+            test_abeta = [all_abeta[i] for i in test_indices]
+            test_tau = [all_tau[i] for i in test_indices]
             test_ids = [all_subject_ids[i] for i in test_indices]
             test_labels = [all_labels[i] for i in test_indices]
 
@@ -727,27 +743,37 @@ def prepare_data_loaders(
         if split_mode and (split_mode.lower() != "none"):
             print("Ignoring split_mode/export_datasplit because val_groups/test_groups were explicitly provided.")
         # Use specified groups
-        train_data, train_ids, train_labels = extract_timeseries_from_loader(
+        train_data, train_abeta, train_tau, train_ids, train_labels = extract_timeseries_from_loader(
             data_loader, groups=train_groups
         )
         
         val_data = []
         val_labels = []
         if val_groups:
-            val_data, val_ids, val_labels = extract_timeseries_from_loader(
+            val_data, val_abeta, val_tau, val_ids, val_labels = extract_timeseries_from_loader(
                 data_loader, groups=val_groups
             )
         
         test_data = []
         test_labels = []
         if test_groups:
-            test_data, test_ids, test_labels = extract_timeseries_from_loader(
+            test_data, test_abeta, test_tau, test_ids, test_labels = extract_timeseries_from_loader(
                 data_loader, groups=test_groups
             )
+
+    DATASET = ADNIDataset
+    if use_abeta_tau:
+        DATASET = ADNIDatasetABT
+        train_data = (train_data, train_abeta, train_tau)
+        val_data = (val_data, val_abeta, val_tau)
+        test_data = (test_data, test_abeta, test_tau)
     
     # Create PyTorch datasets with normalization
-    train_dataset = ADNIDataset(
+    train_dataset = DATASET(
         train_data, train_labels, train_ids,
+        filter=filter,
+        normaliser=normaliser,
+        fit_normaliser=normaliser is not None,
         transpose=transpose, flatten=flatten, 
         pad_features=pad_features,
         truncate_features=truncate_features,
@@ -755,6 +781,14 @@ def prepare_data_loaders(
         fc_input=fc_input,
         preserve_timepoints=preserve_timepoints
     )
+
+    abeta_norm = None
+    tau_norm = None
+    if use_abeta_tau:
+        abeta_norm = StandardScaler()
+        tau_norm = StandardScaler()
+        train_dataset.normalise_abeta_tau(abeta_norm, tau_norm, fit=True)
+
     print("Training dataset")
     train_dataset.describe()
 
@@ -779,7 +813,10 @@ def prepare_data_loaders(
     }
     
     if val_data:
-        val_dataset = ADNIDataset(val_data, val_labels, val_ids,
+        val_dataset = DATASET(val_data, val_labels, val_ids,
+            filter=filter,
+            normaliser=train_dataset.normaliser,
+            fit_normaliser=False,
             transpose=transpose, flatten=flatten, 
             pad_features=pad_features,
             truncate_features=truncate_features,
@@ -798,7 +835,10 @@ def prepare_data_loaders(
         result['num_samples']['val'] = len(val_dataset)
     
     if test_data:
-        test_dataset = ADNIDataset(test_data, test_labels, test_ids,
+        test_dataset = DATASET(test_data, test_labels, test_ids,
+            filter=filter,
+            normaliser=train_dataset.normaliser,
+            fit_normaliser=False,
             transpose=transpose, flatten=flatten, 
             pad_features=pad_features,
             truncate_features=truncate_features,

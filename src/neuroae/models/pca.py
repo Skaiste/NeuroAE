@@ -116,6 +116,7 @@ class PCA_multi:
         self.n_components = n_components // self.T
 
         self.pcas = [sklearn_PCA(self.n_components) for _ in range(self.T)]
+        print(f"PCA {self.n_components=} {self.T=}")
 
 
     def _pre_X(self, X):

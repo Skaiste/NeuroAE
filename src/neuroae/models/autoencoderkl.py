@@ -18,13 +18,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from monai.networks.blocks import Convolution, SpatialAttentionBlock, Upsample
+from monai.networks.blocks import Convolution, SpatialAttentionBlock
 from monai.utils import ensure_tuple_rep, optional_import
 
 Rearrange, _ = optional_import("einops.layers.torch", name="Rearrange")
 
 __all__ = ["AutoencoderKL"]
 
+"""
+Skai note: this has been edited to remove downsampling and upsampling, 
+           to preserve spacial resolution.
+
+"""
 
 class AsymmetricPad(nn.Module):
     """
@@ -40,35 +45,6 @@ class AsymmetricPad(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = nn.functional.pad(x, self.pad, mode="constant", value=0.0)
-        return x
-
-
-class AEKLDownsample(nn.Module):
-    """
-    Convolution-based downsampling layer.
-
-    Args:
-        spatial_dims: number of spatial dimensions (1D, 2D, 3D).
-        in_channels: number of input channels.
-    """
-
-    def __init__(self, spatial_dims: int, in_channels: int) -> None:
-        super().__init__()
-        self.pad = AsymmetricPad(spatial_dims=spatial_dims)
-
-        self.conv = Convolution(
-            spatial_dims=spatial_dims,
-            in_channels=in_channels,
-            out_channels=in_channels,
-            strides=2,
-            kernel_size=3,
-            padding=0,
-            conv_only=True,
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.pad(x)
-        x = self.conv(x)
         return x
 
 
@@ -232,9 +208,6 @@ class Encoder(nn.Module):
                             use_flash_attention=use_flash_attention,
                         )
                     )
-
-            if not is_final_block:
-                blocks.append(AEKLDownsample(spatial_dims=spatial_dims, in_channels=input_channel))
         # Non-local attention block
         if with_nonlocal_attn is True:
             blocks.append(
@@ -418,36 +391,6 @@ class Decoder(nn.Module):
                         )
                     )
 
-            if not is_final_block:
-                if use_convtranspose:
-                    blocks.append(
-                        Upsample(
-                            spatial_dims=spatial_dims, mode="deconv", in_channels=block_in_ch, out_channels=block_in_ch
-                        )
-                    )
-                else:
-                    post_conv = Convolution(
-                        spatial_dims=spatial_dims,
-                        in_channels=block_in_ch,
-                        out_channels=block_in_ch,
-                        strides=1,
-                        kernel_size=3,
-                        padding=1,
-                        conv_only=True,
-                    )
-                    blocks.append(
-                        Upsample(
-                            spatial_dims=spatial_dims,
-                            mode="nontrainable",
-                            in_channels=block_in_ch,
-                            out_channels=block_in_ch,
-                            interp_mode="nearest",
-                            scale_factor=2.0,
-                            post_conv=post_conv,
-                            align_corners=None,
-                        )
-                    )
-
         blocks.append(nn.GroupNorm(num_groups=norm_num_groups, num_channels=block_in_ch, eps=norm_eps, affine=True))
         blocks.append(
             Convolution(
@@ -487,8 +430,6 @@ class AutoencoderKLv2(nn.Module):
         norm_eps: epsilon for the normalization.
         with_encoder_nonlocal_attn: if True use non-local attention block in the encoder.
         with_decoder_nonlocal_attn: if True use non-local attention block in the decoder.
-        time_shared: if True (only with ``spatial_dims=1``), input is interpreted as ``(B, R, T)`` and reshaped
-            to ``(B*T, 1, R)`` so the model compresses regions ``R`` while preserving the time axis ``T``.
         use_checkpoint: if True, use activation checkpoint to save memory.
         use_convtranspose: if True, use ConvTranspose to upsample feature maps in decoder.
         include_fc: whether to include the final linear layer in the attention block. Default to True.
@@ -510,7 +451,6 @@ class AutoencoderKLv2(nn.Module):
         norm_eps: float = 1e-6,
         with_encoder_nonlocal_attn: bool = True,
         with_decoder_nonlocal_attn: bool = True,
-        time_shared: bool = False,
         use_checkpoint: bool = False,
         use_convtranspose: bool = False,
         include_fc: bool = True,
@@ -534,14 +474,8 @@ class AutoencoderKLv2(nn.Module):
                 "`num_res_blocks` should be a single integer or a tuple of integers with the same length as "
                 "`channels`."
             )
-        if time_shared:
-            if spatial_dims != 1:
-                raise ValueError("time_shared=True is only supported when spatial_dims=1.")
-            if in_channels != 1 or out_channels != 1:
-                raise ValueError(
-                    "time_shared=True expects in_channels=1 and out_channels=1. "
-                    "Provide input as (B, R, T)."
-                )
+        
+        self.swfcd = None
 
         self.encoder: nn.Module = Encoder(
             spatial_dims=spatial_dims,
@@ -600,44 +534,7 @@ class AutoencoderKLv2(nn.Module):
             conv_only=True,
         )
         self.latent_channels = latent_channels
-        self.time_shared = time_shared
         self.use_checkpoint = use_checkpoint
-        self.swfcd = None
-
-    def set_loss_fn_params(self, params):
-        self.loss_fn_params = params
-
-    def set_swfcd(self, swfcd):
-        self.swfcd = swfcd
-
-    @staticmethod
-    def _fold_time_into_batch(x: torch.Tensor) -> tuple[torch.Tensor, tuple[int, int, int]]:
-        if x.ndim != 3:
-            raise ValueError(f"time_shared expects input shape (B, R, T), got {tuple(x.shape)}")
-        bsz, regions, timepoints = x.shape
-        x_folded = x.permute(0, 2, 1).reshape(bsz * timepoints, 1, regions).contiguous()
-        return x_folded, (bsz, regions, timepoints)
-
-    @staticmethod
-    def _unfold_latent_from_batch(z: torch.Tensor, shape: tuple[int, int, int]) -> torch.Tensor:
-        bsz, _, timepoints = shape
-        return z.reshape(bsz, timepoints, z.shape[1], z.shape[2]).permute(0, 2, 3, 1).contiguous()
-
-    @staticmethod
-    def _fold_latent_time_into_batch(z: torch.Tensor) -> tuple[torch.Tensor, tuple[int, int]]:
-        if z.ndim != 4:
-            raise ValueError(f"time_shared expects latent shape (B, C, L, T), got {tuple(z.shape)}")
-        bsz, channels, latent_len, timepoints = z.shape
-        z_folded = z.permute(0, 3, 1, 2).reshape(bsz * timepoints, channels, latent_len).contiguous()
-        return z_folded, (bsz, timepoints)
-
-    @staticmethod
-    def _unfold_recon_from_batch(x: torch.Tensor, shape: tuple[int, int]) -> torch.Tensor:
-        bsz, timepoints = shape
-        x_unfolded = x.reshape(bsz, timepoints, x.shape[1], x.shape[2]).permute(0, 2, 3, 1).contiguous()
-        if x_unfolded.shape[1] == 1:
-            return x_unfolded[:, 0]
-        return x_unfolded
 
     def encode(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -647,24 +544,15 @@ class AutoencoderKLv2(nn.Module):
             x: BxCx[SPATIAL DIMS] tensor
 
         """
-        reshape_meta: tuple[int, int, int] | None = None
-        x_in = x
-        if self.time_shared:
-            x_in, reshape_meta = self._fold_time_into_batch(x)
-
         if self.use_checkpoint:
-            h = torch.utils.checkpoint.checkpoint(self.encoder, x_in, use_reentrant=False)
+            h = torch.utils.checkpoint.checkpoint(self.encoder, x, use_reentrant=False)
         else:
-            h = self.encoder(x_in)
+            h = self.encoder(x)
 
         z_mu = self.quant_conv_mu(h)
         z_log_var = self.quant_conv_log_sigma(h)
         z_log_var = torch.clamp(z_log_var, -30.0, 20.0)
         z_sigma = torch.exp(z_log_var / 2)
-
-        if self.time_shared and reshape_meta is not None:
-            z_mu = self._unfold_latent_from_batch(z_mu, reshape_meta)
-            z_sigma = self._unfold_latent_from_batch(z_sigma, reshape_meta)
 
         return z_mu, z_sigma
 
@@ -709,27 +597,13 @@ class AutoencoderKLv2(nn.Module):
         Returns:
             decoded image tensor
         """
-        reshape_meta: tuple[int, int] | None = None
-        z_in = z
-        if self.time_shared and z.ndim == 4:
-            z_in, reshape_meta = self._fold_latent_time_into_batch(z)
-
-        z_in = self.post_quant_conv(z_in)
+        z = self.post_quant_conv(z)
         dec: torch.Tensor
         if self.use_checkpoint:
-            dec = torch.utils.checkpoint.checkpoint(self.decoder, z_in, use_reentrant=False)
+            dec = torch.utils.checkpoint.checkpoint(self.decoder, z, use_reentrant=False)
         else:
-            dec = self.decoder(z_in)
-
-        if self.time_shared and reshape_meta is not None:
-            dec = self._unfold_recon_from_batch(dec, reshape_meta)
+            dec = self.decoder(z)
         return dec
-
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        z_mu, z_sigma = self.encode(x)
-        z = self.sampling(z_mu, z_sigma)
-        reconstruction = self.decode(z)
-        return reconstruction, z_mu, z_sigma, z
 
     def encode_stage_2_inputs(self, x: torch.Tensor) -> torch.Tensor:
         z_mu, z_sigma = self.encode(x)
@@ -798,6 +672,22 @@ class AutoencoderKLv2(nn.Module):
             # print all remaining keys in old_state_dict
             print("remaining keys in old_state_dict:", old_state_dict.keys())
         self.load_state_dict(new_state_dict, strict=True)
+
+    def forward(self, x):
+        # changing this to also get the latent vector
+        z_mu, z_sigma = self.encode(x)
+        z = self.sampling(z_mu, z_sigma)
+        reconstruction = self.decode(z)
+
+        # clamp z_sigma to stabilise
+        # z_sigma = torch.clamp(z_sigma, -10.0, 10.0)
+        return reconstruction, z_mu, z_sigma, z
+        
+    def set_loss_fn_params(self, params):
+        self.loss_fn_params = params
+
+    def set_swfcd(self, swfcd):
+        self.swfcd = swfcd
     
     def loss(self, x, model_output):
         x_hat, z_mu, z_sigma, _ = model_output

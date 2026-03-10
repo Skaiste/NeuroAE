@@ -1,9 +1,12 @@
 training:
-  learning_rate: 1e-3
-  weight_decay: 1e-4
-  num_epochs: 20
-  save_dir: ./models
+  learning_rate: 0.001
   loss_params:
+    beta: 0
     loss_per_feature: true
-    beta: 1
-    recon_distribution: bernoulli
+    swfcd_beta: 1.0
+    swfcd_step: 3
+    swfcd_window: 30
+  num_epochs: 60
+  save_dir: ./models
+  weight_decay: 0.0001
+  use_abeta_tau: false

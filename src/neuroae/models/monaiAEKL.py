@@ -55,3 +55,4 @@ class AutoencoderKLv1(MonaiAEKL):
             loss['loss'] += swfcd_beta * swfcd['rmse']
 
         return loss
+    

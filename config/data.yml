@@ -1,19 +1,21 @@
 data:
-  batch_size: 64
-  groups: [HC, MCI, AD]
-  random_seed: 42
-  train_split: 0.7
-  val_split: 0.15
+  batch_size: 32
   datasplit_file: data/train_val_test_split.csv
   datasplit_mode: load
-  normalize: true
-  transpose: false
-  pad_features: true
-  truncate_features: false
-  flatten: false
-  timepoints_as_samples: false
   fc_input: false
-
+  flatten: false
+  groups:
+  - HC
+  - MCI
+  - AD
+  normalize: true
+  pad_features: true
+  preserve_timepoints: false
+  random_seed: 42
+  timepoints_as_samples: false
+  transpose: false
+  truncate_features: false
+  use_abeta_tau: false
 filter:
   apply_demean: true
   apply_detrend: true

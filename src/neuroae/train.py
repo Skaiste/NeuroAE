@@ -92,7 +92,8 @@ def train_vae(
     save_dir='./checkpoints',
     name='basicVAE_general',
     pca=None,
-    noise=None
+    noise=None,
+    use_abeta_tau=False
 ):
     device = torch.device(device)
     model = model.to(device)
@@ -112,7 +113,7 @@ def train_vae(
         train_loss_params = {}
 
         model.train()
-        for batch_idx, (data, _) in enumerate(train_loader):
+        for batch_idx, (data, labels) in enumerate(train_loader):
             x = data.to(device)
             valid_mask = _build_valid_mask(x, train_valid_last_dim)
 
@@ -128,7 +129,15 @@ def train_vae(
 
             output = model(x)
             output = _apply_recon_mask(x, output, valid_mask)
-            loss = model.loss(x, output)
+
+            if use_abeta_tau:
+                _, abeta, tau = labels
+                abeta = abeta.to(device)
+                tau = tau.to(device)
+                loss = model.loss(x, abeta, tau, output)
+            else:
+                loss = model.loss(x, output)
+
             for p in loss:
                 if p not in train_loss_params:
                     train_loss_params[p] = 0
@@ -148,12 +157,19 @@ def train_vae(
         model.eval()
         val_loss_params = {}
         with torch.no_grad():
-            for batch_idx, (data, _) in enumerate(val_loader):
+            for batch_idx, (data, labels) in enumerate(val_loader):
                 x = data.to(device)
                 valid_mask = _build_valid_mask(x, val_valid_last_dim)
                 output = model(x)
                 output = _apply_recon_mask(x, output, valid_mask)
-                loss = model.loss(x, output)
+            
+                if use_abeta_tau:
+                    _, abeta, tau = labels
+                    abeta = abeta.to(device)
+                    tau = tau.to(device)
+                    loss = model.loss(x, abeta, tau, output)
+                else:
+                    loss = model.loss(x, output)
 
                 for p in loss:
                     if p not in val_loss_params:

@@ -89,6 +89,8 @@ AutoencoderKL:
         pad_features: true
     model:
       name: AutoencoderKLv1
+    training:
+      num_epochs: 40
   exp_params:
     data:
       data:
@@ -99,7 +101,6 @@ AutoencoderKL:
       latent_dim: [64, 32, 10, 4]
       num_res_blocks: [1, 2, 4]
     training:
-      num_epochs: 40
       loss_params:
         beta: [1.0, 0.75, 0.5]
 

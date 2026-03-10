@@ -1,7 +1,6 @@
 model:
   freeze_encoder: false
+  hidden_dims: [16, 8]
+  latent_dim: 4
+  name: AutoencoderKLv2
   reset_decoder: false
-  name: AutoencoderKL
-  channels: [256]
-  num_res_blocks: 2
-  latent_channels: 16
