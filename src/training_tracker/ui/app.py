@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 
@@ -32,9 +33,16 @@ def _default_experiments_config_path() -> Path:
     return Path("config") / "experiments.yml"
 
 
-def _results_fingerprint(results_dir: Path) -> int:
+def _default_index_path(results_dir: Path) -> Path:
+    env_value = os.environ.get("TRAINING_TRACKER_INDEX_FILE")
+    if env_value:
+        return Path(env_value)
+    return results_dir / "index.jsonl"
+
+
+def _results_fingerprint(index_path: Path, results_dir: Path) -> int:
     """Return a lightweight cache key that changes when tracker files change."""
-    candidates = [results_dir / "index.jsonl"]
+    candidates = [index_path]
     candidates.extend(results_dir.glob("experiments/*/metadata.json"))
     candidates.extend(results_dir.glob("experiments/*/history.json"))
 
@@ -46,16 +54,23 @@ def _results_fingerprint(results_dir: Path) -> int:
 
 
 @st.cache_data(show_spinner=False)
-def _load_rows_cached(results_dir_str: str, fingerprint: int) -> list[dict]:
+def _load_rows_cached(
+    results_dir_str: str,
+    index_path_str: str,
+    fingerprint: int,
+    score_schema_version: int,
+) -> list[dict]:
     # `fingerprint` is only used for cache invalidation.
     _ = fingerprint
+    _ = score_schema_version
     manager = TrainingResultsManager(results_dir=Path(results_dir_str))
+    manager.index_path = Path(index_path_str)
     rows = manager.list_experiments(
         sort_by="created_at",
         ascending=False,
         limit=None,
     )
-    rows = _attach_significance(rows, manager)
+    rows = _attach_significance(rows, manager, metadata_cache=None)
     for row in rows:
         category = _classify_vs_pca(row)
         row["pca_class"] = _classification_label(category)
@@ -156,9 +171,12 @@ def _is_recon_metric(metric_suffix: str) -> bool:
 
 def _to_float(value) -> float | None:
     try:
-        return float(value)
+        parsed = float(value)
     except (TypeError, ValueError):
         return None
+    if not math.isfinite(parsed):
+        return None
+    return parsed
 
 
 def _lighten_hex(hex_color: str, factor: float = 0.45) -> str:
@@ -310,46 +328,103 @@ def _overwrite_configs_from_metadata(metadata: dict, config_dir: Path) -> None:
     _write_yaml(config_dir / "data.yml", data_params)
 
 
-def _render_evaluation_tab(metadata: dict) -> None:
+def _render_evaluation_tab(
+    metadata: dict,
+    selected_row: dict | None,
+    best_fc_logreg_row: dict | None,
+    best_score_row: dict | None,
+) -> None:
     evaluation = metadata.get("evaluation")
     if not isinstance(evaluation, dict):
         st.info("No evaluation metrics available for this experiment.")
         return
 
-    model_metrics = evaluation.get("model")
-    pca_metrics = evaluation.get("pca")
-    if not isinstance(model_metrics, dict) or not isinstance(pca_metrics, dict):
-        st.info("Evaluation metrics are incomplete (model and/or pca missing).")
+    selected_model_metrics = evaluation.get("model")
+    if not isinstance(selected_model_metrics, dict):
+        st.info("Evaluation metrics are incomplete (model missing).")
         return
 
     updated_at = evaluation.get("updated_at")
     if updated_at:
         st.caption(f"Evaluation updated: {updated_at}")
 
-    metric_keys = sorted(set(model_metrics.keys()).intersection(pca_metrics.keys()))
+    metric_row_key_map = {
+        "mse": "test_mse",
+        "fc_preservation": "test_fc_preservation",
+        "silhouette": "test_silhouette",
+        "logreg_accuracy": "test_logreg_accuracy",
+        "swfcd_pearson": "test_swfcd_pearson",
+        "swfcd_mad": "test_swfcd_mad",
+        "swfcd_rmse": "test_swfcd_rmse",
+    }
+
+    selected_id = str(metadata.get("experiment_id", "selected"))
+    selected_label = f"selected_{_short_experiment_id(selected_id)}"
+    best_fc_logreg_label = (
+        f"best_fc_logreg_{_short_experiment_id(str(best_fc_logreg_row.get('experiment_id', 'na')))}"
+        if best_fc_logreg_row is not None
+        else "best_fc_logreg"
+    )
+    best_score_label = (
+        f"best_score_{_short_experiment_id(str(best_score_row.get('experiment_id', 'na')))}"
+        if best_score_row is not None
+        else "best_score"
+    )
+
     numeric_metric_keys = []
-    for key in metric_keys:
-        model_value = _to_float(model_metrics.get(key))
-        pca_value = _to_float(pca_metrics.get(key))
-        if model_value is None or pca_value is None:
+    for metric_key in sorted(metric_row_key_map.keys()):
+        selected_value = _to_float(selected_model_metrics.get(metric_key))
+        best_fc_logreg_value = (
+            _to_float(best_fc_logreg_row.get(metric_row_key_map[metric_key]))
+            if best_fc_logreg_row is not None
+            else None
+        )
+        best_score_value = (
+            _to_float(best_score_row.get(metric_row_key_map[metric_key]))
+            if best_score_row is not None
+            else None
+        )
+        if selected_value is None and best_fc_logreg_value is None and best_score_value is None:
             continue
-        numeric_metric_keys.append(key)
+        numeric_metric_keys.append(metric_key)
 
     if not numeric_metric_keys:
-        st.info("No shared numeric metrics found between model and PCA.")
+        st.info("No comparable numeric metrics found.")
         return
 
     for idx in range(0, len(numeric_metric_keys), 4):
         row_metrics = numeric_metric_keys[idx:idx + 4]
         row_cols = st.columns(4)
         for col, metric_name in zip(row_cols, row_metrics):
-            model_value = _to_float(model_metrics.get(metric_name))
-            pca_value = _to_float(pca_metrics.get(metric_name))
+            selected_value = _to_float(selected_model_metrics.get(metric_name))
+            best_fc_logreg_value = (
+                _to_float(best_fc_logreg_row.get(metric_row_key_map[metric_name]))
+                if best_fc_logreg_row is not None
+                else None
+            )
+            best_score_value = (
+                _to_float(best_score_row.get(metric_row_key_map[metric_name]))
+                if best_score_row is not None
+                else None
+            )
             metric_label = metric_name.replace('_', ' ').title()
+            labels = []
+            values = []
+            if selected_value is not None:
+                labels.append(selected_label)
+                values.append(selected_value)
+            if best_fc_logreg_value is not None:
+                labels.append(best_fc_logreg_label)
+                values.append(best_fc_logreg_value)
+            if best_score_value is not None:
+                labels.append(best_score_label)
+                values.append(best_score_value)
+            if not values:
+                continue
             metric_df = pd.DataFrame(
                 {
-                    "parameter_value": ["Model", "PCA"],
-                    "avg_metric": [model_value, pca_value],
+                    "parameter_value": labels,
+                    "avg_metric": values,
                 }
             )
             with col:
@@ -362,14 +437,22 @@ def _render_evaluation_tab(metadata: dict) -> None:
                 )
 
 
-def _attach_significance(rows: list[dict], manager: TrainingResultsManager) -> list[dict]:
+def _attach_significance(
+    rows: list[dict],
+    manager: TrainingResultsManager,
+    metadata_cache: dict[str, dict] | None = None,
+) -> list[dict]:
     output: list[dict] = []
     for row in rows:
         row_copy = dict(row)
-        try:
-            metadata = manager.get_experiment(row_copy["experiment_id"])
-        except Exception:
-            metadata = {}
+        experiment_id = str(row_copy.get("experiment_id", ""))
+        metadata = (metadata_cache or {}).get(experiment_id)
+        if not isinstance(metadata, dict):
+            try:
+                loaded = manager.get_experiment(experiment_id)
+                metadata = loaded if isinstance(loaded, dict) else {}
+            except Exception:
+                metadata = {}
         model_params = metadata.get("model_params", {}) if isinstance(metadata, dict) else {}
         training_params = metadata.get("training_params", {}) if isinstance(metadata, dict) else {}
         data_params = metadata.get("data_params", {}) if isinstance(metadata, dict) else {}
@@ -386,21 +469,31 @@ def _attach_significance(rows: list[dict], manager: TrainingResultsManager) -> l
             row_copy["test_fc_preservation"] = _to_float(model_eval.get("fc_preservation"))
             row_copy["test_silhouette"] = _to_float(model_eval.get("silhouette"))
             row_copy["test_logreg_accuracy"] = _to_float(model_eval.get("logreg_accuracy"))
+            row_copy["test_swfcd_pearson"] = _to_float(model_eval.get("swfcd_pearson"))
+            row_copy["test_swfcd_mad"] = _to_float(model_eval.get("swfcd_mad"))
+            row_copy["test_swfcd_rmse"] = _to_float(model_eval.get("swfcd_rmse"))
         else:
             row_copy["test_mse"] = None
             row_copy["test_fc_preservation"] = None
             row_copy["test_silhouette"] = None
             row_copy["test_logreg_accuracy"] = None
+            row_copy["test_swfcd_pearson"] = None
+            row_copy["test_swfcd_mad"] = None
+            row_copy["test_swfcd_rmse"] = None
         if isinstance(pca_eval, dict):
             row_copy["pca_mse"] = _to_float(pca_eval.get("mse"))
             row_copy["pca_fc_preservation"] = _to_float(pca_eval.get("fc_preservation"))
             row_copy["pca_silhouette"] = _to_float(pca_eval.get("silhouette"))
             row_copy["pca_logreg_accuracy"] = _to_float(pca_eval.get("logreg_accuracy"))
+            row_copy["pca_swfcd_pearson"] = _to_float(pca_eval.get("swfcd_pearson"))
+            row_copy["pca_swfcd_rmse"] = _to_float(pca_eval.get("swfcd_rmse"))
         else:
             row_copy["pca_mse"] = None
             row_copy["pca_fc_preservation"] = None
             row_copy["pca_silhouette"] = None
             row_copy["pca_logreg_accuracy"] = None
+            row_copy["pca_swfcd_pearson"] = None
+            row_copy["pca_swfcd_rmse"] = None
 
         # Prefer explicitly stored comparison deltas when available; otherwise derive.
         if isinstance(comparison_eval, dict):
@@ -510,7 +603,7 @@ def _minmax_normalize(values: list[float | None]) -> list[float | None]:
 
 
 def _add_scores(rows: list[dict]) -> None:
-    """Compute PCA score (from deltas) and score (from raw test metrics)."""
+    """Compute PCA score, score, and FC score."""
     mse_deltas = [_to_float(row.get("delta_mse")) for row in rows]
     fc_deltas = [_to_float(row.get("delta_fc_preservation")) for row in rows]
     sil_deltas = [_to_float(row.get("delta_silhouette")) for row in rows]
@@ -540,26 +633,50 @@ def _add_scores(rows: list[dict]) -> None:
     test_fc = [_to_float(row.get("test_fc_preservation")) for row in rows]
     test_sil = [_to_float(row.get("test_silhouette")) for row in rows]
     test_logreg = [_to_float(row.get("test_logreg_accuracy")) for row in rows]
+    test_swfcd_pearson = [_to_float(row.get("test_swfcd_pearson")) for row in rows]
 
     test_mse_norm = _minmax_normalize(test_mse)
     test_fc_norm = _minmax_normalize(test_fc)
     test_sil_norm = _minmax_normalize(test_sil)
     test_logreg_norm = _minmax_normalize(test_logreg)
+    test_swfcd_pearson_norm = _minmax_normalize(test_swfcd_pearson)
 
     for idx, row in enumerate(rows):
         fc_input_enabled = row.get("data_fc_input")
         if isinstance(fc_input_enabled, str):
             fc_input_enabled = fc_input_enabled.strip().lower() == "true"
+        mse_component = 0.5 if test_mse_norm[idx] is None else (1.0 - test_mse_norm[idx])
         fc_component = 0.5 if fc_input_enabled else test_fc_norm[idx]
+        if fc_component is None:
+            fc_component = 0.5
         silhouette_component = 0.0
+        logreg_component = 0.5 if test_logreg_norm[idx] is None else test_logreg_norm[idx]
+        swfcd_component = 0.5
+        if test_swfcd_pearson_norm[idx] is not None:
+            swfcd_component = test_swfcd_pearson_norm[idx]
+        row["score"] = (
+            mse_component
+            + fc_component
+            + silhouette_component
+            + logreg_component
+            + swfcd_component
+        )
+        if test_fc_norm[idx] is None or test_swfcd_pearson_norm[idx] is None:
+            row["fc_score"] = None
+        else:
+            row["fc_score"] = test_fc_norm[idx] + test_swfcd_pearson_norm[idx]
         if (
-            test_mse_norm[idx] is None
-            or fc_component is None
+            test_fc_norm[idx] is None
+            or test_swfcd_pearson_norm[idx] is None
             or test_logreg_norm[idx] is None
         ):
-            row["score"] = None
-            continue
-        row["score"] = (1.0 - test_mse_norm[idx]) + fc_component + silhouette_component + test_logreg_norm[idx]
+            row["fc_logreg_score"] = None
+        else:
+            row["fc_logreg_score"] = (
+                test_fc_norm[idx]
+                + test_swfcd_pearson_norm[idx]
+                + test_logreg_norm[idx]
+            )
 
 
 def _value_sort_key(value):
@@ -604,37 +721,46 @@ def _collect_param_paths(node, prefix: tuple[str, ...] = ()) -> set[tuple[str, .
     return paths
 
 
-PATH_TO_ROW_KEY = {
-    ("model", "latent_dim"): "latent_dim",
-    ("model", "hidden_dim"): "model_hidden_dim",
-    ("training", "loss_params", "beta"): "training_beta",
-    ("data", "data", "flatten"): "data_flatten",
-    ("data", "data", "transpose"): "data_transpose",
-    ("data", "data", "timepoints_as_samples"): "data_timepoints_as_samples",
-    ("data", "data", "fc_input"): "data_fc_input",
-}
-
-ROW_KEY_LABEL = {
-    "latent_dim": "Latent dim",
-    "model_hidden_dim": "Hidden dim",
-    "training_beta": "Beta",
-    "data_flatten": "Flattened data",
-    "data_transpose": "Transposed data",
-    "data_timepoints_as_samples": "Timepoints as samples",
-    "data_fc_input": "FC input",
-}
+def _collect_leaf_paths_from_dict(node, prefix: tuple[str, ...] = ()) -> set[tuple[str, ...]]:
+    if not isinstance(node, dict):
+        return {prefix} if prefix else set()
+    paths: set[tuple[str, ...]] = set()
+    for key, value in node.items():
+        key_path = prefix + (str(key),)
+        if isinstance(value, dict):
+            paths |= _collect_leaf_paths_from_dict(value, key_path)
+        else:
+            paths.add(key_path)
+    return paths
 
 
-def _parameter_options_for_model_type(model_type: str, experiments_spec: dict, rows: list[dict]) -> dict[str, str]:
-    model_spec = experiments_spec.get(model_type, {})
-    exp_params = model_spec.get("exp_params", {}) if isinstance(model_spec, dict) else {}
-    paths = _collect_param_paths(exp_params) if isinstance(exp_params, dict) else set()
+def _parameter_options_for_model_type(model_type: str, rows: list[dict]) -> dict[str, str]:
+    model_rows = [row for row in rows if str(row.get("model_type", "unknown")) == model_type]
+    if not model_rows:
+        return {}
+
+    paths: set[tuple[str, ...]] = set()
+    for row in model_rows:
+        model_params = row.get("_model_params")
+        training_params = row.get("_training_params")
+        data_params = row.get("_data_params")
+        if isinstance(model_params, dict):
+            paths |= {("model",) + path for path in _collect_leaf_paths_from_dict(model_params)}
+        if isinstance(training_params, dict):
+            paths |= {("training",) + path for path in _collect_leaf_paths_from_dict(training_params)}
+        if isinstance(data_params, dict):
+            paths |= {("data",) + path for path in _collect_leaf_paths_from_dict(data_params)}
 
     options: dict[str, str] = {}
     for path in sorted(paths):
-        path_key = ".".join(path)
-        if all(_get_param_value_from_row(row, path) is None for row in rows):
+        values = {
+            _encode_group_value(_get_param_value_from_row(row, path))
+            for row in model_rows
+            if _get_param_value_from_row(row, path) is not None
+        }
+        if len(values) < 2:
             continue
+        path_key = ".".join(path)
         options[path_key] = " / ".join(path)
     return options
 
@@ -733,35 +859,20 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
+    st.title("Training Tracker")
     results_dir = _default_results_dir()
     manager = TrainingResultsManager(results_dir=results_dir)
-    experiments_spec = _load_experiments_spec(_default_experiments_config_path())
-    rows = _load_rows_cached(str(results_dir), _results_fingerprint(results_dir))
+    index_path = _default_index_path(results_dir)
+    manager.index_path = index_path
 
-    st.title("Training Tracker")
-    pca_categories = [_classify_vs_pca(row) for row in rows]
-    worse_count = sum(1 for category in pca_categories if category == "worse")
-    same_count = sum(1 for category in pca_categories if category == "same")
-    better_count = sum(1 for category in pca_categories if category == "better")
-    best_row = max(
-        (row for row in rows if row.get("significance") is not None),
-        key=lambda row: row["significance"],
-        default=None,
+    rows = _load_rows_cached(
+        str(results_dir),
+        str(index_path),
+        _results_fingerprint(index_path, results_dir),
+        6,
     )
 
-    best_model_text = "N/A"
-    if best_row is not None:
-        best_model_text = (
-            f"{best_row.get('model_type', 'unknown')} "
-            f"({best_row.get('experiment_id')}, significance={best_row.get('significance'):.4f})"
-        )
-
-    st.caption(
-        f"All experiments: {len(rows)}   |   "
-        f"Worse than PCA: {worse_count}   |   "
-        f"Same as PCA: {same_count}   |   "
-        f"Better than PCA: {better_count}"
-    )
+    st.caption(f"All experiments: {len(rows)}")
     if not rows:
         st.info("No experiments available.")
         return
@@ -773,17 +884,16 @@ def main() -> None:
         "model_type",
         "latent_dim",
         "score",
-        "pca_score",
-        "pca_class",
+        "fc_score",
+        "fc_logreg_score",
         "best_val_loss",
         "test_mse",
         "test_fc_preservation",
         "test_silhouette",
         "test_logreg_accuracy",
-        "delta_mse",
-        "delta_fc_preservation",
-        "delta_silhouette",
-        "delta_logreg_accuracy",
+        "test_swfcd_pearson",
+        "test_swfcd_mad",
+        "test_swfcd_rmse",
     ]
     present_cols = [col for col in visible_cols if col in table_df.columns]
     view_options = ["All Experiments", "Experiment Details", "Compare Experiments", "Parameter Comparison"]
@@ -801,6 +911,7 @@ def main() -> None:
     )
 
     experiment_options = [row["experiment_id"] for row in rows]
+    row_by_id = {str(row.get("experiment_id")): row for row in rows}
     if "details_experiment_id" not in st.session_state or st.session_state["details_experiment_id"] not in experiment_options:
         st.session_state["details_experiment_id"] = experiment_options[0]
 
@@ -853,7 +964,11 @@ def main() -> None:
             hide_index=True,
             column_config={
                 "score": "score",
-                "pca_score": "PCA score",
+                "fc_score": "FC score",
+                "fc_logreg_score": "FC+LogReg score",
+                "test_swfcd_pearson": "test_swfcd_pearson",
+                "test_swfcd_mad": "test_swfcd_mad",
+                "test_swfcd_rmse": "test_swfcd_rmse",
             },
             on_select="rerun",
             selection_mode="single-cell",
@@ -879,10 +994,26 @@ def main() -> None:
 
         metadata = manager.get_experiment(experiment_id)
         history = manager.get_history(experiment_id)
+        selected_row = row_by_id.get(experiment_id)
+        best_fc_logreg_row = max(
+            (row for row in rows if _to_float(row.get("fc_logreg_score")) is not None),
+            key=lambda row: float(row["fc_logreg_score"]),
+            default=None,
+        )
+        best_score_row = max(
+            (row for row in rows if _to_float(row.get("score")) is not None),
+            key=lambda row: float(row["score"]),
+            default=None,
+        )
         tabs = st.tabs(["Evaluation", "History", "Overview", "Raw JSON"])
 
         with tabs[0]:
-            _render_evaluation_tab(metadata)
+            _render_evaluation_tab(
+                metadata=metadata,
+                selected_row=selected_row,
+                best_fc_logreg_row=best_fc_logreg_row,
+                best_score_row=best_score_row,
+            )
 
         with tabs[1]:
             history_df = _history_to_frame(history)
@@ -891,6 +1022,8 @@ def main() -> None:
             else:
                 metric_suffixes = _available_metric_suffixes(list(history_df.columns))
                 visible_metrics = metric_suffixes[:3] if metric_suffixes else []
+                if "swfcd_rmse" in metric_suffixes and "swfcd_rmse" not in visible_metrics:
+                    visible_metrics.append("swfcd_rmse")
                 if not visible_metrics:
                     st.warning("No train/val metrics available.")
                 else:
@@ -965,7 +1098,6 @@ def main() -> None:
 
     elif active_view == "Compare Experiments":
         st.subheader("Compare Experiments")
-        row_by_id = {row["experiment_id"]: row for row in rows}
         default_compare = experiment_options[:2] if len(experiment_options) >= 2 else experiment_options[:1]
         selected_compare_ids = st.multiselect(
             "Experiments to compare",
@@ -984,32 +1116,26 @@ def main() -> None:
             ("test_fc_preservation", "FC Preservation"),
             ("test_silhouette", "Silhouette"),
             ("test_logreg_accuracy", "LogReg Accuracy"),
+            ("test_swfcd_pearson", "SWFCD Pearson"),
+            ("test_swfcd_rmse", "SWFCD RMSE"),
         ]
-        pca_metric_by_model_metric = {
-            "test_mse": "pca_mse",
-            "test_fc_preservation": "pca_fc_preservation",
-            "test_silhouette": "pca_silhouette",
-            "test_logreg_accuracy": "pca_logreg_accuracy",
-        }
         selected_rows = [row_by_id[exp_id] for exp_id in selected_compare_ids]
         display_labels = [str(row.get("experiment_id", "exp")) for row in selected_rows]
         param_details = _build_compare_param_details(selected_rows)
 
-        for idx in range(0, len(metric_specs), 2):
-            row_metrics = metric_specs[idx:idx + 2]
-            row_cols = st.columns(2)
+        for idx in range(0, len(metric_specs), 3):
+            row_metrics = metric_specs[idx:idx + 3]
+            row_cols = st.columns(3)
             for col, (metric_key, metric_title) in zip(row_cols, row_metrics):
                 plot_rows = []
                 for label, detail, exp_row in zip(display_labels, param_details, selected_rows):
                     metric_value = _to_float(exp_row.get(metric_key))
                     if metric_value is None:
                         continue
-                    pca_metric_value = _to_float(exp_row.get(pca_metric_by_model_metric[metric_key]))
                     plot_rows.append(
                         {
                             "model": label,
                             "model_value": metric_value,
-                            "pca_value": pca_metric_value,
                             "parameters": detail,
                         }
                     )
@@ -1027,24 +1153,11 @@ def main() -> None:
                             tooltip=[
                                 alt.Tooltip("model:N", title="Experiment"),
                                 alt.Tooltip("model_value:Q", title=f"Model {metric_title}", format=".6f"),
-                                alt.Tooltip("pca_value:Q", title=f"PCA {metric_title}", format=".6f"),
                                 alt.Tooltip("parameters:N", title="Unique params"),
                             ],
                         )
-                        pca_ticks = alt.Chart(metric_df).mark_tick(
-                            color="#111111",
-                            thickness=2,
-                            size=28,
-                        ).encode(
-                            x=alt.X("model:N", sort=None, title=None),
-                            y=alt.Y("pca_value:Q", title=metric_title),
-                            tooltip=[
-                                alt.Tooltip("model:N", title="Experiment"),
-                                alt.Tooltip("pca_value:Q", title=f"PCA {metric_title}", format=".6f"),
-                            ],
-                        )
                         st.altair_chart(
-                            (bars + pca_ticks).properties(height=320),
+                            bars.properties(height=320),
                             use_container_width=True,
                         )
 
@@ -1062,14 +1175,11 @@ def main() -> None:
             )
             parameter_options = _parameter_options_for_model_type(
                 model_type=selected_model_type,
-                experiments_spec=experiments_spec,
                 rows=rows,
             )
             if not parameter_options:
-                parameter_options = {
-                    ".".join(path): ROW_KEY_LABEL.get(row_key, ".".join(path))
-                    for path, row_key in PATH_TO_ROW_KEY.items()
-                }
+                st.info("No varying parameters found for this model type.")
+                return
             parameter_keys = list(parameter_options.keys())
             if (
                 "param_filter_param_key" in st.session_state
@@ -1118,7 +1228,7 @@ def main() -> None:
             metric_specs = [
                 ("test_mse", "MSE"),
                 ("test_fc_preservation", "FC Preservation"),
-                ("test_silhouette", "Silhouette"),
+                ("test_swfcd_pearson", "SWFCD Pearson"),
                 ("test_logreg_accuracy", "LogReg Accuracy"),
             ]
 
