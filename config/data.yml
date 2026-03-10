@@ -10,7 +10,7 @@ data:
   - AD
   normalize: true
   pad_features: true
-  preserve_timepoints: false
+  preserve_timepoints: true
   random_seed: 42
   timepoints_as_samples: false
   transpose: false

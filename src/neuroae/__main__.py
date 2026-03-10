@@ -194,8 +194,8 @@ def load_model_from_config(model_config, input_dim, timepoint_dim, device, prese
     elif model_name.startswith("AutoencoderKL"):
         if model_name == "AutoencoderKLv1":
             from .models.monaiAEKL import AutoencoderKLv1 as AutoencoderKL
-        elif model_name == "AutoencoderKLv2":
-            from .models.autoencoderkl import AutoencoderKLv2 as AutoencoderKL
+        elif model_name == "AutoencoderKLv3":
+            from .models.autoencoderkl import AutoencoderKLv3 as AutoencoderKL
         latent_dim = model_config['model']['latent_dim']
         hidden_dim = model_config['model']['hidden_dims']
         attention_levels = model_config['model'].get('attention_levels', [False] * len(hidden_dim))
@@ -212,7 +212,7 @@ def load_model_from_config(model_config, input_dim, timepoint_dim, device, prese
             with_encoder_nonlocal_attn=False,
             with_decoder_nonlocal_attn=False,
         )
-        if model_name == "AutoencoderKLv2":
+        if model_name == "AutoencoderKLv3":
             latent_dim *= timepoint_dim
         model = AutoencoderKL(**aekl_kwargs)
     elif model_name == "DeterministicAE":
@@ -390,6 +390,9 @@ def run_training(model, model_name, latent_dim, loaders, training_config, model_
         pca=pca,
         noise=training_config['training'].get("noise", None),
         use_abeta_tau=training_config['training'].get('use_abeta_tau', False),
+        convergence_patience=training_config['training'].get('convergence_patience'),
+        convergence_min_delta=training_config['training'].get('convergence_min_delta', 0.0),
+        convergence_warmup_epochs=training_config['training'].get('convergence_warmup_epochs', 0),
     )
     model_artifact = pathlib.Path(training_config['training']['save_dir']) / f"{experiment_id}_model.pt"
     experiment_metadata = {

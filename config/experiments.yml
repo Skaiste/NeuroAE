@@ -38,6 +38,9 @@ default:
       swfcd_beta: 0
       swfcd_window: 30
       swfcd_step: 3
+    convergence_patience: 10
+    convergence_min_delta: 1e-4
+    convergence_warmup_epochs: 10
 
 LinearAE:
   static_params:
@@ -48,7 +51,7 @@ LinearAE:
       latent_dim: [4, 8, 12]
     training:
       loss_params:
-        beta: [1.0, 0.75, 0.5]
+        beta: [1.0, 0.75, 0.5, 0]
         swfcd_beta: [1.0, 0.5, 0]
 
 BasicVAE:
@@ -64,7 +67,7 @@ BasicVAE:
       latent_dim: [10, 8, 4]
     training:
       loss_params:
-        beta: [1.0, 0.75, 0.5]
+        beta: [1.0, 0.75, 0.5, 0]
         swfcd_beta: [1.0, 0.5, 0]
 
 
@@ -81,7 +84,7 @@ BasicVAETimeShared:
       latent_dim: [10, 8, 4, 2]
     training:
       loss_params:
-        beta: [1.0, 0.75, 0.5]
+        beta: [1.0, 0.75, 0.5, 0]
         swfcd_beta: [1.0, 0.5, 0]
 
 AutoencoderKL:
@@ -91,9 +94,9 @@ AutoencoderKL:
         pad_features: true
         flatten: false
     model:
-      name: AutoencoderKLv2
+      name: AutoencoderKLv3
     training:
-      num_epochs: 40
+      num_epochs: 60
   exp_params:
     model:
       channels: [[128, 64], [128], [64], [64, 32], [32], [16]] #[256, 128, 64], [256, 128], [256], 

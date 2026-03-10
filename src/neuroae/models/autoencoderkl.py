@@ -412,7 +412,7 @@ class Decoder(nn.Module):
         return x
 
 
-class AutoencoderKLv2(nn.Module):
+class AutoencoderKLv3(nn.Module):
     """
     Autoencoder model with KL-regularized latent space based on
     Rombach et al. "High-Resolution Image Synthesis with Latent Diffusion Models" https://arxiv.org/abs/2112.10752

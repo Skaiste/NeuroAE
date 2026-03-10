@@ -10,3 +10,6 @@ training:
   save_dir: ./models
   weight_decay: 0.0001
   use_abeta_tau: false
+  convergence_patience: 10
+  convergence_min_delta: 1e-4
+  convergence_warmup_epochs: 10

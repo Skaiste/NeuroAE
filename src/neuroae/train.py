@@ -93,7 +93,10 @@ def train_vae(
     name='basicVAE_general',
     pca=None,
     noise=None,
-    use_abeta_tau=False
+    use_abeta_tau=False,
+    convergence_patience=None,
+    convergence_min_delta=0.0,
+    convergence_warmup_epochs=0,
 ):
     device = torch.device(device)
     model = model.to(device)
@@ -106,6 +109,7 @@ def train_vae(
         'val': {}
     }
     best_model_losses = None
+    epochs_without_improvement = 0
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     train_valid_last_dim = _dataset_valid_last_dim(train_loader.dataset)
     val_valid_last_dim = _dataset_valid_last_dim(val_loader.dataset)
@@ -187,12 +191,32 @@ def train_vae(
 
         # select best model based on validation loss
         avg_val_loss = val_loss_params['loss'] / num_val_batches
-        if best_model_losses is None or avg_val_loss < best_model_losses['val']['loss']:
+        improved = (
+            best_model_losses is None
+            or (best_model_losses['val']['loss'] - avg_val_loss) > convergence_min_delta
+        )
+        if improved:
             best_model_losses = {
                 "train": {p:train_loss_params[p] / num_batches for p in train_loss_params},
                 "val": {p:val_loss_params[p] / num_val_batches for p in val_loss_params}
             }
+            epochs_without_improvement = 0
             torch.save(model.state_dict(), f'{save_dir}/{name}_model.pt')
+        else:
+            epochs_without_improvement += 1
+
+        if (
+            convergence_patience is not None
+            and convergence_patience > 0
+            and (epoch + 1) > convergence_warmup_epochs
+            and epochs_without_improvement >= convergence_patience
+        ):
+            print(
+                "Converged: stopping early at "
+                f"epoch {epoch + 1} after {epochs_without_improvement} "
+                "epochs without validation-loss improvement."
+            )
+            break
 
     # run validation set through pca
     mse_pca = 0
