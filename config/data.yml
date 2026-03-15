@@ -3,19 +3,20 @@ data:
   datasplit_file: data/train_val_test_split.csv
   datasplit_mode: load
   fc_input: false
-  flatten: false
+  flatten: true
   groups:
   - HC
   - MCI
   - AD
   normalize: true
-  pad_features: true
+  pad_features: false
   preserve_timepoints: true
   random_seed: 42
   timepoints_as_samples: false
   transpose: false
   truncate_features: false
-  use_abeta_tau: false
+  use_bio_levels:
+  - ABeta
 filter:
   apply_demean: true
   apply_detrend: true

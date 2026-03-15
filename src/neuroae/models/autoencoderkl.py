@@ -30,6 +30,9 @@ Skai note: this has been edited to remove downsampling and upsampling,
            to preserve spacial resolution.
 
 """
+from .head import PredHeadAvg, PredHeadConv, PredHeadTemporalPool, PredHeadGatedTemporalPool
+
+
 
 class AsymmetricPad(nn.Module):
     """
@@ -456,6 +459,7 @@ class AutoencoderKLv3(nn.Module):
         include_fc: bool = True,
         use_combined_linear: bool = False,
         use_flash_attention: bool = False,
+        decoder_latent_channels = None,
     ) -> None:
         super().__init__()
 
@@ -477,6 +481,9 @@ class AutoencoderKLv3(nn.Module):
         
         self.swfcd = None
 
+        if decoder_latent_channels is None:
+            decoder_latent_channels = latent_channels
+
         self.encoder: nn.Module = Encoder(
             spatial_dims=spatial_dims,
             in_channels=in_channels,
@@ -494,7 +501,7 @@ class AutoencoderKLv3(nn.Module):
         self.decoder: nn.Module = Decoder(
             spatial_dims=spatial_dims,
             channels=channels,
-            in_channels=latent_channels,
+            in_channels=decoder_latent_channels,
             out_channels=out_channels,
             num_res_blocks=num_res_blocks,
             norm_num_groups=norm_num_groups,
@@ -526,8 +533,8 @@ class AutoencoderKLv3(nn.Module):
         )
         self.post_quant_conv = Convolution(
             spatial_dims=spatial_dims,
-            in_channels=latent_channels,
-            out_channels=latent_channels,
+            in_channels=decoder_latent_channels,
+            out_channels=decoder_latent_channels,
             strides=1,
             kernel_size=1,
             padding=0,
@@ -712,6 +719,113 @@ class AutoencoderKLv3(nn.Module):
             'recon': recon, 
             'kld': kld
         }
+
+        if self.swfcd is not None:
+            swfcd = self.swfcd.apply(x, x_hat)
+            swfcd_beta = self.loss_fn_params.get("swfcd_beta", 1.0)
+            loss['swfcd_rmse'] = swfcd['rmse']
+            loss['loss'] += swfcd_beta * swfcd['rmse']
+
+        return loss
+
+
+
+class AutoencoderKLv3PredHeads(AutoencoderKLv3):
+    """ AutoencoderKLv2 + linear temporal models for ABeta and Tau level prediction """
+    def __init__(
+        self,
+        spatial_dims: int,
+        pred_head_type: str = "gated_temp_pool",
+        pred_head_num: int = 1,
+        in_channels: int = 1,
+        out_channels: int = 1,
+        num_res_blocks: Sequence[int] | int = (2, 2, 2, 2),
+        channels: Sequence[int] = (32, 64, 64, 64),
+        attention_levels: Sequence[bool] = (False, False, True, True),
+        latent_channels: int = 3,
+        norm_num_groups: int = 32,
+        norm_eps: float = 1e-6,
+        with_encoder_nonlocal_attn: bool = True,
+        with_decoder_nonlocal_attn: bool = True,
+        use_checkpoint: bool = False,
+        use_convtranspose: bool = False,
+        include_fc: bool = True,
+        use_combined_linear: bool = False,
+        use_flash_attention: bool = False,
+    ) -> None:
+        super().__init__(
+            spatial_dims,
+            in_channels,
+            out_channels,
+            num_res_blocks,
+            channels,
+            attention_levels,
+            latent_channels,
+            norm_num_groups,
+            norm_eps,
+            with_encoder_nonlocal_attn,
+            with_decoder_nonlocal_attn,
+            use_checkpoint,
+            use_convtranspose,
+            include_fc,
+            use_combined_linear,
+            use_flash_attention,
+        )
+        pred_head_idx = {
+            "avg": PredHeadAvg,
+            "conv": PredHeadConv,
+            "temp_pool": PredHeadTemporalPool,
+            "gated_temp_pool": PredHeadGatedTemporalPool
+        }
+        if pred_head_type not in pred_head_idx:
+            raise ValueError(f"Selected prediction head type - '{pred_head_type}' is not available.")
+        
+        self.heads = [pred_head_idx[pred_head_type](latent_channels, out_channels) for i in range(pred_head_num)]
+
+    def to(self, device):
+        self.heads = [h.to(device) for h in self.heads]
+        return super().to(device)
+
+    def forward(self, x):
+        recon, z_mu, z_sigma, z = super().forward(x)
+        z_heads = [h(z) for h in self.heads]
+        return recon, z_mu, z_sigma, z_heads, z
+    
+    def loss(self, x, x_heads, model_output):
+        x_hat, z_mu, z_sigma, z_heads, _ = model_output
+        error_per_feature = self.loss_fn_params.get("loss_per_feature", True)
+        beta = float(self.loss_fn_params.get("beta", 1.0))
+        pred_heads_delta = float(self.loss_fn_params.get("pred_heads_delta", 0.0))
+        # if selected error per feature, we are averaging everything
+        if error_per_feature:
+            # recon: mean mse loss
+            recon = F.mse_loss(x_hat, x, reduction="mean")
+
+        # if selected error per sample, we are summing everything
+        else:
+            # recon: sum over features per sample, then mean over batch
+            recon = F.mse_loss(x_hat, x, reduction="none")  # [B, D]
+            recon = recon.sum(dim=1).mean()
+
+        kld = -0.5 * (1 + z_sigma - z_mu.pow(2) - z_sigma.exp())
+        kld = kld.flatten(1).sum(dim=1).mean() / z_sigma.size(1)
+
+        loss = {
+            'loss': recon + beta * kld,
+            'recon': recon,
+            'kld': kld
+        }
+
+        # calculate loss from prediction heads
+        assert len(x_heads) == len(z_heads), f"label heads ({len(x_heads)}) is not the same as predicted heads ({len(z_heads)})"
+        pred_head_loss = []
+        for i, bl in enumerate(x_heads):
+            head_loss = F.smooth_l1_loss(z_heads[i], x_heads[bl], reduction="mean", beta=1.0)
+            pred_head_loss.append(head_loss)
+            loss[f"{bl}_loss"] = head_loss
+
+        if len(pred_head_loss) > 0:
+            loss['loss'] += pred_heads_delta * sum(pred_head_loss) / len(pred_head_loss)
 
         if self.swfcd is not None:
             swfcd = self.swfcd.apply(x, x_hat)

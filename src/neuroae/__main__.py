@@ -114,7 +114,7 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
         datasplit_file=datasplit_file,
         filter=filter,
         normaliser=normaliser,
-        use_abeta_tau=data_config['data'].get('use_abeta_tau', False),
+        use_bio_levels=data_config['data'].get('use_bio_levels', []),
     )
 
     print(f"\nDataLoader information:")
@@ -161,7 +161,7 @@ def _build_training_summary(history, mse_pca):
     }
 
 
-def load_model_from_config(model_config, input_dim, timepoint_dim, device, preserve_timepoints=False):
+def load_model_from_config(model_config, data_config, input_dim, timepoint_dim, device, preserve_timepoints=False):
     model_name = model_config['model']['name']
     latent_dim = 0
 
@@ -191,6 +191,108 @@ def load_model_from_config(model_config, input_dim, timepoint_dim, device, prese
             device=device,
         )
         latent_dim = latent_dim * timepoint_dim
+    if model_name == "BasicVAEPredHeads":
+        from .models.basic import BasicVAEPredHeads
+        hidden_dim = model_config['model']['hidden_dims']
+        latent_dim = model_config['model']['latent_dim']
+        num_heads = len(data_config['data'].get('use_bio_levels', []))
+        if preserve_timepoints:
+            latent_dim = latent_dim * timepoint_dim
+        model = BasicVAEPredHeads(
+            input_dim=input_dim[0],
+            timepoints=timepoint_dim,
+            hidden_dims=hidden_dim,
+            latent_dim=latent_dim,
+            device=device,
+            pred_head_type=model_config['model'].get('pred_head_type', "gated_temp_pool"),
+            pred_head_num=num_heads)
+    elif model_name == "BasicConvAE":
+        from .models.basicConvAE import BasicConvAE
+        latent_dim = model_config['model']['latent_dim']
+        hidden_dim = model_config['model']['hidden_dims']
+        model = BasicConvAE(
+            regions=input_dim[0],
+            timepoints=input_dim[1],
+            hidden_channels=hidden_dim,
+            latent_dim=latent_dim
+        )
+        latent_dim = latent_dim * timepoint_dim
+    elif model_name == "BasicConvAEPredHeads":
+        from .models.basicConvAE import BasicConvAEPredHeads
+        latent_dim = model_config['model']['latent_dim']
+        hidden_dim = model_config['model']['hidden_dims']
+        num_heads = len(data_config['data'].get('use_bio_levels', []))
+        model = BasicConvAEPredHeads(
+            regions=input_dim[0],
+            timepoints=input_dim[1],
+            hidden_channels=hidden_dim,
+            latent_dim=latent_dim,
+            pred_head_type=model_config['model'].get('pred_head_type', "gated_temp_pool"),
+            pred_head_num=num_heads,
+        )
+        latent_dim = latent_dim * timepoint_dim
+    elif model_name == "AEKLv3pp":
+        from .models.convAEpp import AEKLv3pp
+        latent_dim = model_config['model']['latent_dim']
+        latent2_dim = model_config['model']['latent2_dim']
+        hidden_dim = model_config['model']['hidden_dims']
+        attention_levels = model_config['model'].get('attention_levels', [False] * len(hidden_dim))
+        model = AEKLv3pp(
+            timepoints=input_dim[1],
+            in_channels=input_dim[0],
+            num_res_blocks=model_config['model'].get('num_res_blocks', 1),
+            channels=hidden_dim,
+            attention_levels=attention_levels,
+            latent_channels=latent_dim,
+            latent2_dim=latent2_dim,
+            norm_num_groups=model_config['model'].get('norm_num_groups', 8),
+            norm_eps=model_config['model'].get('norm_eps', 1e-6),
+            with_encoder_nonlocal_attn=model_config['model'].get('with_encoder_nonlocal_attn', False),
+            with_decoder_nonlocal_attn=model_config['model'].get('with_decoder_nonlocal_attn', False),
+        )
+        latent_dim = latent_dim * timepoint_dim
+    elif model_name == "AutoencoderKLv3PredHeads":
+        from .models.autoencoderkl import AutoencoderKLv3PredHeads
+        latent_dim = model_config['model']['latent_dim']
+        hidden_dim = model_config['model']['hidden_dims']
+        attention_levels = model_config['model'].get('attention_levels', [False] * len(hidden_dim))
+        num_heads = len(data_config['data'].get('use_bio_levels', []))
+        model = AutoencoderKLv3PredHeads(
+            spatial_dims=1,
+            pred_head_type=model_config['model'].get('pred_head_type', "gated_temp_pool"),
+            pred_head_num=num_heads,
+            in_channels=input_dim[0],
+            out_channels=input_dim[0],
+            num_res_blocks=model_config['model'].get('num_res_blocks', 1),
+            channels=hidden_dim,
+            attention_levels=attention_levels,
+            latent_channels=latent_dim,
+            norm_num_groups=model_config['model'].get('norm_num_groups', 8),
+            norm_eps=model_config['model'].get('norm_eps', 1e-6),
+            with_encoder_nonlocal_attn=model_config['model'].get('with_encoder_nonlocal_attn', False),
+            with_decoder_nonlocal_attn=model_config['model'].get('with_decoder_nonlocal_attn', False),
+        )
+        latent_dim *= timepoint_dim
+    elif model_name == "AutoencoderKLv2":
+        from .models.convAE_old import AutoencoderKLv2
+        latent_dim = model_config['model']['latent_dim']
+        hidden_dim = model_config['model']['hidden_dims']
+        attention_levels = model_config['model'].get('attention_levels', [False] * len(hidden_dim))
+        model = AutoencoderKLv2(
+            spatial_dims=1,
+            in_channels=1,
+            out_channels=1,
+            num_res_blocks=model_config['model'].get('num_res_blocks', 1),
+            channels=hidden_dim,
+            attention_levels=attention_levels,
+            latent_channels=latent_dim,
+            norm_num_groups=model_config['model'].get('norm_num_groups', 8),
+            norm_eps=model_config['model'].get('norm_eps', 1e-6),
+            with_encoder_nonlocal_attn=False,
+            with_decoder_nonlocal_attn=False,
+            time_shared=True
+        )
+        latent_dim *= timepoint_dim
     elif model_name.startswith("AutoencoderKL"):
         if model_name == "AutoencoderKLv1":
             from .models.monaiAEKL import AutoencoderKLv1 as AutoencoderKL
@@ -199,7 +301,7 @@ def load_model_from_config(model_config, input_dim, timepoint_dim, device, prese
         latent_dim = model_config['model']['latent_dim']
         hidden_dim = model_config['model']['hidden_dims']
         attention_levels = model_config['model'].get('attention_levels', [False] * len(hidden_dim))
-        aekl_kwargs = dict(
+        model = AutoencoderKL(
             spatial_dims=1,
             in_channels=input_dim[0],
             out_channels=input_dim[0],
@@ -209,12 +311,11 @@ def load_model_from_config(model_config, input_dim, timepoint_dim, device, prese
             latent_channels=latent_dim,
             norm_num_groups=model_config['model'].get('norm_num_groups', 8),
             norm_eps=model_config['model'].get('norm_eps', 1e-6),
-            with_encoder_nonlocal_attn=False,
-            with_decoder_nonlocal_attn=False,
+            with_encoder_nonlocal_attn=model_config['model'].get('with_encoder_nonlocal_attn', False),
+            with_decoder_nonlocal_attn=model_config['model'].get('with_decoder_nonlocal_attn', False),
         )
         if model_name == "AutoencoderKLv3":
             latent_dim *= timepoint_dim
-        model = AutoencoderKL(**aekl_kwargs)
     elif model_name == "DeterministicAE":
         if preserve_timepoints:
             raise ValueError("DeterministicAE is incompatible with preserving timepoint dimension (at least for now)")
@@ -265,6 +366,20 @@ def load_model_from_config(model_config, input_dim, timepoint_dim, device, prese
             input_dim=input_dim[0],
             latent_dim=latent_dim,
         )
+    
+    if model_name == "LinearAEPredHeads":
+        from .models.linear import LinearAEPredHeads
+        hidden_dim = None
+        latent_dim = model_config['model']['latent_dim']
+        num_heads = len(data_config['data'].get('use_bio_levels', []))
+        if preserve_timepoints:
+            latent_dim = latent_dim * timepoint_dim
+        model = LinearAEPredHeads(
+            input_dim=input_dim[0],
+            timepoints=timepoint_dim,
+            latent_dim=latent_dim,
+            pred_head_type=model_config['model'].get('pred_head_type', "gated_temp_pool"),
+            pred_head_num=num_heads)
     else:
         raise ValueError(f"Model name {model_name} not supported")
     
@@ -315,6 +430,19 @@ def build_experiment_signature(model_type, model_params, training_params, data_p
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:8]
 
 
+def _dedupe_param_choices(values):
+    """De-duplicate list-like parameter choices while preserving input order."""
+    unique = []
+    seen = set()
+    for value in values:
+        marker = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        unique.append(value)
+    return unique
+
+
 def _has_evaluation_results(metadata):
     evaluation = metadata.get("evaluation")
     if not isinstance(evaluation, dict):
@@ -351,6 +479,8 @@ def load_completed_experiment_signatures(results_dir):
 
 def run_training(model, model_name, latent_dim, loaders, training_config, model_config, data_config, device):
     from .train import train_vae
+
+    use_pred_heads = len(data_config['data'].get('use_bio_levels', [])) > 0
 
     model.set_loss_fn_params(training_config['training'].get('loss_params', None))
     if training_config['training']['loss_params'].get("swfcd_beta", 0.0) > 0:
@@ -389,7 +519,7 @@ def run_training(model, model_name, latent_dim, loaders, training_config, model_
         name=experiment_id,
         pca=pca,
         noise=training_config['training'].get("noise", None),
-        use_abeta_tau=training_config['training'].get('use_abeta_tau', False),
+        use_pred_heads=use_pred_heads,
         convergence_patience=training_config['training'].get('convergence_patience'),
         convergence_min_delta=training_config['training'].get('convergence_min_delta', 0.0),
         convergence_warmup_epochs=training_config['training'].get('convergence_warmup_epochs', 0),
@@ -481,6 +611,7 @@ def run_experiment_pipeline(
     timepoint_dim = loaders['timepoint_dim']
     model, model_name, latent_dim = load_model_from_config(
         model_config=model_config,
+        data_config=data_config,
         input_dim=input_dim,
         timepoint_dim=timepoint_dim,
         device=device,
@@ -578,12 +709,20 @@ def main():
         default=0,
         help='Number of DataLoader worker processes (default: 0).'
     )
+    parser.add_argument(
+        '--max-experiment-combinations',
+        type=int,
+        default=100000,
+        help='Safety cap for Cartesian combinations per experiment set in exp mode (default: 100000).'
+    )
     
     args = parser.parse_args()
     if args.num_parallel_experiments < 1:
         parser.error('--num-parallel-experiments must be >= 1')
     if args.num_workers < 0:
         parser.error('--num-workers must be >= 0')
+    if args.max_experiment_combinations < 1:
+        parser.error('--max-experiment-combinations must be >= 1')
     
     print("=" * 60)
     print("ADNI-B VAE")
@@ -629,6 +768,7 @@ def main():
         
         model, model_name, latent_dim = load_model_from_config(
             model_config=model_config,
+            data_config=data_config,
             input_dim=input_dim,
             timepoint_dim=timepoint_dim,
             device=args.device,
@@ -664,6 +804,7 @@ def main():
         model_config = load_config(args.model_config)
         model, model_name, latent_dim = load_model_from_config(
             model_config=model_config,
+            data_config=data_config,
             input_dim=input_dim,
             timepoint_dim=timepoint_dim,
             device=args.device,
@@ -683,6 +824,7 @@ def main():
         print("\n" + "=" * 60)
         print("Experimentation mode")
         print("=" * 60)
+        print(f"Using experiment config: {args.experiment_config}")
         exp_config = load_config(args.experiment_config)
 
         def collect_vars(node, name):
@@ -725,11 +867,42 @@ def main():
             if 'training' in ec['static_params']:
                 deepupdate(training_config, ec['static_params']['training'])
 
-            # collect all experiment variables
+            # Collect all experiment variables and iterate lazily to avoid
+            # materializing a potentially large Cartesian product in memory.
             vars = collect_vars(ec['exp_params'],'')
-            keys, values = zip(*vars.items())
-            permutations_dicts = [dict(zip(keys, v)) for v in itertools.product(*values)]
-            for collection in permutations_dicts:
+            if vars:
+                keys = list(vars.keys())
+                values = []
+                for key in keys:
+                    candidates = vars[key]
+                    if isinstance(candidates, (list, tuple)):
+                        raw_candidate_list = list(candidates)
+                        candidate_list = _dedupe_param_choices(raw_candidate_list)
+                        values.append(candidate_list)
+                        print(
+                            f"    {key}: {len(raw_candidate_list)} choices ({len(candidate_list)} unique)",
+                            flush=True,
+                        )
+                    else:
+                        raise ValueError(
+                            f"Experiment parameter '{key}' must be a list/tuple; got {type(candidates).__name__}"
+                        )
+                total_set_permutations = math.prod(len(v) for v in values)
+                if total_set_permutations > args.max_experiment_combinations:
+                    raise ValueError(
+                        f"{set_name} expands to {total_set_permutations} combinations, "
+                        f"which exceeds --max-experiment-combinations={args.max_experiment_combinations}. "
+                        "Reduce search space or pass a larger cap explicitly."
+                    )
+                print(f"  {set_name}: {total_set_permutations} candidate combinations", flush=True)
+                permutations_iter = itertools.product(*values)
+            else:
+                total_set_permutations = 1
+                print(f"  {set_name}: 1 candidate combination", flush=True)
+                permutations_iter = [()]
+
+            for idx, values_tuple in enumerate(permutations_iter, start=1):
+                collection = dict(zip(keys, values_tuple)) if vars else {}
                 dc = deepcopy(data_config)
                 mc = {'model':deepcopy(model_config)}
                 tc = {'training':deepcopy(training_config)}
@@ -752,6 +925,8 @@ def main():
                     continue
                 seen_signatures.add(signature)
                 experiment_specs.append((dc, mc, tc))
+                if idx == 1 or idx == total_set_permutations or idx % 100 == 0:
+                    print(f"  {set_name}: processed {idx}/{total_set_permutations}", flush=True)
 
         total_experiments = len(experiment_specs)
         print(f"Prepared {total_experiments} experiments")

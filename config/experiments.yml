@@ -42,66 +42,66 @@ default:
     convergence_min_delta: 1e-4
     convergence_warmup_epochs: 10
 
-LinearAE:
-  static_params:
-    model:
-      name: LinearAE
-  exp_params:
-    model:
-      latent_dim: [4, 8, 12]
-    training:
-      loss_params:
-        beta: [1.0, 0.75, 0.5, 0]
-        swfcd_beta: [1.0, 0.5, 0]
+# BasicConvAEPredHeads:
+#   static_params:
+#     data:
+#       data:
+#         pad_features: true
+#         flatten: false
+#     model:
+#       name: BasicConvAEPredHeads
+#     training:
+#       num_epochs: 120
+#   exp_params:
+#     data:
+#       data:
+#         use_bio_levels: [['ABeta', 'Tau'], ['ABeta'], ['Tau']]
+#     model:
+#       hidden_dims: [[64], [32], [64,32], [128], [128,64],[128,64,32]]
+#       latent_dim: [16, 8, 4]
+#       pred_head_type: [avg, conv, conv_no_hidden, temp_pool, gated_temp_pool]
+#     training:
+#       loss_params:
+#         pred_heads_delta: [1, 0.5]
+#         swfcd_beta: [0, 0.5]
 
-BasicVAE:
+
+
+LinearAEPredHeads:
   static_params:
     model:
-      name: BasicVAE
+      name: LinearAEPredHeads
+    training:
+      num_epochs: 120
+  exp_params:
     data:
       data:
-        flatten: true
-  exp_params:
+        use_bio_levels: [['ABeta', 'Tau'], ['ABeta'], ['Tau']]
     model:
-      hidden_dim: [[6304, 3152], [6304], [3152]]
-      latent_dim: [10, 8, 4]
+      latent_dim: [16, 8, 4]
+      pred_head_type: [avg, conv, conv_no_hidden, temp_pool, gated_temp_pool]
     training:
       loss_params:
-        beta: [1.0, 0.75, 0.5, 0]
-        swfcd_beta: [1.0, 0.5, 0]
+        pred_heads_delta: [1, 0.5]
+        swfcd_beta: [0, 0.5]
 
 
-BasicVAETimeShared:
+
+BasicVAEPredHeads:
   static_params:
     model:
-      name: BasicVAETimeShared
+      name: BasicVAEPredHeads
+    training:
+      num_epochs: 120
+  exp_params:
     data:
       data:
-        flatten: true
-  exp_params:
+        use_bio_levels: [['ABeta', 'Tau'], ['ABeta'], ['Tau']]
     model:
-      hidden_dims: [[256, 128], [128, 64], [128], [64]]
-      latent_dim: [10, 8, 4, 2]
+      latent_dim: [16, 8, 4]
+      hidden_dims: [[6304, 3152], [6304], [3152]]
+      pred_head_type: [avg, conv, conv_no_hidden, temp_pool, gated_temp_pool]
     training:
       loss_params:
-        beta: [1.0, 0.75, 0.5, 0]
-        swfcd_beta: [1.0, 0.5, 0]
-
-AutoencoderKL:
-  static_params:
-    data:
-      data:
-        pad_features: true
-        flatten: false
-    model:
-      name: AutoencoderKLv3
-    training:
-      num_epochs: 60
-  exp_params:
-    model:
-      channels: [[128, 64], [128], [64], [64, 32], [32], [16]] #[256, 128, 64], [256, 128], [256], 
-      latent_channels: [16, 12, 10, 8, 4, 2]
-    training:
-      loss_params:
-        beta: [1.0, 0.5, 0]
-        swfcd_beta: [1.0, 0.5, 0]
+        pred_heads_delta: [1, 0.5]
+        swfcd_beta: [0, 0.5]

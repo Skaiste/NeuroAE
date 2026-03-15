@@ -36,9 +36,10 @@ Full configuration reference for all models and config files:
 - [x] Framework for parameter tuning
 
 #### Todo's:
-- keep reading papers and start looking into other types of autoencoders to implement
-- explore normalisation region based and not per feature when flattening a sample
-- for experimentation purposes only, train a general VAE, run inference on all data, to extract latent properties and try out clustering algorithms to see if any most clear clusters could come close to the labels
+- copy the experiments with the basic, linear, autoencoderKLv3 from exp_run 2.1, 2.2 and basic conv AE from exp_run 3.0, to compare all 2D input models before the architectures are experimented with.
+- add prediction heads to basic and linear models
+- figure out a way to make sliding window calculations faster
+- 
 
 ## Report Writing Checklist
 - [ ] [ 0% ] State of the art

@@ -208,9 +208,11 @@ __marimo__/
 
 data/
 models/
+models_*/
 !src/neuroae/models/
 checkpoints/
 results/
+results_*/
 archive/
 
 .DS_Store

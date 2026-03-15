@@ -115,12 +115,7 @@ def _extract_model_outputs(model_out):
         latent = model_out.get("z") or model_out.get("mu")
     elif isinstance(model_out, (tuple, list)):
         recon_x = model_out[0]
-        if len(model_out) >= 4:
-            latent = model_out[3]
-        elif len(model_out) >= 2:
-            latent = model_out[1]
-        else:
-            latent = None
+        latent = model_out[-1]
     else:
         recon_x = model_out
         latent = None
@@ -169,6 +164,7 @@ def eval_vae(
     model,
     data_loader,
     pca=None,
+    use_pred_heads=False,
     device='cuda' if torch.cuda.is_available() else 'cpu',
 ):
     """
@@ -198,6 +194,7 @@ def eval_vae(
             valid_mask = _build_valid_mask(x, data_loader.dataset)
             model_out = model(x)
             model_out = _apply_recon_mask(x, model_out, valid_mask)
+
             recon_x, latent = _extract_model_outputs(model_out)
 
             all_inputs.append(x.detach().cpu())
@@ -271,66 +268,66 @@ def eval_vae(
             "swfcd_rmse_delta_model_minus_pca": metrics["model"]["swfcd_rmse"] - pca_metrics["swfcd_rmse"],
         }
 
-        print("Inference metrics (PCA baseline):")
-        print(f"  MSE: {pca_metrics['mse']:.6f}" if np.isfinite(pca_metrics['mse']) else "  MSE: nan")
-        print(
-            f"  FC preservation: {pca_metrics['fc_preservation']:.6f}"
-            if np.isfinite(pca_metrics['fc_preservation'])
-            else "  FC preservation: nan"
-        )
-        print(f"  Silhouette: {pca_metrics['silhouette']:.6f}" if np.isfinite(pca_metrics['silhouette']) else "  Silhouette: nan")
-        print(
-            f"  Logistic regression accuracy (CV): {pca_metrics['logreg_accuracy']:.6f}"
-            if np.isfinite(pca_metrics['logreg_accuracy'])
-            else "  Logistic regression accuracy (CV): nan"
-        )
-        print(
-            f"  SwFCD Pearson: {pca_metrics['swfcd_pearson']:.6f}"
-            if np.isfinite(pca_metrics['swfcd_pearson'])
-            else "  SwFCD Pearson: nan"
-        )
-        print(
-            f"  SwFCD Mean absolute difference: {pca_metrics['swfcd_mad']:.6f}"
-            if np.isfinite(pca_metrics['swfcd_mad'])
-            else "  SwFCD Mean absolute difference: nan"
-        )
-        print(
-            f"  SwFCD RMSE: {pca_metrics['swfcd_rmse']:.6f}"
-            if np.isfinite(pca_metrics['swfcd_rmse'])
-            else "  SwFCD RMSE: nan"
-        )
+        # print("Inference metrics (PCA baseline):")
+        # print(f"  MSE: {pca_metrics['mse']:.6f}" if np.isfinite(pca_metrics['mse']) else "  MSE: nan")
+        # print(
+        #     f"  FC preservation: {pca_metrics['fc_preservation']:.6f}"
+        #     if np.isfinite(pca_metrics['fc_preservation'])
+        #     else "  FC preservation: nan"
+        # )
+        # print(f"  Silhouette: {pca_metrics['silhouette']:.6f}" if np.isfinite(pca_metrics['silhouette']) else "  Silhouette: nan")
+        # print(
+        #     f"  Logistic regression accuracy (CV): {pca_metrics['logreg_accuracy']:.6f}"
+        #     if np.isfinite(pca_metrics['logreg_accuracy'])
+        #     else "  Logistic regression accuracy (CV): nan"
+        # )
+        # print(
+        #     f"  SwFCD Pearson: {pca_metrics['swfcd_pearson']:.6f}"
+        #     if np.isfinite(pca_metrics['swfcd_pearson'])
+        #     else "  SwFCD Pearson: nan"
+        # )
+        # print(
+        #     f"  SwFCD Mean absolute difference: {pca_metrics['swfcd_mad']:.6f}"
+        #     if np.isfinite(pca_metrics['swfcd_mad'])
+        #     else "  SwFCD Mean absolute difference: nan"
+        # )
+        # print(
+        #     f"  SwFCD RMSE: {pca_metrics['swfcd_rmse']:.6f}"
+        #     if np.isfinite(pca_metrics['swfcd_rmse'])
+        #     else "  SwFCD RMSE: nan"
+        # )
 
-        print("Model vs PCA deltas (model - PCA):")
-        print(f"  MSE delta: {metrics['comparison']['mse_delta_model_minus_pca']:.6f}")
-        print(
-            f"  FC preservation delta: {metrics['comparison']['fc_delta_model_minus_pca']:.6f}"
-            if np.isfinite(metrics['comparison']['fc_delta_model_minus_pca'])
-            else "  FC preservation delta: nan"
-        )
-        print(
-            f"  Silhouette delta: {metrics['comparison']['silhouette_delta_model_minus_pca']:.6f}"
-            if np.isfinite(metrics['comparison']['silhouette_delta_model_minus_pca'])
-            else "  Silhouette delta: nan"
-        )
-        print(
-            f"  Logistic regression accuracy delta: {metrics['comparison']['logreg_delta_model_minus_pca']:.6f}"
-            if np.isfinite(metrics['comparison']['logreg_delta_model_minus_pca'])
-            else "  Logistic regression accuracy delta: nan"
-        )
-        print(
-            f"  SwFCD Pearson delta: {metrics['comparison']['swfcd_pearson_delta_model_minus_pca']:.6f}"
-            if np.isfinite(metrics['comparison']['swfcd_pearson_delta_model_minus_pca'])
-            else "  SwFCD Pearson delta: nan"
-        )
-        print(
-            f"  SwFCD Mean absolute difference delta: {metrics['comparison']['swfcd_mad_delta_model_minus_pca']:.6f}"
-            if np.isfinite(metrics['comparison']['swfcd_mad_delta_model_minus_pca'])
-            else "  SwFCD Mean absolute difference delta: nan"
-        )
-        print(
-            f"  SwFCD RMSE delta: {metrics['comparison']['swfcd_rmse_delta_model_minus_pca']:.6f}"
-            if np.isfinite(metrics['comparison']['swfcd_rmse_delta_model_minus_pca'])
-            else "  SwFCD RMSE delta: nan"
-        )
+        # print("Model vs PCA deltas (model - PCA):")
+        # print(f"  MSE delta: {metrics['comparison']['mse_delta_model_minus_pca']:.6f}")
+        # print(
+        #     f"  FC preservation delta: {metrics['comparison']['fc_delta_model_minus_pca']:.6f}"
+        #     if np.isfinite(metrics['comparison']['fc_delta_model_minus_pca'])
+        #     else "  FC preservation delta: nan"
+        # )
+        # print(
+        #     f"  Silhouette delta: {metrics['comparison']['silhouette_delta_model_minus_pca']:.6f}"
+        #     if np.isfinite(metrics['comparison']['silhouette_delta_model_minus_pca'])
+        #     else "  Silhouette delta: nan"
+        # )
+        # print(
+        #     f"  Logistic regression accuracy delta: {metrics['comparison']['logreg_delta_model_minus_pca']:.6f}"
+        #     if np.isfinite(metrics['comparison']['logreg_delta_model_minus_pca'])
+        #     else "  Logistic regression accuracy delta: nan"
+        # )
+        # print(
+        #     f"  SwFCD Pearson delta: {metrics['comparison']['swfcd_pearson_delta_model_minus_pca']:.6f}"
+        #     if np.isfinite(metrics['comparison']['swfcd_pearson_delta_model_minus_pca'])
+        #     else "  SwFCD Pearson delta: nan"
+        # )
+        # print(
+        #     f"  SwFCD Mean absolute difference delta: {metrics['comparison']['swfcd_mad_delta_model_minus_pca']:.6f}"
+        #     if np.isfinite(metrics['comparison']['swfcd_mad_delta_model_minus_pca'])
+        #     else "  SwFCD Mean absolute difference delta: nan"
+        # )
+        # print(
+        #     f"  SwFCD RMSE delta: {metrics['comparison']['swfcd_rmse_delta_model_minus_pca']:.6f}"
+        #     if np.isfinite(metrics['comparison']['swfcd_rmse_delta_model_minus_pca'])
+        #     else "  SwFCD RMSE delta: nan"
+        # )
 
     return metrics

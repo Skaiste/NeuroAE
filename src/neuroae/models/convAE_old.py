@@ -26,6 +26,9 @@ Rearrange, _ = optional_import("einops.layers.torch", name="Rearrange")
 __all__ = ["AutoencoderKL"]
 
 
+from .head import PredHeadAvg, PredHeadConv, PredHeadTemporalPool, PredHeadGatedTemporalPool
+
+
 class AsymmetricPad(nn.Module):
     """
     Pad the input tensor asymmetrically along every spatial dimension.
@@ -831,127 +834,47 @@ class AutoencoderKLv2(nn.Module):
 
         return loss
 
-
-"""
-    Prediction head models
-"""
-class PredHeadAvg(nn.Module):
-    """ Most simple model
-         - averaging across time point dimension 
-         - applying linear layer to predict levels
-    """
-    def __init__(self, latent_dim, output_dim):
-        super().__init__()
-        self.head = nn.Linear(latent_dim, output_dim, bias=True)
-
-    def forward(self, z):
-        x = z.mean(dim=-1)
-        return self.head(x)
-    
-class PredHeadConv(nn.Module):
-    """ Convolutional model
-        - temporal conv model with average pooling
-        - linear layer for level prediction
-    """
-    def __init__(self, latent_dim, output_dim):
-        super().__init__()
-        # since selected latent dimension is usually a small number
-        # we can double it, another suggestion would be to get the middle number
-        # in between latent and output dimensions, but that would bloat the model
-        self.hidden_dim = latent_dim * 2
-        self.temporal = nn.Sequential(
-            nn.Conv1d(latent_dim, self.hidden_dim, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv1d(self.hidden_dim, self.hidden_dim, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool1d(1)
-        )
-        self.head = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(self.hidden_dim, output_dim)
-        )
-    def forward(self, z):
-        x = self.temporal(z)
-        return self.head(x)
-    
-class TemporalAttentionPooling(nn.Module):
-    """ Model focuses on time points that are more important """
-    def __init__(self, latent_dim):
-        super().__init__()
-        self.attn = nn.Linear(latent_dim, 1)
-
-    def forward(self, z): # z: (B, L, T)
-        z_t = z.transpose(1, 2)      # (B, T, L)
-        scores = self.attn(z_t)      # (B, T, 1)
-        weights = torch.softmax(scores, dim=1)
-        pooled = (weights * z_t).sum(dim=1)  # (B, L)
-        return pooled
-
-
-class PredHeadTemporalPool(nn.Module):
-    """ Temporal pooling model
-         - use temporal pooling to reduce time point dimension to 1
-         - applying linear layer to predict levels
-    """
-    def __init__(self, latent_dim, output_dim):
-        super().__init__()
-        self.pool = TemporalAttentionPooling(latent_dim)
-        self.head = nn.Linear(latent_dim, output_dim, bias=True)
-
-    def forward(self, z):
-        x = self.pool(z)
-        return self.head(x)
-    
-class GatedTemporalAttentionPooling(nn.Module):
-    """ Richer version of attention pooling, uses two projections:
-         - one to model the content
-         - one to act like a gate (suppress or amplify parts of the timepoint representation)
-        It can capture:
-         - this timepoint is important only if certain latent features are active
-         - interactions between latent content and importance
-         - more selective weighting over time
-        it often gives sharper and more meaningful attention weights.
-    """
-    def __init__(self, latent_dim: int, attn_dim: int):
-        super().__init__()
-        print(f"GatedTemporalAttentionPooling {latent_dim=} {attn_dim=}")
-        self.V = nn.Linear(latent_dim, attn_dim)
-        self.U = nn.Linear(latent_dim, attn_dim)
-        self.w = nn.Linear(attn_dim, 1)
-
-    def forward(self, z):   # z: (B, L, T)
-        breakpoint()
-        z_t = z.transpose(1, 2)  # (B, T, L)
-        v = torch.tanh(self.V(z_t))        # (B, T, A)
-        u = torch.sigmoid(self.U(z_t))     # (B, T, A)
-        h = v * u                          # (B, T, A)
-        scores = self.w(h)                 # (B, T, 1)
-        weights = torch.softmax(scores, dim=1)   # (B, T, 1)
-        pooled = (weights * z_t).sum(dim=1)      # (B, L)
-        return pooled, weights.squeeze(-1)
-    
-class PredHeadGatedTemporalPool(nn.Module):
-    """ Gated Temporal pooling model
-         - use gated temporal pooling to reduce time point dimension to 1
-         - applying linear layer to predict levels
-    """
-    def __init__(self, latent_dim, output_dim):
-        super().__init__()
-        # like the convolutional hidden dim, same applies
-        self.attention_dim = latent_dim * 2
-        self.pool = GatedTemporalAttentionPooling(latent_dim, self.attention_dim)
-        self.head = nn.Linear(latent_dim, output_dim, bias=True)
-
-    def forward(self, z):
-        x, weights = self.pool(z)
-        # maybe return the weights? for now will refrain
-        return self.head(x)
-
-class AutoencoderKLv2ABT(AutoencoderKLv2):
+class AutoencoderKLv3PredHeads(AutoencoderKLv2):
     """ AutoencoderKLv2 + linear temporal models for ABeta and Tau level prediction """
-    def __init__(self, spatial_dims, pred_out, pred_head_type="gated_temp_pool", in_channels = 1, out_channels = 1, num_res_blocks = (2, 2, 2, 2), channels = (32, 64, 64, 64), attention_levels = (False, False, True, True), latent_channels = 3, norm_num_groups = 32, norm_eps = 0.000001, with_encoder_nonlocal_attn = True, with_decoder_nonlocal_attn = True, time_shared = False, use_checkpoint = False, use_convtranspose = False, include_fc = True, use_combined_linear = False, use_flash_attention = False):
-        super().__init__(spatial_dims, in_channels, out_channels, num_res_blocks, channels, attention_levels, latent_channels, norm_num_groups, norm_eps, with_encoder_nonlocal_attn, with_decoder_nonlocal_attn, time_shared, use_checkpoint, use_convtranspose, include_fc, use_combined_linear, use_flash_attention)
-
+    def __init__(
+        self,
+        spatial_dims: int,
+        pred_head_type: str = "gated_temp_pool",
+        pred_head_num: int = 1,
+        in_channels: int = 1,
+        out_channels: int = 1,
+        num_res_blocks: Sequence[int] | int = (2, 2, 2, 2),
+        channels: Sequence[int] = (32, 64, 64, 64),
+        attention_levels: Sequence[bool] = (False, False, True, True),
+        latent_channels: int = 3,
+        norm_num_groups: int = 32,
+        norm_eps: float = 1e-6,
+        with_encoder_nonlocal_attn: bool = True,
+        with_decoder_nonlocal_attn: bool = True,
+        use_checkpoint: bool = False,
+        use_convtranspose: bool = False,
+        include_fc: bool = True,
+        use_combined_linear: bool = False,
+        use_flash_attention: bool = False,
+    ) -> None:
+        super().__init__(
+            spatial_dims,
+            in_channels,
+            out_channels,
+            num_res_blocks,
+            channels,
+            attention_levels,
+            latent_channels,
+            norm_num_groups,
+            norm_eps,
+            with_encoder_nonlocal_attn,
+            with_decoder_nonlocal_attn,
+            use_checkpoint,
+            use_convtranspose,
+            include_fc,
+            use_combined_linear,
+            use_flash_attention,
+        )
         pred_head_idx = {
             "avg": PredHeadAvg,
             "conv": PredHeadConv,
@@ -961,22 +884,22 @@ class AutoencoderKLv2ABT(AutoencoderKLv2):
         if pred_head_type not in pred_head_idx:
             raise ValueError(f"Selected prediction head type - '{pred_head_type}' is not available.")
         
-        self.abeta_pred = pred_head_idx[pred_head_type](latent_channels, pred_out)
-        self.tau_pred = pred_head_idx[pred_head_type](latent_channels, pred_out)
+        self.heads = [pred_head_idx[pred_head_type](latent_channels, out_channels) for i in range(pred_head_num)]
+
+    def to(self, device):
+        self.heads = [h.to(device) for h in self.heads]
+        return super().to(device)
 
     def forward(self, x):
         recon, z_mu, z_sigma, z = super().forward(x)
-        breakpoint()
-        abeta = self.abeta_pred(z)
-        tau = self.tau_pred(z)
-        # insert these values before the z
-        return recon, z_mu, z_sigma, abeta, tau, z
+        z_heads = [h(z) for h in self.heads]
+        return recon, z_mu, z_sigma, z_heads, z
     
-    
-    def loss(self, x, x_abeta, x_tau, model_output):
-        x_hat, z_mu, z_sigma, z_abeta, z_tau, _ = model_output
+    def loss(self, x, x_heads, model_output):
+        x_hat, z_mu, z_sigma, z_heads, _ = model_output
         error_per_feature = self.loss_fn_params.get("loss_per_feature", True)
         beta = float(self.loss_fn_params.get("beta", 1.0))
+        pred_heads_delta = float(self.loss_fn_params.get("pred_heads_delta", 0.0))
         # if selected error per feature, we are averaging everything
         if error_per_feature:
             # recon: mean mse loss
@@ -991,17 +914,22 @@ class AutoencoderKLv2ABT(AutoencoderKLv2):
         kld = -0.5 * (1 + z_sigma - z_mu.pow(2) - z_sigma.exp())
         kld = kld.flatten(1).sum(dim=1).mean() / z_sigma.size(1)
 
-        # calculate loss for ABeta and Tau prediction
-        abeta_loss = F.smooth_l1_loss(z_abeta, x_abeta, reduction="mean", beta=1.0)
-        tau_loss = F.smooth_l1_loss(z_tau, x_tau, reduction="mean", beta=1.0)
-
         loss = {
-            'loss': recon + beta * kld + abeta_loss + tau_loss,
+            'loss': recon + beta * kld,
             'recon': recon,
-            'kld': kld,
-            'abeta_loss': abeta_loss,
-            'tau_loss': tau_loss
+            'kld': kld
         }
+
+        # calculate loss from prediction heads
+        assert len(x_heads) == len(z_heads), f"label heads ({len(x_heads)}) is not the same as predicted heads ({len(z_heads)})"
+        pred_head_loss = []
+        for i, bl in enumerate(x_heads):
+            head_loss = F.smooth_l1_loss(z_heads[i], x_heads[bl], reduction="mean", beta=1.0)
+            pred_head_loss.append(head_loss)
+            loss[f"{bl}_loss"] = head_loss
+
+        if len(pred_head_loss) > 0:
+            loss['loss'] += pred_heads_delta * sum(pred_head_loss) / len(pred_head_loss)
 
         if self.swfcd is not None:
             swfcd = self.swfcd.apply(x, x_hat)

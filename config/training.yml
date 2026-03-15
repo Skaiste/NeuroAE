@@ -1,15 +1,14 @@
 training:
+  convergence_min_delta: 0.0001
+  convergence_patience: 10
+  convergence_warmup_epochs: 10
   learning_rate: 0.001
   loss_params:
-    beta: 0
     loss_per_feature: true
-    swfcd_beta: 1.0
+    pred_heads_delta: 1
+    swfcd_beta: 0
     swfcd_step: 3
     swfcd_window: 30
-  num_epochs: 60
+  num_epochs: 120
   save_dir: ./models
   weight_decay: 0.0001
-  use_abeta_tau: false
-  convergence_patience: 10
-  convergence_min_delta: 1e-4
-  convergence_warmup_epochs: 10

@@ -1,6 +1,5 @@
 model:
   freeze_encoder: false
-  hidden_dims: [16, 8]
-  latent_dim: 4
-  name: AutoencoderKLv2
+  latent_dim: 16
+  name: LinearAEPredHeads
   reset_decoder: false

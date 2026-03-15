@@ -416,7 +416,7 @@ class ADNIDataset(Dataset):
             self.flatten = False
 
 
-class ADNIDatasetABT(ADNIDataset):
+class ADNIDatasetBL(ADNIDataset):
     def __init__(self, 
                  data,
                  labels=None,
@@ -431,38 +431,38 @@ class ADNIDatasetABT(ADNIDataset):
                  timepoints_as_samples=False, 
                  fc_input=False, 
                  preserve_timepoints=False):
-        timeseries_data, self.abeta_data, self.tau_data = data
+        timeseries_data = data[0]
         super().__init__(timeseries_data, labels, subject_ids, filter, normaliser, fit_normaliser, transpose, flatten, pad_features, truncate_features, timepoints_as_samples, fc_input, preserve_timepoints)
+        self.bio_data = data[1]
 
-    def normalise_abeta_tau(self, abeta_normaliser, tau_normaliser, fit=False):
-        """
-        Normalises ABeta and Tau levels using z-score
-        If values are missing, sets them as 0s
-        """
+    def prepare(self, label, normaliser=None, fit=False, means=None):
         is_none = lambda n:(n==None).all()
-        data_size = max([ab.size for ab in self.abeta_data if not is_none(ab)])
-        abeta_data = [np.asarray(ts) if not is_none(ts) else np.asarray([np.nan]*data_size) for ts in self.abeta_data]
-        tau_data = [np.asarray(ts) if not is_none(ts) else np.asarray([np.nan]*data_size) for ts in self.tau_data]
 
-        abeta_data = np.array(abeta_data, dtype=np.float32)
-        tau_data = np.array(tau_data, dtype=np.float32)
+        data = self.bio_data[label]
+        data_size = max([ab.size for ab in data if not is_none(ab)])
+        data = [np.asarray(ts) if not is_none(ts) else np.asarray([np.nan]*data_size) for ts in data]
+        data = np.array(data, dtype=np.float32)
 
-        if fit:
-            abeta_data = abeta_normaliser.fit_transform(abeta_data)
-            tau_data = tau_normaliser.fit_transform(tau_data)
+        if normaliser is not None:
+            if fit:
+                data = normaliser.fit_transform(data)
+            else:
+                data = normaliser.transform(data)
+
+            self.bio_data[label] = np.nan_to_num(data)
         else:
-            abeta_data = abeta_normaliser.transform(abeta_data)
-            tau_data = tau_normaliser.transform(tau_data)
-
-        self.abeta_data = np.nan_to_num(abeta_data)
-        self.tau_data = np.nan_to_num(tau_data)
+            if means is None:
+                # create means for every region
+                means = np.nanmean(data, axis=0)
+            self.bio_data[label] = np.where(np.isnan(data), means, data)
+            return means
 
     def __getitem__(self, idx):
         data, label = super().__getitem__(idx)
-        return data, (label, self.abeta_data[idx], self.tau_data[idx])
+        return data, (label, {bl:d[idx] for bl,d in self.bio_data.items()})
 
 
-def extract_timeseries_from_loader(data_loader, groups=None):
+def extract_timeseries_from_loader(data_loader, groups=None, bio_levels=[]):
     """
     Extract timeseries data from ADNI DataLoader.
     
@@ -476,8 +476,7 @@ def extract_timeseries_from_loader(data_loader, groups=None):
         labels: List of group labels for each subject
     """
     timeseries_list = []
-    abeta_list = []
-    tau_list = []
+    bio_level_lists = {bl:[] for bl in bio_levels}
     subject_ids = []
     labels = []
     
@@ -493,8 +492,7 @@ def extract_timeseries_from_loader(data_loader, groups=None):
                 print(f"Warning: Subject {subject_id} not found in get_subjectData for group {group}")
                 continue
             timeseries = subject_data[subject_id].get("timeseries")
-            abeta = subject_data[subject_id].get("ABeta")
-            tau = subject_data[subject_id].get("Tau")
+
             if timeseries is None:
                 print(f"Warning: Missing 'timeseries' for subject {subject_id} in group {group}")
                 continue
@@ -503,21 +501,17 @@ def extract_timeseries_from_loader(data_loader, groups=None):
             if not isinstance(timeseries, np.ndarray):
                 timeseries = np.array(timeseries)
 
-            # Ensure abeta is numpy array
-            if not isinstance(abeta, np.ndarray):
-                abeta = np.array(abeta)
-                
-            # Ensure tau is numpy array
-            if not isinstance(tau, np.ndarray):
-                tau = np.array(tau)
-            
             timeseries_list.append(timeseries)
-            abeta_list.append(abeta)
-            tau_list.append(tau)
             subject_ids.append(subject_id)
             labels.append(group)
+
+            for bl in bio_levels:
+                bl_values = subject_data[subject_id].get(bl)
+                if not isinstance(bl_values, np.ndarray):
+                    bl_values = np.array(bl_values)
+                bio_level_lists[bl].append(bl_values)
     
-    return timeseries_list, abeta_list, tau_list, subject_ids, labels
+    return timeseries_list, bio_level_lists, subject_ids, labels
 
 
 def _resolve_split_path(split_path):
@@ -601,7 +595,7 @@ def prepare_data_loaders(
     num_workers=0,
     filter=None,
     normaliser=None,
-    use_abeta_tau=False
+    use_bio_levels=[]
 ):
     """
     Prepare PyTorch DataLoaders from ADNI DataLoader.
@@ -630,8 +624,8 @@ def prepare_data_loaders(
     if train_groups is None:
         train_groups = data_loader.get_groupLabels()
     
-    all_timeseries, all_abeta, all_tau, all_subject_ids, all_labels = extract_timeseries_from_loader(
-        data_loader, groups=train_groups
+    all_timeseries, all_bio_levels, all_subject_ids, all_labels = extract_timeseries_from_loader(
+        data_loader, groups=train_groups, bio_levels=use_bio_levels
     )
     
     # Split data if val/test groups not specified
@@ -649,9 +643,12 @@ def prepare_data_loaders(
                 "split_mode requires 'datasplit_file' to be set when not using none mode."
             )
 
-        train_data, train_abeta, train_tau, train_ids, train_labels = [], [], [], [], []
-        val_data, val_abeta, val_tau, val_ids, val_labels = [], [], [], [], []
-        test_data, test_abeta, test_tau, test_ids, test_labels = [], [], [], [], []
+        train_data, train_ids, train_labels = [], [], []
+        train_bio_levels = {bl:[] for bl in use_bio_levels}
+        val_data, val_ids, val_labels = [], [], []
+        val_bio_levels = {bl:[] for bl in use_bio_levels}
+        test_data, test_ids, test_labels = [], [], []
+        test_bio_levels = {bl:[] for bl in use_bio_levels}
 
         split_loaded = False
         if split_mode == "load" and split_path.exists():
@@ -659,7 +656,8 @@ def prepare_data_loaders(
                 split_path,
             )
             seen_subjects = set()
-            for timeseries, abeta, tau, subject_id, label in zip(all_timeseries, all_abeta, all_tau, all_subject_ids, all_labels):
+            idxs = [i for i in range(len(all_subject_ids))]
+            for idx, timeseries, subject_id, label in zip(idxs, all_timeseries, all_subject_ids, all_labels):
                 assignment = split_assignments.get(subject_id)
                 if assignment is None:
                     raise ValueError(
@@ -669,22 +667,22 @@ def prepare_data_loaders(
                 seen_subjects.add(subject_id)
                 if split_name == "train":
                     train_data.append(timeseries)
-                    train_abeta.append(abeta)
-                    train_tau.append(tau)
                     train_ids.append(subject_id)
                     train_labels.append(label)
+                    for bl in use_bio_levels:
+                        train_bio_levels[bl].append(all_bio_levels[bl][idx])
                 elif split_name == "val":
                     val_data.append(timeseries)
-                    val_abeta.append(abeta)
-                    val_tau.append(tau)
                     val_ids.append(subject_id)
                     val_labels.append(label)
+                    for bl in use_bio_levels:
+                        val_bio_levels[bl].append(all_bio_levels[bl][idx])
                 else:
                     test_data.append(timeseries)
-                    test_abeta.append(abeta)
-                    test_tau.append(tau)
                     test_ids.append(subject_id)
                     test_labels.append(label)
+                    for bl in use_bio_levels:
+                        test_bio_levels[bl].append(all_bio_levels[bl][idx])
 
             missing_subjects = set(split_assignments.keys()).difference(seen_subjects)
             if missing_subjects:
@@ -708,22 +706,22 @@ def prepare_data_loaders(
             test_indices = indices[n_train + n_val:]
 
             train_data = [all_timeseries[i] for i in train_indices]
-            train_abeta = [all_abeta[i] for i in train_indices]
-            train_tau = [all_tau[i] for i in train_indices]
             train_ids = [all_subject_ids[i] for i in train_indices]
             train_labels = [all_labels[i] for i in train_indices]
+            for bl in use_bio_levels:
+                train_bio_levels[bl] = [all_bio_levels[bl][i] for i in train_indices]
 
             val_data = [all_timeseries[i] for i in val_indices]
-            val_abeta = [all_abeta[i] for i in val_indices]
-            val_tau = [all_tau[i] for i in val_indices]
             val_ids = [all_subject_ids[i] for i in val_indices]
             val_labels = [all_labels[i] for i in val_indices]
+            for bl in use_bio_levels:
+                val_bio_levels[bl] = [all_bio_levels[bl][i] for i in val_indices]
 
             test_data = [all_timeseries[i] for i in test_indices]
-            test_abeta = [all_abeta[i] for i in test_indices]
-            test_tau = [all_tau[i] for i in test_indices]
             test_ids = [all_subject_ids[i] for i in test_indices]
             test_labels = [all_labels[i] for i in test_indices]
+            for bl in use_bio_levels:
+                test_bio_levels[bl] = [all_bio_levels[bl][i] for i in test_indices]
 
             if split_mode == "create":
                 split_rows = []
@@ -743,30 +741,30 @@ def prepare_data_loaders(
         if split_mode and (split_mode.lower() != "none"):
             print("Ignoring split_mode/export_datasplit because val_groups/test_groups were explicitly provided.")
         # Use specified groups
-        train_data, train_abeta, train_tau, train_ids, train_labels = extract_timeseries_from_loader(
-            data_loader, groups=train_groups
+        train_data, train_bio_levels, train_ids, train_labels = extract_timeseries_from_loader(
+            data_loader, groups=train_groups, bio_levels=use_bio_levels
         )
         
         val_data = []
         val_labels = []
         if val_groups:
-            val_data, val_abeta, val_tau, val_ids, val_labels = extract_timeseries_from_loader(
-                data_loader, groups=val_groups
+            val_data, val_bio_levels, val_ids, val_labels = extract_timeseries_from_loader(
+                data_loader, groups=val_groups, bio_levels=use_bio_levels
             )
         
         test_data = []
         test_labels = []
         if test_groups:
-            test_data, test_abeta, test_tau, test_ids, test_labels = extract_timeseries_from_loader(
-                data_loader, groups=test_groups
+            test_data, test_bio_levels, test_ids, test_labels = extract_timeseries_from_loader(
+                data_loader, groups=test_groups, bio_levels=use_bio_levels
             )
 
     DATASET = ADNIDataset
-    if use_abeta_tau:
-        DATASET = ADNIDatasetABT
-        train_data = (train_data, train_abeta, train_tau)
-        val_data = (val_data, val_abeta, val_tau)
-        test_data = (test_data, test_abeta, test_tau)
+    if len(use_bio_levels) > 0:
+        DATASET = ADNIDatasetBL
+        train_data = (train_data, train_bio_levels)
+        val_data = (val_data, val_bio_levels)
+        test_data = (test_data, test_bio_levels)
     
     # Create PyTorch datasets with normalization
     train_dataset = DATASET(
@@ -782,12 +780,11 @@ def prepare_data_loaders(
         preserve_timepoints=preserve_timepoints
     )
 
-    abeta_norm = None
-    tau_norm = None
-    if use_abeta_tau:
-        abeta_norm = StandardScaler()
-        tau_norm = StandardScaler()
-        train_dataset.normalise_abeta_tau(abeta_norm, tau_norm, fit=True)
+    bio_norm = {bl:StandardScaler() for bl in use_bio_levels}
+    bio_means = {}
+    for bl in use_bio_levels:
+        # train_dataset.prepare(bl, normaliser=bio_norm[bl], fit=True)
+        bio_means[bl] = train_dataset.prepare(bl, fit=True)
 
     print("Training dataset")
     train_dataset.describe()
@@ -824,6 +821,9 @@ def prepare_data_loaders(
             fc_input=fc_input,
             preserve_timepoints=preserve_timepoints
         )
+        for bl in use_bio_levels:
+            # val_dataset.prepare(bl, normaliser=bio_norm[bl])
+            val_dataset.prepare(bl, means=bio_means[bl])
         val_loader = DataLoader(
             val_dataset,
             batch_size=batch_size,
@@ -846,6 +846,9 @@ def prepare_data_loaders(
             fc_input=fc_input,
             preserve_timepoints=preserve_timepoints
         )
+        for bl in use_bio_levels:
+            # test_dataset.prepare(bl, normaliser=bio_norm[bl])
+            test_dataset.prepare(bl, means=bio_means[bl])
         test_loader = DataLoader(
             test_dataset,
             batch_size=batch_size,

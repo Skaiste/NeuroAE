@@ -93,7 +93,7 @@ def train_vae(
     name='basicVAE_general',
     pca=None,
     noise=None,
-    use_abeta_tau=False,
+    use_pred_heads=False,
     convergence_patience=None,
     convergence_min_delta=0.0,
     convergence_warmup_epochs=0,
@@ -134,11 +134,9 @@ def train_vae(
             output = model(x)
             output = _apply_recon_mask(x, output, valid_mask)
 
-            if use_abeta_tau:
-                _, abeta, tau = labels
-                abeta = abeta.to(device)
-                tau = tau.to(device)
-                loss = model.loss(x, abeta, tau, output)
+            if use_pred_heads:
+                heads = {bl:h.to(device) for bl,h in labels[1].items()}
+                loss = model.loss(x, heads, output)
             else:
                 loss = model.loss(x, output)
 
@@ -167,11 +165,9 @@ def train_vae(
                 output = model(x)
                 output = _apply_recon_mask(x, output, valid_mask)
             
-                if use_abeta_tau:
-                    _, abeta, tau = labels
-                    abeta = abeta.to(device)
-                    tau = tau.to(device)
-                    loss = model.loss(x, abeta, tau, output)
+                if use_pred_heads:
+                    heads = {bl:h.to(device) for bl,h in labels[1].items()}
+                    loss = model.loss(x, heads, output)
                 else:
                     loss = model.loss(x, output)
 
