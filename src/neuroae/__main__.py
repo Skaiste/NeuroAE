@@ -191,7 +191,7 @@ def load_model_from_config(model_config, data_config, input_dim, timepoint_dim, 
             device=device,
         )
         latent_dim = latent_dim * timepoint_dim
-    if model_name == "BasicVAEPredHeads":
+    elif model_name == "BasicVAEPredHeads":
         from .models.basic import BasicVAEPredHeads
         hidden_dim = model_config['model']['hidden_dims']
         latent_dim = model_config['model']['latent_dim']
@@ -366,8 +366,7 @@ def load_model_from_config(model_config, data_config, input_dim, timepoint_dim, 
             input_dim=input_dim[0],
             latent_dim=latent_dim,
         )
-    
-    if model_name == "LinearAEPredHeads":
+    elif model_name == "LinearAEPredHeads":
         from .models.linear import LinearAEPredHeads
         hidden_dim = None
         latent_dim = model_config['model']['latent_dim']
