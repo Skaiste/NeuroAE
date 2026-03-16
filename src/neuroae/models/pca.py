@@ -106,7 +106,7 @@ class PCA(sklearn_PCA):
 
 class PCA_multi:
     """ Have a separate PCA trained for every timepoint """
-    def __init__(self, dataset, n_components):
+    def __init__(self, dataset, n_components, random_state=None):
         self.dataset = dataset
         # timepoint dimension
         self.T = dataset.timepoint_dim
@@ -115,7 +115,7 @@ class PCA_multi:
 
         self.n_components = n_components // self.T
 
-        self.pcas = [sklearn_PCA(self.n_components) for _ in range(self.T)]
+        self.pcas = [sklearn_PCA(self.n_components, random_state=random_state) for _ in range(self.T)]
         print(f"PCA {self.n_components=} {self.T=}")
 
 

@@ -9,8 +9,11 @@ import concurrent.futures
 import hashlib
 import json
 import math
+import os
 import pathlib
+import random
 import re
+import numpy as np
 import torch
 import yaml
 import itertools
@@ -26,6 +29,58 @@ from training_tracker import TrainingResultsManager
 
 CACHED_ADNI = None
 CACHED_FILTER = None
+
+
+def _get_reproducibility_settings(data_config=None, training_config=None):
+    data_config = data_config or {}
+    training_config = training_config or {}
+    training_section = training_config.get("training", {})
+    reproducibility = training_section.get("reproducibility", {})
+    data_seed = data_config.get("data", {}).get("random_seed", 42)
+    return {
+        "enabled": bool(reproducibility.get("enabled", True)),
+        "seed": int(reproducibility.get("seed", data_seed)),
+        "deterministic": bool(reproducibility.get("deterministic", True)),
+        "warn_only": bool(reproducibility.get("warn_only", False)),
+        "benchmark": bool(reproducibility.get("benchmark", False)),
+    }
+
+
+def configure_reproducibility(data_config=None, training_config=None):
+    settings = _get_reproducibility_settings(data_config, training_config)
+    if not settings["enabled"]:
+        return settings
+
+    seed = settings["seed"]
+    deterministic = settings["deterministic"]
+    warn_only = settings["warn_only"]
+    benchmark = settings["benchmark"]
+
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    if deterministic and torch.cuda.is_available():
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    torch.use_deterministic_algorithms(deterministic, warn_only=warn_only)
+    if hasattr(torch.backends, "cudnn"):
+        torch.backends.cudnn.deterministic = deterministic
+        torch.backends.cudnn.benchmark = benchmark
+    if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "matmul"):
+        torch.backends.cuda.matmul.allow_tf32 = not deterministic
+    if hasattr(torch.backends, "cudnn"):
+        torch.backends.cudnn.allow_tf32 = not deterministic
+
+    print(
+        "Reproducibility settings: "
+        f"seed={seed}, deterministic={deterministic}, "
+        f"warn_only={warn_only}, benchmark={benchmark}"
+    )
+    return settings
 
 
 def load_config(config_path):
@@ -498,11 +553,14 @@ def run_training(model, model_name, latent_dim, loaders, training_config, model_
     )
     print(f"Experiment ID: {experiment_id}")
 
+    reproducibility = _get_reproducibility_settings(data_config, training_config)
+    pca_seed = reproducibility["seed"] if reproducibility["enabled"] else None
+
     # PCA for validation fit on the training data
     if loaders['preserve_timepoints']:
-        pca = PCA_multi(loaders['train_loader'].dataset, latent_dim)
+        pca = PCA_multi(loaders['train_loader'].dataset, latent_dim, random_state=pca_seed)
     else:
-        pca = PCA(loaders['train_loader'].dataset, latent_dim)
+        pca = PCA(loaders['train_loader'].dataset, latent_dim, random_state=pca_seed)
     pca.fit(loaders['train_loader'].dataset.data)
 
     pathlib.Path(training_config['training']['save_dir']).mkdir(parents=True, exist_ok=True)
@@ -549,17 +607,21 @@ def run_evaluation(
     latent_dim,
     loaders,
     training_config,
+    data_config,
     device,
     experiment_id=None,
     delete_model_after_eval=True,
 ):
     from .eval import eval_vae
 
+    reproducibility = _get_reproducibility_settings(data_config, training_config)
+    pca_seed = reproducibility["seed"] if reproducibility["enabled"] else None
+
     # Fit PCA on training data and pass it into evaluation for baseline comparison.
     if loaders['preserve_timepoints']:
-        pca = PCA_multi(loaders['train_loader'].dataset, latent_dim)
+        pca = PCA_multi(loaders['train_loader'].dataset, latent_dim, random_state=pca_seed)
     else:
-        pca = PCA(loaders['train_loader'].dataset, latent_dim)
+        pca = PCA(loaders['train_loader'].dataset, latent_dim, random_state=pca_seed)
     pca.fit(loaders['train_loader'].dataset.data)
 
     target_experiment_id = experiment_id or get_most_recent_experiment_id(project_path / "results" / "index.jsonl")
@@ -601,6 +663,7 @@ def run_experiment_pipeline(
     delete_model_after_eval=True,
     num_workers=0,
 ):
+    configure_reproducibility(data_config=data_config, training_config=training_config)
     loaders = load_data_from_config(
         data_dir=data_dir,
         data_config=data_config,
@@ -631,6 +694,7 @@ def run_experiment_pipeline(
         latent_dim,
         loaders,
         training_config,
+        data_config,
         device=device,
         experiment_id=exp_id,
         delete_model_after_eval=delete_model_after_eval,
@@ -730,6 +794,7 @@ def main():
     if args.mode == 'load':
         # Just load and display data
         data_config = load_config(args.data_config)
+        configure_reproducibility(data_config=data_config, training_config={})
         loaders = load_data_from_config(
             data_dir=args.data_dir,
             data_config=data_config,
@@ -756,6 +821,7 @@ def main():
         data_config = load_config(args.data_config)
         model_config = load_config(args.model_config)
         training_config = load_config(args.training_config)
+        configure_reproducibility(data_config=data_config, training_config=training_config)
         
         loaders = load_data_from_config(
             data_dir=args.data_dir,
@@ -792,6 +858,8 @@ def main():
         print("=" * 60)
 
         data_config = load_config(args.data_config)
+        training_config = load_config(args.training_config)
+        configure_reproducibility(data_config=data_config, training_config=training_config)
         loaders = load_data_from_config(
             data_dir=args.data_dir,
             data_config=data_config,
@@ -809,12 +877,12 @@ def main():
             device=args.device,
             preserve_timepoints=loaders.get('preserve_timepoints', False)
         )
-        training_config = load_config(args.training_config)
         run_evaluation(
             model,
             latent_dim,
             loaders,
             training_config,
+            data_config,
             device=args.device,
             experiment_id=args.exp_name,
             delete_model_after_eval=args.delete_model_after_eval,
@@ -949,6 +1017,12 @@ def main():
                     num_workers=args.num_workers,
                 )
         else:
+            if any(_get_reproducibility_settings(dc, tc)["enabled"] for dc, _, tc in experiment_specs):
+                raise ValueError(
+                    "--num-parallel-experiments > 1 is incompatible with reproducibility-enabled runs "
+                    "because thread-based parallelism shares process RNG state. "
+                    "Set --num-parallel-experiments=1 for deterministic experiments."
+                )
             print(f"Running up to {max_workers} experiments concurrently")
             futures = {}
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:

@@ -9,6 +9,7 @@ interface for use in main.py and other scripts.
 import sys
 import csv
 import platform
+import random
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -620,6 +621,14 @@ def prepare_data_loaders(
             - 'input_dim': Input dimension for the model
             - 'num_samples': Dictionary with number of samples per split
     """
+    def _seed_worker(worker_id):
+        worker_seed = torch.initial_seed() % 2**32
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
+
+    data_loader_generator = torch.Generator()
+    data_loader_generator.manual_seed(int(random_seed))
+
     # Extract all timeseries data
     if train_groups is None:
         train_groups = data_loader.get_groupLabels()
@@ -695,8 +704,8 @@ def prepare_data_loaders(
             raise FileNotFoundError(f"split_mode=load, but split file does not exist: {split_path}")
 
         if not split_loaded:
-            np.random.seed(random_seed)
-            indices = np.random.permutation(len(all_timeseries))
+            split_rng = np.random.default_rng(random_seed)
+            indices = split_rng.permutation(len(all_timeseries))
 
             n_train = int(len(all_timeseries) * train_split)
             n_val = int(len(all_timeseries) * val_split)
@@ -797,6 +806,8 @@ def prepare_data_loaders(
         shuffle=shuffle_train,
         num_workers=num_workers,
         pin_memory=pin_memory,
+        worker_init_fn=_seed_worker,
+        generator=data_loader_generator,
     )
 
     input_dim = train_dataset.data[0].shape
@@ -830,6 +841,8 @@ def prepare_data_loaders(
             shuffle=False,
             num_workers=num_workers,
             pin_memory=pin_memory,
+            worker_init_fn=_seed_worker,
+            generator=data_loader_generator,
         )
         result['val_loader'] = val_loader
         result['num_samples']['val'] = len(val_dataset)
@@ -855,6 +868,8 @@ def prepare_data_loaders(
             shuffle=False,
             num_workers=num_workers,
             pin_memory=pin_memory,
+            worker_init_fn=_seed_worker,
+            generator=data_loader_generator,
         )
         result['test_loader'] = test_loader
         result['num_samples']['test'] = len(test_dataset)

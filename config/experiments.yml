@@ -33,6 +33,12 @@ default:
     save_dir: ./models
     learning_rate: 1e-3
     weight_decay: 1e-4
+    reproducibility:
+      enabled: true
+      seed: 42
+      deterministic: true
+      warn_only: false
+      benchmark: false
     loss_params:
       loss_per_feature: true
       swfcd_beta: 0
@@ -42,28 +48,28 @@ default:
     convergence_min_delta: 1e-4
     convergence_warmup_epochs: 10
 
-# BasicConvAEPredHeads:
-#   static_params:
-#     data:
-#       data:
-#         pad_features: true
-#         flatten: false
-#     model:
-#       name: BasicConvAEPredHeads
-#     training:
-#       num_epochs: 120
-#   exp_params:
-#     data:
-#       data:
-#         use_bio_levels: [['ABeta', 'Tau'], ['ABeta'], ['Tau']]
-#     model:
-#       hidden_dims: [[64], [32], [64,32], [128], [128,64],[128,64,32]]
-#       latent_dim: [16, 8, 4]
-#       pred_head_type: [avg, conv, conv_no_hidden, temp_pool, gated_temp_pool]
-#     training:
-#       loss_params:
-#         pred_heads_delta: [1, 0.5]
-#         swfcd_beta: [0, 0.5]
+BasicConvAEPredHeads:
+  static_params:
+    data:
+      data:
+        pad_features: true
+        flatten: false
+    model:
+      name: BasicConvAEPredHeads
+    training:
+      num_epochs: 120
+  exp_params:
+    data:
+      data:
+        use_bio_levels: [['ABeta', 'Tau'], ['ABeta'], ['Tau']]
+    model:
+      hidden_dims: [[64], [32], [64,32], [128], [128,64],[128,64,32]]
+      latent_dim: [16, 8, 4]
+      pred_head_type: [avg, conv, conv_no_hidden, temp_pool, gated_temp_pool]
+    training:
+      loss_params:
+        pred_heads_delta: [1, 0.5]
+        swfcd_beta: [0, 0.5]
 
 
 
@@ -84,7 +90,6 @@ LinearAEPredHeads:
       loss_params:
         pred_heads_delta: [1, 0.5]
         swfcd_beta: [0, 0.5]
-
 
 
 BasicVAEPredHeads:
