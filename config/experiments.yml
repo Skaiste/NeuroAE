@@ -108,3 +108,22 @@ AutoencoderKL:
       attention_levels: [[false, false, false], [false, false, true], [false, true, true]]
       with_encoder_nonlocal_attn: [false, true]
       with_decoder_nonlocal_attn: [false, true]
+
+
+BasicConvAE:
+  static_params:
+    data:
+      data:
+        pad_features: true
+        flatten: false
+    model:
+      name: BasicConvAE
+    training:
+      num_epochs: 120
+  exp_params:
+    model:
+      hidden_dims: [[64], [32], [64,32], [128], [128,64],[128,64,32]]
+      latent_dim: [16, 8, 4]
+    training:
+      loss_params:
+        swfcd_beta: [0, 0.5]
