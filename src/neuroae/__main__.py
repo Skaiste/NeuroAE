@@ -421,6 +421,19 @@ def load_model_from_config(model_config, data_config, input_dim, timepoint_dim, 
             input_dim=input_dim[0],
             latent_dim=latent_dim,
         )
+    elif model_name == "LinearAETimeShared":
+        if not preserve_timepoints:
+            raise ValueError("LinearAETimeShared cannot be used if you don't want to preserve the timepoint dimension")
+        from .models.linear import LinearAETimeShared
+        hidden_dim = None
+        latent_dim = model_config['model']['latent_dim']
+        model = LinearAETimeShared(
+            input_dim=input_dim[0],
+            timepoint_dim=timepoint_dim,
+            latent_dim=latent_dim,
+            input_layout=model_config['model'].get('input_layout', "feature_time"),
+        )
+        latent_dim = latent_dim * timepoint_dim
     elif model_name == "LinearAEPredHeads":
         from .models.linear import LinearAEPredHeads
         hidden_dim = None

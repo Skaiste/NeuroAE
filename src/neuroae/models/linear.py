@@ -32,6 +32,72 @@ class LinearAE(ModelBase):
         return loss
 
 
+class LinearAETimeShared(ModelBase):
+    def __init__(
+        self,
+        input_dim=784,
+        timepoint_dim=1,
+        latent_dim=8,  # per timepoint
+        input_layout="feature_time",
+    ):
+        super().__init__()
+        self.input_dim = int(input_dim)
+        self.timepoint_dim = int(timepoint_dim)
+        if self.timepoint_dim <= 0:
+            raise ValueError("timepoint_dim must be > 0.")
+        if self.input_dim % self.timepoint_dim != 0:
+            raise ValueError(
+                f"input_dim ({self.input_dim}) must be divisible by timepoint_dim ({self.timepoint_dim})."
+            )
+
+        self.feature_dim = self.input_dim // self.timepoint_dim
+        self.latent_per_timepoint = int(latent_dim)
+        self.latent_dim = self.latent_per_timepoint * self.timepoint_dim
+
+        self.input_layout = str(input_layout)
+        if self.input_layout not in {"feature_time", "time_feature"}:
+            raise ValueError("input_layout must be one of {'feature_time', 'time_feature'}.")
+
+        # shared across timepoints
+        self.encoder = nn.Linear(self.feature_dim, self.latent_per_timepoint, bias=True)
+        self.decoder = nn.Linear(self.latent_per_timepoint, self.feature_dim, bias=True)
+
+    def _reshape_input(self, x):
+        if x.ndim != 2 or x.shape[1] != self.input_dim:
+            raise ValueError(f"Expected x shape (B, {self.input_dim}), got {tuple(x.shape)}")
+        if self.input_layout == "feature_time":
+            return x.reshape(x.shape[0], self.feature_dim, self.timepoint_dim).transpose(1, 2)  # (B,T,F)
+        return x.reshape(x.shape[0], self.timepoint_dim, self.feature_dim)  # (B,T,F)
+
+    def _flatten_recon(self, x_time):
+        if self.input_layout == "feature_time":
+            return x_time.transpose(1, 2).reshape(x_time.shape[0], self.input_dim)
+        return x_time.reshape(x_time.shape[0], self.input_dim)
+
+    def _flatten_latent(self, z_time):
+        if self.input_layout == "feature_time":
+            return z_time.transpose(1, 2).reshape(z_time.shape[0], self.latent_dim)
+        return z_time.reshape(z_time.shape[0], self.latent_dim)  # (B, T*L)
+
+    def forward(self, x):
+        x_time = self._reshape_input(x)           # (B,T,F)
+        z_time = self.encoder(x_time)             # (B,T,L), shared linear map over F
+        x_hat_time = self.decoder(z_time)         # (B,T,F)
+        z = self._flatten_latent(z_time)          # (B,T*L)
+        x_hat = self._flatten_recon(x_hat_time)   # (B,D)
+        return x_hat, z
+
+    def loss(self, x, model_output):
+        x_hat, _ = model_output
+        loss = {"loss": F.mse_loss(x_hat, x)}
+        if self.swfcd is not None:
+            swfcd = self.swfcd.apply(x, x_hat)
+            swfcd_beta = self.loss_fn_params.get("swfcd_beta", 1.0)
+            loss["swfcd_rmse"] = swfcd["rmse"]
+            loss["loss"] += swfcd_beta * swfcd["rmse"]
+        return loss
+
+
 
 class LinearAEPredHeads(LinearAE):
     """ LinearAE + linear temporal models for ABeta and Tau level prediction 

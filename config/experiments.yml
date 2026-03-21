@@ -13,6 +13,7 @@ default:
       flatten: true
       timepoints_as_samples: false
       fc_input: false
+      preserve_timepoints: true
 
     filter:
       apply_demean: true
@@ -32,12 +33,6 @@ default:
     save_dir: ./models
     learning_rate: 1e-3
     weight_decay: 1e-4
-    reproducibility:
-      enabled: true
-      seed: 42
-      deterministic: true
-      warn_only: false
-      benchmark: false
     loss_params:
       loss_per_feature: true
       swfcd_beta: 0
@@ -47,63 +42,18 @@ default:
     convergence_min_delta: 1e-4
     convergence_warmup_epochs: 10
 
-LinearAE:
+
+LinearAETimeShared:
   static_params:
     model:
-      name: LinearAE
-
-  exp_params:
+      name: LinearAETimeShared
     data:
       data:
-      - transpose: true
         flatten: true
-      - flatten: true
-      - flatten: false
-        timepoints_as_samples: true
-      - flatten: false
-        fc_input: true
-    model:
-      latent_dim: [32, 64, 128, 256, 512, 1024, 2048]
-
-BasicVAE:
-  static_params:
-    model:
-      name: BasicVAE
-
   exp_params:
-    data:
-      data:
-      - transpose: true
-        flatten: true
-      - flatten: true
-      - flatten: false
-        timepoints_as_samples: true
-      - flatten: false
-        fc_input: true
     model:
-      hidden_dims: [[1024, 512, 256, 128], [512, 256, 128], [512, 256], [256, 128]]
-      latent_dim: [64, 32, 10, 4]
+      latent_dim: [10, 8, 4, 2]
     training:
       loss_params:
-        beta: [1.0, 0.75, 0.5]
-
-
-SequentialAE:
-  static_params:
-    data:
-      data:
-        transpose: true
-        flatten: false
-    model:
-      name: SequentialAE
-
-  exp_params:
-    model:
-      hidden_dim: [256, 128]
-      latent_dim: [64, 32, 10, 4]
-      dropout: [0.3, 0.5, 0.7]
-      cell: ['lstm', 'gru']
-
-    training:
-      loss_params:
-        beta: [1.0, 0.75, 0.5]
+        beta: [1.0, 0.5, 0]
+        swfcd_beta: [1.0, 0.5, 0]
