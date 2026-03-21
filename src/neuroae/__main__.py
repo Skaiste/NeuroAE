@@ -557,11 +557,12 @@ def run_training(model, model_name, latent_dim, loaders, training_config, model_
     pca_seed = reproducibility["seed"] if reproducibility["enabled"] else None
 
     # PCA for validation fit on the training data
-    if loaders['preserve_timepoints']:
-        pca = PCA_multi(loaders['train_loader'].dataset, latent_dim, random_state=pca_seed)
-    else:
-        pca = PCA(loaders['train_loader'].dataset, latent_dim, random_state=pca_seed)
-    pca.fit(loaders['train_loader'].dataset.data)
+    # if loaders['preserve_timepoints']:
+    #     pca = PCA_multi(loaders['train_loader'].dataset, latent_dim, random_state=pca_seed)
+    # else:
+    #     pca = PCA(loaders['train_loader'].dataset, latent_dim, random_state=pca_seed)
+    # pca.fit(loaders['train_loader'].dataset.data)
+    pca = None
 
     pathlib.Path(training_config['training']['save_dir']).mkdir(parents=True, exist_ok=True)
     history, mse_pca = train_vae(
@@ -618,11 +619,12 @@ def run_evaluation(
     pca_seed = reproducibility["seed"] if reproducibility["enabled"] else None
 
     # Fit PCA on training data and pass it into evaluation for baseline comparison.
-    if loaders['preserve_timepoints']:
-        pca = PCA_multi(loaders['train_loader'].dataset, latent_dim, random_state=pca_seed)
-    else:
-        pca = PCA(loaders['train_loader'].dataset, latent_dim, random_state=pca_seed)
-    pca.fit(loaders['train_loader'].dataset.data)
+    # if loaders['preserve_timepoints']:
+    #     pca = PCA_multi(loaders['train_loader'].dataset, latent_dim, random_state=pca_seed)
+    # else:
+    #     pca = PCA(loaders['train_loader'].dataset, latent_dim, random_state=pca_seed)
+    # pca.fit(loaders['train_loader'].dataset.data)
+    pca = None
 
     target_experiment_id = experiment_id or get_most_recent_experiment_id(project_path / "results" / "index.jsonl")
     print(f"Evaluating experiment: {target_experiment_id}")
