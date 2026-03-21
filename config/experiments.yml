@@ -13,7 +13,6 @@ default:
       flatten: true
       timepoints_as_samples: false
       fc_input: false
-      preserve_timepoints: true
 
     filter:
       apply_demean: true
@@ -29,10 +28,16 @@ default:
     freeze_encoder: false
     reset_decoder: false
   training:
-    num_epochs: 30
+    num_epochs: 120
     save_dir: ./models
     learning_rate: 1e-3
     weight_decay: 1e-4
+    reproducibility:
+      enabled: true
+      seed: 42
+      deterministic: true
+      warn_only: false
+      benchmark: false
     loss_params:
       loss_per_feature: true
       swfcd_beta: 0
@@ -46,84 +51,59 @@ LinearAE:
   static_params:
     model:
       name: LinearAE
+
   exp_params:
+    data:
+      data:
+      - transpose: true
+        flatten: true
+      - flatten: true
+      - flatten: false
+        timepoints_as_samples: true
+      - flatten: false
+        fc_input: true
     model:
-      latent_dim: [4, 8, 12]
-    training:
-      loss_params:
-        beta: [1.0, 0.5, 0]
-        swfcd_beta: [1.0, 0.5, 0]
+      latent_dim: [32, 64, 128, 256, 512, 1024, 2048]
 
 BasicVAE:
   static_params:
     model:
       name: BasicVAE
+
+  exp_params:
     data:
       data:
+      - transpose: true
         flatten: true
-  exp_params:
+      - flatten: true
+      - flatten: false
+        timepoints_as_samples: true
+      - flatten: false
+        fc_input: true
     model:
-      hidden_dims: [[6304, 3152], [6304], [3152]]
-      latent_dim: [10, 8, 4]
+      hidden_dims: [[1024, 512, 256, 128], [512, 256, 128], [512, 256], [256, 128]]
+      latent_dim: [64, 32, 10, 4]
     training:
       loss_params:
-        beta: [1.0, 0.5, 0]
-        swfcd_beta: [1.0, 0.5, 0]
+        beta: [1.0, 0.75, 0.5]
 
 
-BasicVAETimeShared:
-  static_params:
-    model:
-      name: BasicVAETimeShared
-    data:
-      data:
-        flatten: true
-  exp_params:
-    model:
-      hidden_dims: [[256, 128], [128, 64], [128], [64]]
-      latent_dim: [10, 8, 4, 2]
-    training:
-      loss_params:
-        beta: [1.0, 0.5, 0]
-        swfcd_beta: [1.0, 0.5, 0]
-
-AutoencoderKL:
+SequentialAE:
   static_params:
     data:
       data:
-        pad_features: true
+        transpose: true
         flatten: false
     model:
-      name: AutoencoderKLv3
-    training:
-      num_epochs: 120
-      loss_params:
-        beta: 0.5
-        swfcd_beta: 0.5
+      name: SequentialAE
+
   exp_params:
     model:
-      latent_dim: [4, 8, 16]
-      hidden_dims: [[64, 64, 64], [32, 32, 32]]
-      num_res_blocks: [[1,1,1], [2,2,2], [3,3,3]]
-      attention_levels: [[false, false, false], [false, false, true], [false, true, true]]
-      with_encoder_nonlocal_attn: [false, true]
-      with_decoder_nonlocal_attn: [false, true]
+      hidden_dim: [256, 128]
+      latent_dim: [64, 32, 10, 4]
+      dropout: [0.3, 0.5, 0.7]
+      cell: ['lstm', 'gru']
 
-
-BasicConvAE:
-  static_params:
-    data:
-      data:
-        pad_features: true
-        flatten: false
-    model:
-      name: BasicConvAE
-    training:
-      num_epochs: 120
-  exp_params:
-    model:
-      hidden_dims: [[64], [32], [64,32], [128], [128,64],[128,64,32]]
-      latent_dim: [16, 8, 4]
     training:
       loss_params:
-        swfcd_beta: [0, 0.5]
+        beta: [1.0, 0.75, 0.5]
