@@ -265,7 +265,7 @@ class BasicVAETimeShared(ModelBase):
         z_time = self._reshape_latent(z)
         x_hat_time = self.decoder(z_time)
         x_hat = self._flatten_recon(x_hat_time)
-        return x_hat, mean, log_var, z
+        return x_hat, mean, log_var, z_time.transpose(2, 1)
 
     def loss(self, x, model_output):
         x_hat, mu, log_var, _ = model_output
@@ -341,6 +341,101 @@ class BasicVAEPredHeads(BasicVAE):
         # reshape latent space to 2d
         z_2d = z.reshape(z.shape[0],-1,self.timepoints)
         z_heads = [h(z_2d) for h in self.heads]
+        return x_hat, mean, log_var, z_heads, z
+    
+    def loss(self, x, x_heads, model_output):
+        x_hat, mu, log_var, z_heads, _ = model_output
+        beta = self.loss_fn_params.get("beta", 0.5)
+        error_per_feature = self.loss_fn_params.get("loss_per_feature", True)
+        pred_heads_delta = float(self.loss_fn_params.get("pred_heads_delta", 0.0))
+        
+        # if selected error per feature, we are averaging everything
+        if error_per_feature:
+            # recon: mean mse loss
+            recon = F.mse_loss(x_hat, x, reduction="mean")
+
+            # KL: mean over batch, then mean over latent dims
+            kld = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
+            kld = kld.sum(dim=1).mean() / log_var.size(1)
+
+        # if selected error per sample, we are summing everything
+        else:
+            # recon: sum over features per sample, then mean over batch
+            recon = F.mse_loss(x_hat, x, reduction="none")  # [B, D]
+            recon = recon.sum(dim=1).mean()
+
+            # kld: sum over latent dims per sample, then mean over batch
+            kld = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
+            kld = kld.sum(dim=1).mean() / log_var.size(1)
+
+        loss = {
+            'loss': recon + beta * kld,
+            'recon': recon, 
+            'kld': kld
+        }
+
+        # calculate loss from prediction heads
+        assert len(x_heads) == len(z_heads), f"label heads ({len(x_heads)}) is not the same as predicted heads ({len(z_heads)})"
+        pred_head_loss = []
+        for i, bl in enumerate(x_heads):
+            head_loss = F.smooth_l1_loss(z_heads[i], x_heads[bl], reduction="mean", beta=1.0)
+            pred_head_loss.append(head_loss)
+            loss[f"{bl}_loss"] = head_loss
+
+        if len(pred_head_loss) > 0:
+            loss['loss'] += pred_heads_delta * sum(pred_head_loss) / len(pred_head_loss)
+
+        if self.swfcd is not None:
+            swfcd = self.swfcd.apply(x, x_hat)
+            swfcd_beta = self.loss_fn_params.get("swfcd_beta", 1.0)
+            loss['swfcd_rmse'] = swfcd['rmse']
+            loss['loss'] += swfcd_beta * swfcd['rmse']
+
+        return loss
+    
+
+class BasicVAETimeSharedPredHeads(BasicVAETimeShared):
+    """ BasicVAETimeShared + linear temporal models for ABeta and Tau level prediction 
+            Assumes latent dimension preserves the time dimension
+    """
+    def __init__(
+        self,
+        input_dim,
+        timepoint_dim,
+        pred_head_type: str = "gated_temp_pool",
+        pred_head_num: int = 1,
+        hidden_dims=[1024, 512, 256, 128], 
+        latent_dim=32,
+        device='cuda' if torch.cuda.is_available() else 'cpu'
+    ) -> None:
+        super().__init__(
+            input_dim=input_dim,
+            timepoint_dim=timepoint_dim,
+            hidden_dims=hidden_dims, 
+            latent_dim=latent_dim,
+            device=device,
+        )
+        self.regions = input_dim // timepoint_dim
+        self.latent_regions = latent_dim
+        pred_head_idx = {
+            "avg": PredHeadAvg,
+            "conv": PredHeadConv,
+            "conv_no_hidden": lambda l, r: PredHeadConv(l, r, with_hidden=False),
+            "temp_pool": PredHeadTemporalPool,
+            "gated_temp_pool": PredHeadGatedTemporalPool
+        }
+        if pred_head_type not in pred_head_idx:
+            raise ValueError(f"Selected prediction head type - '{pred_head_type}' is not available.")
+        
+        self.heads = [pred_head_idx[pred_head_type](self.latent_regions, self.regions) for i in range(pred_head_num)]
+
+    def to(self, device):
+        self.heads = [h.to(device) for h in self.heads]
+        return super().to(device)
+
+    def forward(self, x):
+        x_hat, mean, log_var, z = super().forward(x)
+        z_heads = [h(z) for h in self.heads]
         return x_hat, mean, log_var, z_heads, z
     
     def loss(self, x, x_heads, model_output):

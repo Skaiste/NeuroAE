@@ -261,6 +261,19 @@ def load_model_from_config(model_config, data_config, input_dim, timepoint_dim, 
             device=device,
             pred_head_type=model_config['model'].get('pred_head_type', "gated_temp_pool"),
             pred_head_num=num_heads)
+    elif model_name == "BasicVAETimeSharedPredHeads":
+        from .models.basic import BasicVAETimeSharedPredHeads
+        hidden_dim = model_config['model']['hidden_dims']
+        latent_dim = model_config['model']['latent_dim']
+        num_heads = len(data_config['data'].get('use_bio_levels', []))
+        model = BasicVAETimeSharedPredHeads(
+            input_dim=input_dim[0],
+            timepoint_dim=timepoint_dim,
+            hidden_dims=hidden_dim,
+            latent_dim=latent_dim,
+            device=device,
+            pred_head_type=model_config['model'].get('pred_head_type', "gated_temp_pool"),
+            pred_head_num=num_heads)
     elif model_name == "BasicConvAE":
         from .models.basicConvAE import BasicConvAE
         latent_dim = model_config['model']['latent_dim']
@@ -445,6 +458,17 @@ def load_model_from_config(model_config, data_config, input_dim, timepoint_dim, 
             input_dim=input_dim[0],
             timepoints=timepoint_dim,
             latent_dim=latent_dim,
+            pred_head_type=model_config['model'].get('pred_head_type', "gated_temp_pool"),
+            pred_head_num=num_heads)
+    elif model_name == "LinearAETimeSharedPredHeads":
+        from .models.linear import LinearAETimeSharedPredHeads
+        hidden_dim = None
+        latent_dim = model_config['model']['latent_dim']
+        num_heads = len(data_config['data'].get('use_bio_levels', []))
+        model = LinearAETimeSharedPredHeads(
+            input_dim=input_dim[0],
+            latent_dim=latent_dim,
+            timepoint_dim=timepoint_dim,
             pred_head_type=model_config['model'].get('pred_head_type', "gated_temp_pool"),
             pred_head_num=num_heads)
     else:

@@ -29,10 +29,16 @@ default:
     freeze_encoder: false
     reset_decoder: false
   training:
-    num_epochs: 120
+    num_epochs: 30
     save_dir: ./models
     learning_rate: 1e-3
     weight_decay: 1e-4
+    reproducibility:
+      enabled: true
+      seed: 42
+      deterministic: true
+      warn_only: false
+      benchmark: false
     loss_params:
       loss_per_feature: true
       swfcd_beta: 0
@@ -43,17 +49,38 @@ default:
     convergence_warmup_epochs: 10
 
 
-LinearAETimeShared:
+LinearAETimeSharedPredHeads:
   static_params:
     model:
-      name: LinearAETimeShared
+      name: LinearAETimeSharedPredHeads
+    training:
+      num_epochs: 1000
+  exp_params:
     data:
       data:
-        flatten: true
-  exp_params:
+        use_bio_levels: [['ABeta', 'Tau'], ['ABeta'], ['Tau']]
     model:
-      latent_dim: [10, 8, 4, 2]
+      latent_dim: [16, 8, 4]
+      pred_head_type: [avg, conv, conv_no_hidden, temp_pool, gated_temp_pool]
     training:
       loss_params:
-        beta: [1.0, 0.5, 0]
-        swfcd_beta: [1.0, 0.5, 0]
+        pred_heads_delta: [1, 0.5]
+
+
+BasicVAETimeSharedPredHeads:
+  static_params:
+    model:
+      name: BasicVAETimeSharedPredHeads
+    training:
+      num_epochs: 120
+  exp_params:
+    data:
+      data:
+        use_bio_levels: [['ABeta', 'Tau'], ['ABeta'], ['Tau']]
+    model:
+      latent_dim: [16, 8, 4]
+      hidden_dims: [[6304, 3152], [6304], [3152]]
+      pred_head_type: [avg, conv, conv_no_hidden, temp_pool, gated_temp_pool]
+    training:
+      loss_params:
+        pred_heads_delta: [1, 0.5]
