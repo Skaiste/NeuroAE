@@ -24,7 +24,7 @@ from sklearn.preprocessing import StandardScaler
 from .utils import *
 from .utils.dict_utils import deepupdate
 from .load_data import load_adni, prepare_data_loaders
-from .models.archive.pca import PCA, PCA_multi
+from .models.old.pca import PCA, PCA_multi
 from training_tracker import TrainingResultsManager
 
 CACHED_ADNI = None
