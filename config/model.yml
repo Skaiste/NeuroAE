@@ -1,5 +1,6 @@
 model:
   freeze_encoder: false
-  latent_dim: 16
-  name: LinearAEPredHeads
+  latent_dim: 4
+  name: MonaiAEKL
+  hidden_dims: [16, 8]
   reset_decoder: false

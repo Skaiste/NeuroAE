@@ -1,4 +1,5 @@
 training:
+  checkpoint_selection_metric: swfcd_logreg_joint
   convergence_min_delta: 0.0001
   convergence_patience: 10
   convergence_warmup_epochs: 10
@@ -9,6 +10,12 @@ training:
     swfcd_beta: 0
     swfcd_step: 3
     swfcd_window: 30
-  num_epochs: 120
+  num_epochs: 1000
+  reproducibility:
+    benchmark: false
+    deterministic: true
+    enabled: true
+    seed: 42
+    warn_only: false
   save_dir: ./models
   weight_decay: 0.0001

@@ -24,7 +24,7 @@ from sklearn.preprocessing import StandardScaler
 from .utils import *
 from .utils.dict_utils import deepupdate
 from .load_data import load_adni, prepare_data_loaders
-from .models.pca import PCA, PCA_multi
+from .models.archive.pca import PCA, PCA_multi
 from training_tracker import TrainingResultsManager
 
 CACHED_ADNI = None
@@ -181,7 +181,7 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
     return loaders
 
 
-def _build_training_summary(history, mse_pca):
+def _build_training_summary(history, mse_pca, checkpoint_selection_metric="val_loss"):
     def _metric_values(split, metric):
         split_metrics = history.get(split)
         if isinstance(split_metrics, dict):
@@ -190,16 +190,37 @@ def _build_training_summary(history, mse_pca):
         values = history.get(f"{split}_{metric}", [])
         return values if isinstance(values, list) else []
 
+    def _best_finite(values, maximize=True):
+        finite_values = [float(v) for v in values if math.isfinite(float(v))]
+        if not finite_values:
+            return None
+        return max(finite_values) if maximize else min(finite_values)
+
     val_losses = _metric_values("val", "loss")
+    val_swfcd = _metric_values("val", "swfcd_pearson")
+    val_logreg = _metric_values("val", "logreg_accuracy")
     train_losses = _metric_values("train", "loss")
-    best_epoch = None
+    selected_epoch = None
+    selected_val_loss = None
+    selected_swfcd_pearson = None
+    selected_logreg_accuracy = None
+    selected_joint_score = None
     best_val = None
     significance = None
+    from .train import select_best_checkpoint
+    selection = select_best_checkpoint(history, selection_metric=checkpoint_selection_metric)
+    if selection is not None:
+        selected_epoch = selection["best_epoch"]
+        selected_val_loss = selection["loss"]
+        selected_swfcd_pearson = selection["swfcd_pearson"]
+        selected_logreg_accuracy = selection["logreg_accuracy"]
+        selected_joint_score = selection.get("joint_score")
+
     if val_losses:
         best_index = min(range(len(val_losses)), key=lambda idx: val_losses[idx])
-        best_epoch = best_index + 1
         best_val = float(val_losses[best_index])
-        bvl = best_val if 'recon' not in history['val'] else float(history['val']['recon'][best_index])
+        selected_index = selection["best_index"] if selection is not None else best_index
+        bvl = best_val if 'recon' not in history['val'] else float(history['val']['recon'][selected_index])
         if mse_pca is not None and math.isfinite(float(mse_pca)) and float(mse_pca) != 0.0:
             significance = 100 * (mse_pca - bvl) / mse_pca
         else:
@@ -207,9 +228,16 @@ def _build_training_summary(history, mse_pca):
 
     return {
         'num_epochs': max(len(train_losses), len(val_losses)),
-        'best_epoch': best_epoch,
+        'best_epoch': selected_epoch,
+        'selected_val_loss': selected_val_loss,
+        'selected_swfcd_pearson': selected_swfcd_pearson,
+        'selected_logreg_accuracy': selected_logreg_accuracy,
+        'selected_joint_score': selected_joint_score,
+        'checkpoint_selection_metric': checkpoint_selection_metric,
         'val_pca_mse': mse_pca,
         'best_val_loss': best_val,
+        'best_val_swfcd_pearson': _best_finite(val_swfcd, maximize=True),
+        'best_val_logreg_accuracy': _best_finite(val_logreg, maximize=True),
         'significance': significance,
         'final_train_loss': float(train_losses[-1]) if train_losses else None,
         'final_val_loss': float(val_losses[-1]) if val_losses else None,
@@ -220,257 +248,85 @@ def load_model_from_config(model_config, data_config, input_dim, timepoint_dim, 
     model_name = model_config['model']['name']
     latent_dim = 0
 
-    if model_name == "BasicVAE":
-        from .models.basic import BasicVAE
+    if model_name == "VAE":
+        from .models.variational import VAE
         hidden_dim = model_config['model']['hidden_dims']
         latent_dim = model_config['model']['latent_dim']
-        if preserve_timepoints:
-            latent_dim = latent_dim * timepoint_dim
-        model = BasicVAE(
-            input_dim=input_dim[0],
+        # assuming the input is transposed
+        model = VAE(
+            region_dim=input_dim[-1],
+            timepoint_dim=input_dim[0],
             hidden_dims=hidden_dim,
             latent_dim=latent_dim,
             device=device)
-    elif model_name == "BasicVAETimeShared":
-        if not preserve_timepoints:
-            raise ValueError("BasicVAETimeShared cannot be used if you don't want to preserve the timepoint dimension")
-        from .models.basic import BasicVAETimeShared
-        hidden_dim = model_config['model']['hidden_dims']
+    elif model_name == "LAE":
+        from .models.linear import LAE
         latent_dim = model_config['model']['latent_dim']
-        model = BasicVAETimeShared(
-            input_dim=input_dim[0],
-            timepoint_dim=timepoint_dim,
-            hidden_dims=hidden_dim,
+        hidden_dim = None
+        model = LAE(
+            region_dim=input_dim[-1],
+            timepoint_dim=input_dim[0],
             latent_dim=latent_dim,
-            input_layout=model_config['model'].get('input_layout', "feature_time"),
-            device=device,
         )
-        latent_dim = latent_dim * timepoint_dim
-    elif model_name == "BasicVAEPredHeads":
-        from .models.basic import BasicVAEPredHeads
+    elif model_name == "ConvAE":
+        from .models.convAE import ConvAE
         hidden_dim = model_config['model']['hidden_dims']
         latent_dim = model_config['model']['latent_dim']
-        num_heads = len(data_config['data'].get('use_bio_levels', []))
-        if preserve_timepoints:
-            latent_dim = latent_dim * timepoint_dim
-        model = BasicVAEPredHeads(
-            input_dim=input_dim[0],
-            timepoints=timepoint_dim,
-            hidden_dims=hidden_dim,
+        kernel_size = model_config['model'].get("kernel_size", 3)
+        model = ConvAE(
+            regions=input_dim[-1],
+            timepoints=input_dim[0],
             latent_dim=latent_dim,
-            device=device,
-            pred_head_type=model_config['model'].get('pred_head_type', "gated_temp_pool"),
-            pred_head_num=num_heads)
-    elif model_name == "BasicVAETimeSharedPredHeads":
-        from .models.basic import BasicVAETimeSharedPredHeads
-        hidden_dim = model_config['model']['hidden_dims']
-        latent_dim = model_config['model']['latent_dim']
-        num_heads = len(data_config['data'].get('use_bio_levels', []))
-        model = BasicVAETimeSharedPredHeads(
-            input_dim=input_dim[0],
-            timepoint_dim=timepoint_dim,
-            hidden_dims=hidden_dim,
-            latent_dim=latent_dim,
-            device=device,
-            pred_head_type=model_config['model'].get('pred_head_type', "gated_temp_pool"),
-            pred_head_num=num_heads)
-    elif model_name == "BasicConvAE":
-        from .models.basicConvAE import BasicConvAE
-        latent_dim = model_config['model']['latent_dim']
-        hidden_dim = model_config['model']['hidden_dims']
-        model = BasicConvAE(
-            regions=input_dim[0],
-            timepoints=input_dim[1],
             hidden_channels=hidden_dim,
-            latent_dim=latent_dim
+            kernel_size=kernel_size
         )
-        latent_dim = latent_dim * timepoint_dim
-    elif model_name == "BasicConvAEPredHeads":
-        from .models.basicConvAE import BasicConvAEPredHeads
-        latent_dim = model_config['model']['latent_dim']
+    elif model_name == "ConvVAE":
+        from .models.convAE import ConvVAE
         hidden_dim = model_config['model']['hidden_dims']
-        num_heads = len(data_config['data'].get('use_bio_levels', []))
-        model = BasicConvAEPredHeads(
-            regions=input_dim[0],
-            timepoints=input_dim[1],
+        latent_dim = model_config['model']['latent_dim']
+        kernel_size = model_config['model'].get("kernel_size", 3)
+        model = ConvVAE(
+            regions=input_dim[-1],
+            timepoints=input_dim[0],
+            latent_dim=latent_dim,
             hidden_channels=hidden_dim,
-            latent_dim=latent_dim,
-            pred_head_type=model_config['model'].get('pred_head_type', "gated_temp_pool"),
-            pred_head_num=num_heads,
+            kernel_size=kernel_size
         )
-        latent_dim = latent_dim * timepoint_dim
-    elif model_name == "AEKLv3pp":
-        from .models.convAEpp import AEKLv3pp
-        latent_dim = model_config['model']['latent_dim']
-        latent2_dim = model_config['model']['latent2_dim']
+    elif model_name == "MonaiAEKL":
+        from .models.monaiAE import MonaiAEKL
         hidden_dim = model_config['model']['hidden_dims']
-        attention_levels = model_config['model'].get('attention_levels', [False] * len(hidden_dim))
-        model = AEKLv3pp(
-            timepoints=input_dim[1],
-            in_channels=input_dim[0],
-            num_res_blocks=model_config['model'].get('num_res_blocks', 1),
-            channels=hidden_dim,
+        latent_dim = model_config['model']['latent_dim']
+        kernel_size = model_config['model'].get("kernel_size", 3)
+        num_res_blocks = model_config['model'].get("num_res_blocks", 1)
+        attention_levels = model_config['model'].get("attention_levels")
+        latent_channels = model_config['model'].get("latent_channels", 3)
+        norm_num_groups = model_config['model'].get("norm_num_groups")
+        use_checkpoint = model_config['model'].get("use_checkpoint", False)
+        use_convtranspose = model_config['model'].get("use_convtranspose", False)
+        with_encoder_nonlocal_attn = model_config['model'].get("with_encoder_nonlocal_attn", True)
+        with_decoder_nonlocal_attn = model_config['model'].get("with_decoder_nonlocal_attn", True)
+        include_fc = model_config['model'].get("include_fc", True)
+        use_combined_linear = model_config['model'].get("use_combined_linear", False)
+        use_flash_attention = model_config['model'].get("use_flash_attention", False)
+        model = MonaiAEKL(
+            regions=input_dim[-1],
+            timepoints=input_dim[0],
+            latent_dim=latent_dim,
+            hidden_channels=hidden_dim,
+            kernel_size=kernel_size,
+            num_res_blocks=num_res_blocks,
             attention_levels=attention_levels,
-            latent_channels=latent_dim,
-            latent2_dim=latent2_dim,
-            norm_num_groups=model_config['model'].get('norm_num_groups', 8),
-            norm_eps=model_config['model'].get('norm_eps', 1e-6),
-            with_encoder_nonlocal_attn=model_config['model'].get('with_encoder_nonlocal_attn', False),
-            with_decoder_nonlocal_attn=model_config['model'].get('with_decoder_nonlocal_attn', False),
+            latent_channels=latent_channels,
+            norm_num_groups=norm_num_groups,
+            with_encoder_nonlocal_attn=with_encoder_nonlocal_attn,
+            with_decoder_nonlocal_attn=with_decoder_nonlocal_attn,
+            use_checkpoint=use_checkpoint,
+            use_convtranspose=use_convtranspose,
+            include_fc=include_fc,
+            use_combined_linear=use_combined_linear,
+            use_flash_attention=use_flash_attention,
+            device=device,
         )
-        latent_dim = latent_dim * timepoint_dim
-    elif model_name == "AutoencoderKLv3PredHeads":
-        from .models.autoencoderkl import AutoencoderKLv3PredHeads
-        latent_dim = model_config['model']['latent_dim']
-        hidden_dim = model_config['model']['hidden_dims']
-        attention_levels = model_config['model'].get('attention_levels', [False] * len(hidden_dim))
-        num_heads = len(data_config['data'].get('use_bio_levels', []))
-        model = AutoencoderKLv3PredHeads(
-            spatial_dims=1,
-            pred_head_type=model_config['model'].get('pred_head_type', "gated_temp_pool"),
-            pred_head_num=num_heads,
-            in_channels=input_dim[0],
-            out_channels=input_dim[0],
-            num_res_blocks=model_config['model'].get('num_res_blocks', 1),
-            channels=hidden_dim,
-            attention_levels=attention_levels,
-            latent_channels=latent_dim,
-            norm_num_groups=model_config['model'].get('norm_num_groups', 8),
-            norm_eps=model_config['model'].get('norm_eps', 1e-6),
-            with_encoder_nonlocal_attn=model_config['model'].get('with_encoder_nonlocal_attn', False),
-            with_decoder_nonlocal_attn=model_config['model'].get('with_decoder_nonlocal_attn', False),
-        )
-        latent_dim *= timepoint_dim
-    elif model_name == "AutoencoderKLv2":
-        from .models.convAE_old import AutoencoderKLv2
-        latent_dim = model_config['model']['latent_dim']
-        hidden_dim = model_config['model']['hidden_dims']
-        attention_levels = model_config['model'].get('attention_levels', [False] * len(hidden_dim))
-        model = AutoencoderKLv2(
-            spatial_dims=1,
-            in_channels=1,
-            out_channels=1,
-            num_res_blocks=model_config['model'].get('num_res_blocks', 1),
-            channels=hidden_dim,
-            attention_levels=attention_levels,
-            latent_channels=latent_dim,
-            norm_num_groups=model_config['model'].get('norm_num_groups', 8),
-            norm_eps=model_config['model'].get('norm_eps', 1e-6),
-            with_encoder_nonlocal_attn=False,
-            with_decoder_nonlocal_attn=False,
-            time_shared=True
-        )
-        latent_dim *= timepoint_dim
-    elif model_name.startswith("AutoencoderKL"):
-        if model_name == "AutoencoderKLv1":
-            from .models.monaiAEKL import AutoencoderKLv1 as AutoencoderKL
-        elif model_name == "AutoencoderKLv3":
-            from .models.autoencoderkl import AutoencoderKLv3 as AutoencoderKL
-        latent_dim = model_config['model']['latent_dim']
-        hidden_dim = model_config['model']['hidden_dims']
-        attention_levels = model_config['model'].get('attention_levels', [False] * len(hidden_dim))
-        model = AutoencoderKL(
-            spatial_dims=1,
-            in_channels=input_dim[0],
-            out_channels=input_dim[0],
-            num_res_blocks=model_config['model'].get('num_res_blocks', 1),
-            channels=hidden_dim,
-            attention_levels=attention_levels,
-            latent_channels=latent_dim,
-            norm_num_groups=model_config['model'].get('norm_num_groups', 8),
-            norm_eps=model_config['model'].get('norm_eps', 1e-6),
-            with_encoder_nonlocal_attn=model_config['model'].get('with_encoder_nonlocal_attn', False),
-            with_decoder_nonlocal_attn=model_config['model'].get('with_decoder_nonlocal_attn', False),
-        )
-        if model_name == "AutoencoderKLv3":
-            latent_dim *= timepoint_dim
-    elif model_name == "DeterministicAE":
-        if preserve_timepoints:
-            raise ValueError("DeterministicAE is incompatible with preserving timepoint dimension (at least for now)")
-        from .models.determAE import DeterministicAE
-        latent_dim = model_config['model']['latent_dim']
-        hidden_dim = model_config['model']['hidden_dims']
-        model = DeterministicAE(
-            input_dim=input_dim[0],
-            hidden_dims=hidden_dim,
-            latent_dim=latent_dim,
-            dropout=model_config['model'].get('dropout', 0.0),
-            use_batchnorm=model_config['model'].get('use_batchnorm', False),
-            final_activation=model_config['model'].get('final_activation', None),
-        )
-    elif model_name == "Perl2023":
-        if preserve_timepoints:
-            raise ValueError("Perl2023 is incompatible with preserving timepoint dimension (at least for now)")
-        from .models.perl2023 import Perl2023
-        latent_dim = model_config['model']['latent_dim']
-        hidden_dim = model_config['model']['hidden_dim']
-        model = Perl2023(
-            input_dim=input_dim[0],
-            intermediate_dim=hidden_dim,
-            latent_dim=latent_dim,
-            output_activation=model_config['model'].get('output_activation', 'sigmoid'),
-        )
-    elif model_name == "SequentialAE":
-        if preserve_timepoints:
-            raise ValueError("SequentialAE is incompatible with preserving timepoint dimension (at least for now)")
-        from .models.seqAE import SequentialAE
-        latent_dim = model_config['model']['latent_dim']
-        hidden_dim = model_config['model']['hidden_dim']
-        model = SequentialAE(
-            regions=input_dim[1],
-            hidden_dim=hidden_dim,
-            latent_dim=latent_dim,
-            num_layers=model_config['model'].get('num_layers', 1),
-            dropout=model_config['model'].get('dropout', 0.0),
-            cell=model_config['model'].get('cell', 'lstm')
-        )
-    elif model_name == "LinearAE":
-        from .models.linear import LinearAE
-        latent_dim = model_config['model']['latent_dim']
-        hidden_dim = None
-        if preserve_timepoints:
-            latent_dim = latent_dim * timepoint_dim
-        model = LinearAE(
-            input_dim=input_dim[0],
-            latent_dim=latent_dim,
-        )
-    elif model_name == "LinearAETimeShared":
-        if not preserve_timepoints:
-            raise ValueError("LinearAETimeShared cannot be used if you don't want to preserve the timepoint dimension")
-        from .models.linear import LinearAETimeShared
-        hidden_dim = None
-        latent_dim = model_config['model']['latent_dim']
-        model = LinearAETimeShared(
-            input_dim=input_dim[0],
-            timepoint_dim=timepoint_dim,
-            latent_dim=latent_dim,
-            input_layout=model_config['model'].get('input_layout', "feature_time"),
-        )
-        latent_dim = latent_dim * timepoint_dim
-    elif model_name == "LinearAEPredHeads":
-        from .models.linear import LinearAEPredHeads
-        hidden_dim = None
-        latent_dim = model_config['model']['latent_dim']
-        num_heads = len(data_config['data'].get('use_bio_levels', []))
-        if preserve_timepoints:
-            latent_dim = latent_dim * timepoint_dim
-        model = LinearAEPredHeads(
-            input_dim=input_dim[0],
-            timepoints=timepoint_dim,
-            latent_dim=latent_dim,
-            pred_head_type=model_config['model'].get('pred_head_type', "gated_temp_pool"),
-            pred_head_num=num_heads)
-    elif model_name == "LinearAETimeSharedPredHeads":
-        from .models.linear import LinearAETimeSharedPredHeads
-        hidden_dim = None
-        latent_dim = model_config['model']['latent_dim']
-        num_heads = len(data_config['data'].get('use_bio_levels', []))
-        model = LinearAETimeSharedPredHeads(
-            input_dim=input_dim[0],
-            latent_dim=latent_dim,
-            timepoint_dim=timepoint_dim,
-            pred_head_type=model_config['model'].get('pred_head_type', "gated_temp_pool"),
-            pred_head_num=num_heads)
     else:
         raise ValueError(f"Model name {model_name} not supported")
     
@@ -618,13 +474,18 @@ def run_training(model, model_name, latent_dim, loaders, training_config, model_
         convergence_patience=training_config['training'].get('convergence_patience'),
         convergence_min_delta=training_config['training'].get('convergence_min_delta', 0.0),
         convergence_warmup_epochs=training_config['training'].get('convergence_warmup_epochs', 0),
+        checkpoint_selection_metric=training_config['training'].get('checkpoint_selection_metric', 'val_loss'),
     )
     model_artifact = pathlib.Path(training_config['training']['save_dir']) / f"{experiment_id}_model.pt"
     experiment_metadata = {
         'experiment_id': experiment_id,
         'status': 'completed',
         'model_type': model_name,
-        'summary': _build_training_summary(history, mse_pca),
+        'summary': _build_training_summary(
+            history,
+            mse_pca,
+            checkpoint_selection_metric=training_config['training'].get('checkpoint_selection_metric', 'val_loss'),
+        ),
         'model_params': deepcopy(model_config.get('model', {})),
         'training_params': deepcopy(training_config.get('training', {})),
         'data_params': deepcopy(data_config),
@@ -1045,6 +906,16 @@ def main():
         max_workers = min(args.num_parallel_experiments, total_experiments)
         if max_workers == 1:
             for i, (dc, mc, tc) in enumerate(experiment_specs, start=1):
+
+                # skip incompatible AutoencoderKL parameters
+                if (mc['model']['name'].startswith("AutoencoderKL") and
+                        'num_res_blocks' in mc['model'] and
+                        'hidden_dims' in mc['model'] and
+                        'attention_levels' in mc['model'] and
+                        (len(mc['model']['num_res_blocks']) != len(mc['model']['hidden_dims']) or
+                         len(mc['model']['num_res_blocks']) != len(mc['model']['attention_levels']))):
+                    continue
+
                 print(f"Running experiment {i}/{total_experiments}...")
                 run_experiment_pipeline(
                     data_dir=args.data_dir,

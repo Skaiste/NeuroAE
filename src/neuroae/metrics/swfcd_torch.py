@@ -1,4 +1,5 @@
 import torch
+from typing import Optional
 
 from ..load_data import ADNIDataset
 
@@ -14,6 +15,7 @@ class SwFCD:
             raise ValueError("window_size must be > 1 for correlation-based SWFCD")
         if self.window_step <= 0:
             raise ValueError("window_step must be > 0")
+        self._triu_cache = {}
 
     def ensure_correct_dim(self, x: torch.Tensor):# -> torch.Tensor | None:
         """Convert supported dataset layouts to (B, T, R)."""
@@ -42,6 +44,14 @@ class SwFCD:
         denom = torch.linalg.norm(x, dim=-1, keepdim=True).clamp_min(self.eps)
         return x / denom
 
+    def _triu_indices(self, rows: int, cols: int, offset: int, device: torch.device) -> torch.Tensor:
+        key = (int(rows), int(cols), int(offset), str(device))
+        cached = self._triu_cache.get(key)
+        if cached is None:
+            cached = torch.triu_indices(rows, cols, offset=offset, device=device)
+            self._triu_cache[key] = cached
+        return cached
+
     def _swfcd_vector_from_bold(self, x_btr: torch.Tensor) -> torch.Tensor:
         """Compute SWFCD vector per batch element from BOLD time series (B, T, R)."""
         bsz, t_len, n_roi = x_btr.shape
@@ -62,14 +72,14 @@ class SwFCD:
         windows_t = self._safe_standardize_last_dim(windows_t)
         fc = torch.matmul(windows_t, windows_t.transpose(-1, -2))
 
-        iu = torch.triu_indices(n_roi, n_roi, offset=1, device=x_btr.device)
+        iu = self._triu_indices(n_roi, n_roi, offset=1, device=x_btr.device)
         fc_vec = fc[..., iu[0], iu[1]]
 
         # FCD: corr between FC vectors across windows.
         fc_vec = self._safe_standardize_last_dim(fc_vec)
         fcd = torch.matmul(fc_vec, fc_vec.transpose(-1, -2))
 
-        iu_w = torch.triu_indices(n_windows, n_windows, offset=1, device=x_btr.device)
+        iu_w = self._triu_indices(n_windows, n_windows, offset=1, device=x_btr.device)
         return fcd[..., iu_w[0], iu_w[1]]
 
     def _pairwise_metrics(self, x_vec: torch.Tensor, x_hat_vec: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -97,15 +107,31 @@ class SwFCD:
         # Keep compatibility with loss code expecting a scalar tensor.
         return pearson.mean(), mad.mean(), rmse.mean()
 
-    def apply(self, x: torch.Tensor, x_hat: torch.Tensor):
+    def vectorize(self, x: torch.Tensor, *, track_grad: Optional[bool] = None) -> Optional[torch.Tensor]:
         x_btr = self.ensure_correct_dim(x)
+        if x_btr is None:
+            return None
+
+        if track_grad is None:
+            track_grad = bool(x.requires_grad)
+
+        if track_grad:
+            return self._swfcd_vector_from_bold(x_btr)
+
+        with torch.no_grad():
+            return self._swfcd_vector_from_bold(x_btr)
+
+    def apply(self, x: Optional[torch.Tensor], x_hat: torch.Tensor, x_vec: Optional[torch.Tensor] = None):
+        if x_vec is None:
+            if x is None:
+                raise ValueError("SwFCD.apply requires either x or x_vec.")
+            x_vec = self.vectorize(x, track_grad=False)
         x_hat_btr = self.ensure_correct_dim(x_hat)
 
-        if x_btr is None or x_hat_btr is None:
+        if x_vec is None or x_hat_btr is None:
             # raise ValueError("SWFCD cannot be computed when dataset.fc_input is True")
             return None
 
-        x_vec = self._swfcd_vector_from_bold(x_btr)
         x_hat_vec = self._swfcd_vector_from_bold(x_hat_btr)
 
         pearson, mad, rmse = self._pairwise_metrics(x_vec, x_hat_vec)
