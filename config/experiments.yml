@@ -90,6 +90,9 @@ ConvAE:
   static_params:
     model:
       name: ConvAE
+    training:
+      reproducibility:
+        deterministic: false
   exp_params:
     model:
       latent_dim: [32, 16, 8, 4]
@@ -98,13 +101,15 @@ ConvAE:
     training:
       reproducibility:
         seed: [42, 100, 1, 111, 1007]
-        deterministic: false
 
 
 ConvVAE:
   static_params:
     model:
       name: ConvVAE
+    training:
+      reproducibility:
+        deterministic: false
   exp_params:
     model:
       latent_dim: [32, 16, 8, 4]
@@ -113,7 +118,6 @@ ConvVAE:
     training:
       reproducibility:
         seed: [42, 100, 1, 111, 1007]
-        deterministic: false
       loss_params:
         beta: [1.0, 0.5]
 
@@ -122,6 +126,9 @@ MonaiAEKL:
   static_params:
     model:
       name: MonaiAEKL
+    training:
+      reproducibility:
+        deterministic: false
   exp_params:
     model:
       latent_dim: [32, 16, 8, 4]
@@ -131,6 +138,5 @@ MonaiAEKL:
     training:
       reproducibility:
         seed: [42, 100, 1, 111, 1007]
-        deterministic: false
       loss_params:
         beta: [1.0, 0.5, 0]
