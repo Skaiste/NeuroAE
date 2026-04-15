@@ -368,7 +368,7 @@ def train_vae(
         print(
             f"Epoch {epoch}/{num_epochs} | "
             f"{loss_params2str(train_loss_params, num_batches, val_loss_params, num_val_batches)}"
-            f"{val_metric_str}"
+            f"{val_metric_str}", flush=True
         )
 
         current_metrics = {

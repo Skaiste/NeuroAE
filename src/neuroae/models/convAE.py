@@ -31,7 +31,7 @@ class _ConvEncoder(nn.Module):
 
 
 class _ConvDecoder(nn.Module):
-    def __init__(self, hidden_channels, output_dim, kernel_size):
+    def __init__(self, hidden_channels, input_dim, output_dim, kernel_size):
         super().__init__()
         if isinstance(hidden_channels, int):
             hidden_channels = [hidden_channels]
@@ -42,7 +42,8 @@ class _ConvDecoder(nn.Module):
         decoder_channels = list(hidden_channels[::-1])
 
         self.expand = nn.Conv1d(1, decoder_channels[0], kernel_size=1)
-        self.upsample = nn.Upsample(size=output_dim, mode="linear", align_corners=False)
+        # Learned projection avoids CUDA's non-deterministic linear upsampling backward.
+        self.length_projection = nn.Linear(input_dim, output_dim)
 
         layers = []
         in_channels = decoder_channels[0]
@@ -55,7 +56,7 @@ class _ConvDecoder(nn.Module):
 
     def forward(self, z):
         h = self.expand(z)
-        h = self.upsample(h)
+        h = self.length_projection(h)
         return self.reconstruction(h)
 
 
@@ -115,6 +116,7 @@ class ConvAE(ModelBase):
 
         self.decoder = _ConvDecoder(
             hidden_channels=self.hidden_channels,
+            input_dim=self.latent_dim,
             output_dim=self.regions,
             kernel_size=self.kernel_size,
         ).to(device)
@@ -132,6 +134,7 @@ class ConvAE(ModelBase):
     def reset_decoder(self):
         self.decoder = _ConvDecoder(
             hidden_channels=self.hidden_channels,
+            input_dim=self.latent_dim,
             output_dim=self.regions,
             kernel_size=self.kernel_size,
         ).to(self.device)
