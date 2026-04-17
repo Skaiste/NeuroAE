@@ -31,7 +31,7 @@ default:
   training:
     num_epochs: 1000
     save_dir: ./models
-    evaluation_scope: per_group
+    evaluation_scope: combined
     learning_rate: 1e-3
     weight_decay: 1e-4
     loss_params:
