@@ -50,40 +50,40 @@ default:
       warn_only: false
 
 
-# LAEPredHeads:
-#   static_params:
-#     model:
-#       name: LAEPredHeads
-#       latent_dim: 32
-#   exp_params:
-#     data:
-#       data:
-#         use_bio_levels: [['ABeta', 'Tau'], ['ABeta'], ['Tau']]
-#     model:
-      # pred_head_type: [avg, conv, conv_no_hidden, temp_pool, gated_temp_pool]
-    # training:
-    #   reproducibility:
-    #     seed: [42, 100, 1, 111, 1007]
+LAEPredHeads:
+  static_params:
+    model:
+      name: LAEPredHeads
+      latent_dim: 32
+  exp_params:
+    data:
+      data:
+        use_bio_levels: [['ABeta', 'Tau'], ['ABeta'], ['Tau']]
+    model:
+      pred_head_type: [avg, conv, conv_no_hidden, temp_pool, gated_temp_pool]
+    training:
+      reproducibility:
+        seed: [42, 100, 1, 111, 1007]
   
 
-# VAEPredHeads:
-#   static_params:
-#     model:
-#       name: VAEPredHeads
-#       latent_dim: 8
-#       hidden_dims: [32]
-#     training:
-#       loss_params:
-#         beta: 1
-#   exp_params:
-#     data:
-#       data:
-#         use_bio_levels: [['ABeta', 'Tau'], ['ABeta'], ['Tau']]
-#     model:
-#       pred_head_type: [avg, conv, conv_no_hidden, temp_pool, gated_temp_pool]
-    # training:
-    #   reproducibility:
-    #     seed: [42, 100, 1, 111, 1007]
+VAEPredHeads:
+  static_params:
+    model:
+      name: VAEPredHeads
+      latent_dim: 8
+      hidden_dims: [32]
+    training:
+      loss_params:
+        beta: 1
+  exp_params:
+    data:
+      data:
+        use_bio_levels: [['ABeta', 'Tau'], ['ABeta'], ['Tau']]
+    model:
+      pred_head_type: [avg, conv, conv_no_hidden, temp_pool, gated_temp_pool]
+    training:
+      reproducibility:
+        seed: [42, 100, 1, 111, 1007]
 
 
 ConvAEPredHeads:
@@ -102,9 +102,9 @@ ConvAEPredHeads:
         use_bio_levels: [['ABeta', 'Tau'], ['ABeta'], ['Tau']]
     model:
       pred_head_type: [avg, conv, conv_no_hidden, temp_pool, gated_temp_pool]
-    # training:
-    #   reproducibility:
-    #     seed: [42, 100, 1, 111, 1007]
+    training:
+      reproducibility:
+        seed: [42, 100, 1, 111, 1007]
 
 
 ConvVAEPredHeads:
@@ -125,6 +125,6 @@ ConvVAEPredHeads:
         use_bio_levels: [['ABeta', 'Tau'], ['ABeta'], ['Tau']]
     model:
       pred_head_type: [avg, conv, conv_no_hidden, temp_pool, gated_temp_pool]
-    # training:
-    #   reproducibility:
-    #     seed: [42, 100, 1, 111, 1007]
+    training:
+      reproducibility:
+        seed: [42, 100, 1, 111, 1007]
