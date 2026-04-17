@@ -3,6 +3,7 @@ training:
   convergence_min_delta: 0.0001
   convergence_patience: 10
   convergence_warmup_epochs: 10
+  evaluation_scope: combined
   learning_rate: 0.001
   loss_params:
     loss_per_feature: true
