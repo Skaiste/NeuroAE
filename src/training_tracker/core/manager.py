@@ -101,8 +101,9 @@ class TrainingResultsManager:
     def set_evaluation_metrics(
         self,
         experiment_id: str,
-        model_metrics: dict,
+        model_metrics: Optional[dict] = None,
         pca_metrics: Optional[dict] = None,
+        evaluation: Optional[dict] = None,
     ) -> None:
         """Store evaluation metrics on an existing experiment metadata record."""
         index_entry = find_index_entry(self.index_path, experiment_id)
@@ -112,11 +113,15 @@ class TrainingResultsManager:
         metadata_path = self._resolve_from_base(index_entry["metadata_path"])
         metadata = read_json(metadata_path)
 
-        metadata["evaluation"] = {
-            "model": deepcopy(model_metrics) if isinstance(model_metrics, dict) else {},
-            "pca": deepcopy(pca_metrics) if isinstance(pca_metrics, dict) else None,
-            "updated_at": self._now_iso(),
-        }
+        if isinstance(evaluation, dict):
+            evaluation_payload = deepcopy(evaluation)
+        else:
+            evaluation_payload = {
+                "model": deepcopy(model_metrics) if isinstance(model_metrics, dict) else {},
+                "pca": deepcopy(pca_metrics) if isinstance(pca_metrics, dict) else None,
+            }
+        evaluation_payload["updated_at"] = self._now_iso()
+        metadata["evaluation"] = evaluation_payload
 
         write_json_atomic(metadata_path, metadata)
 
