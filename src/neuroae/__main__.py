@@ -259,6 +259,22 @@ def load_model_from_config(model_config, data_config, input_dim, timepoint_dim, 
             hidden_dims=hidden_dim,
             latent_dim=latent_dim,
             device=device)
+    elif model_name == "VAEPredHeads":
+        from .models.variational import VAEPredHeads
+        hidden_dim = model_config['model']['hidden_dims']
+        latent_dim = model_config['model']['latent_dim']
+        pred_head_type = model_config['model'].get("pred_head_type", "avg")
+        pred_head_num = len(data_config['data'].get('use_bio_levels', []))
+        # assuming the input is transposed
+        model = VAEPredHeads(
+            region_dim=input_dim[-1],
+            timepoint_dim=input_dim[0],
+            hidden_dims=hidden_dim,
+            latent_dim=latent_dim,
+            device=device,
+            pred_head_type=pred_head_type,
+            pred_head_num=pred_head_num
+        )
     elif model_name == "LAE":
         from .models.linear import LAE
         latent_dim = model_config['model']['latent_dim']
@@ -267,6 +283,19 @@ def load_model_from_config(model_config, data_config, input_dim, timepoint_dim, 
             region_dim=input_dim[-1],
             timepoint_dim=input_dim[0],
             latent_dim=latent_dim,
+        )
+    elif model_name == "LAEPredHeads":
+        from .models.linear import LAEPredHeads
+        latent_dim = model_config['model']['latent_dim']
+        hidden_dim = None
+        pred_head_type = model_config['model'].get("pred_head_type", "avg")
+        pred_head_num = len(data_config['data'].get('use_bio_levels', []))
+        model = LAEPredHeads(
+            region_dim=input_dim[-1],
+            timepoint_dim=input_dim[0],
+            latent_dim=latent_dim,
+            pred_head_type=pred_head_type,
+            pred_head_num=pred_head_num
         )
     elif model_name == "ConvAE":
         from .models.convAE import ConvAE
@@ -280,6 +309,22 @@ def load_model_from_config(model_config, data_config, input_dim, timepoint_dim, 
             hidden_channels=hidden_dim,
             kernel_size=kernel_size
         )
+    elif model_name == "ConvAEPredHeads":
+        from .models.convAE import ConvAEPredHeads
+        hidden_dim = model_config['model']['hidden_dims']
+        latent_dim = model_config['model']['latent_dim']
+        kernel_size = model_config['model'].get("kernel_size", 3)
+        pred_head_type = model_config['model'].get("pred_head_type", "avg")
+        pred_head_num = len(data_config['data'].get('use_bio_levels', []))
+        model = ConvAEPredHeads(
+            regions=input_dim[-1],
+            timepoints=input_dim[0],
+            latent_dim=latent_dim,
+            hidden_channels=hidden_dim,
+            kernel_size=kernel_size,
+            pred_head_type=pred_head_type,
+            pred_head_num=pred_head_num
+        )
     elif model_name == "ConvVAE":
         from .models.convAE import ConvVAE
         hidden_dim = model_config['model']['hidden_dims']
@@ -291,6 +336,22 @@ def load_model_from_config(model_config, data_config, input_dim, timepoint_dim, 
             latent_dim=latent_dim,
             hidden_channels=hidden_dim,
             kernel_size=kernel_size
+        )
+    elif model_name == "ConvVAEPredHeads":
+        from .models.convAE import ConvVAEPredHeads
+        hidden_dim = model_config['model']['hidden_dims']
+        latent_dim = model_config['model']['latent_dim']
+        kernel_size = model_config['model'].get("kernel_size", 3)
+        pred_head_type = model_config['model'].get("pred_head_type", "avg")
+        pred_head_num = len(data_config['data'].get('use_bio_levels', []))
+        model = ConvVAEPredHeads(
+            regions=input_dim[-1],
+            timepoints=input_dim[0],
+            latent_dim=latent_dim,
+            hidden_channels=hidden_dim,
+            kernel_size=kernel_size,
+            pred_head_type=pred_head_type,
+            pred_head_num=pred_head_num
         )
     elif model_name == "MonaiAEKL":
         from .models.monaiAE import MonaiAEKL
@@ -437,14 +498,20 @@ def run_training(model, model_name, latent_dim, loaders, training_config, model_
         swfcd = SwFCD(loaders['train_loader'].dataset, window, step)
         model.set_swfcd(swfcd)
 
-    tracker = TrainingResultsManager(results_dir=project_path / "results")
-    experiment_id = tracker.build_experiment_id(
-        model_type=model_name,
-        model_params=model_config.get('model', {}),
-        training_params=training_config.get('training', {}),
-        data_params=data_config,
-    )
-    print(f"Experiment ID: {experiment_id}")
+    dry_run = bool(training_config.get("training", {}).get("dry_run", False))
+    tracker = None
+    experiment_id = None
+    if not dry_run:
+        tracker = TrainingResultsManager(results_dir=project_path / "results")
+        experiment_id = tracker.build_experiment_id(
+            model_type=model_name,
+            model_params=model_config.get('model', {}),
+            training_params=training_config.get('training', {}),
+            data_params=data_config,
+        )
+        print(f"Experiment ID: {experiment_id}")
+    else:
+        print("Dry run enabled: training 1 epoch without saving checkpoints or registering results.")
 
     reproducibility = _get_reproducibility_settings(data_config, training_config)
     pca_seed = reproducibility["seed"] if reproducibility["enabled"] else None
@@ -457,17 +524,18 @@ def run_training(model, model_name, latent_dim, loaders, training_config, model_
     # pca.fit(loaders['train_loader'].dataset.data)
     pca = None
 
-    pathlib.Path(training_config['training']['save_dir']).mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        pathlib.Path(training_config['training']['save_dir']).mkdir(parents=True, exist_ok=True)
     history, mse_pca = train_vae(
         model,
         loaders['train_loader'],
         loaders['val_loader'],
-        num_epochs=training_config['training'].get('num_epochs', 50),
+        num_epochs=1 if dry_run else training_config['training'].get('num_epochs', 50),
         learning_rate=training_config['training'].get('learning_rate', 1e-3),
         weight_decay=training_config['training'].get('weight_decay', 1e-4),
         device=device,
         save_dir=training_config['training']['save_dir'],
-        name=experiment_id,
+        name=experiment_id or f"dry_run_{model_name.lower()}",
         pca=pca,
         noise=training_config['training'].get("noise", None),
         use_pred_heads=use_pred_heads,
@@ -475,7 +543,15 @@ def run_training(model, model_name, latent_dim, loaders, training_config, model_
         convergence_min_delta=training_config['training'].get('convergence_min_delta', 0.0),
         convergence_warmup_epochs=training_config['training'].get('convergence_warmup_epochs', 0),
         checkpoint_selection_metric=training_config['training'].get('checkpoint_selection_metric', 'val_loss'),
+        save_checkpoint=not dry_run,
     )
+    if dry_run:
+        print(
+            "Dry run training summary: "
+            f"{json.dumps(_build_training_summary(history, mse_pca, checkpoint_selection_metric=training_config['training'].get('checkpoint_selection_metric', 'val_loss')), sort_keys=True, default=str)}"
+        )
+        return None
+
     model_artifact = pathlib.Path(training_config['training']['save_dir']) / f"{experiment_id}_model.pt"
     experiment_metadata = {
         'experiment_id': experiment_id,
@@ -510,6 +586,8 @@ def run_evaluation(
     device,
     experiment_id=None,
     delete_model_after_eval=True,
+    load_saved_model=True,
+    dry_run=False,
 ):
     from .eval import eval_vae
 
@@ -524,12 +602,17 @@ def run_evaluation(
     # pca.fit(loaders['train_loader'].dataset.data)
     pca = None
 
-    target_experiment_id = experiment_id or get_most_recent_experiment_id(project_path / "results" / "index.jsonl")
-    print(f"Evaluating experiment: {target_experiment_id}")
-    model_path = pathlib.Path(training_config['training']['save_dir']) / f"{target_experiment_id}_model.pt"
-    torch_device = torch.device(device)
-    model.load_state_dict(torch.load(model_path, map_location=torch_device))
-    model = model.to(torch_device)
+    model_path = None
+    if load_saved_model:
+        target_experiment_id = experiment_id or get_most_recent_experiment_id(project_path / "results" / "index.jsonl")
+        print(f"Evaluating experiment: {target_experiment_id}")
+        model_path = pathlib.Path(training_config['training']['save_dir']) / f"{target_experiment_id}_model.pt"
+        torch_device = torch.device(device)
+        model.load_state_dict(torch.load(model_path, map_location=torch_device))
+        model = model.to(torch_device)
+    else:
+        target_experiment_id = experiment_id or "dry_run"
+        print(f"Evaluating current in-memory model: {target_experiment_id}")
 
     eval_metrics = eval_vae(
         model,
@@ -539,13 +622,20 @@ def run_evaluation(
         device=device,
     )
 
+    if dry_run:
+        print(
+            "Dry run evaluation summary: "
+            f"{json.dumps(eval_metrics.get('model', {}), sort_keys=True, default=str)}"
+        )
+        return eval_metrics
+
     tracker = TrainingResultsManager(results_dir=project_path / "results")
     tracker.set_evaluation_metrics(
         experiment_id=target_experiment_id,
         evaluation=eval_metrics,
     )
     print(f"Stored evaluation metrics for experiment: {target_experiment_id}")
-    if delete_model_after_eval:
+    if delete_model_after_eval and model_path is not None:
         if model_path.exists():
             model_path.unlink()
             print(f"Deleted model artifact after evaluation: {model_path}")
@@ -562,7 +652,12 @@ def run_experiment_pipeline(
     training_config,
     delete_model_after_eval=True,
     num_workers=0,
+    dry_run=False,
 ):
+    if dry_run:
+        training_config = deepcopy(training_config)
+        training_config.setdefault("training", {})
+        training_config["training"]["dry_run"] = True
     configure_reproducibility(data_config=data_config, training_config=training_config)
     loaders = load_data_from_config(
         data_dir=data_dir,
@@ -598,6 +693,8 @@ def run_experiment_pipeline(
         device=device,
         experiment_id=exp_id,
         delete_model_after_eval=delete_model_after_eval,
+        load_saved_model=not dry_run,
+        dry_run=dry_run,
     )
     return exp_id
 
@@ -678,6 +775,12 @@ def main():
         default=100000,
         help='Safety cap for Cartesian combinations per experiment set in exp mode (default: 100000).'
     )
+    parser.add_argument(
+        '--dry-run',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='Initialize models and run a single train/eval pass without writing checkpoints or results files.'
+    )
     
     args = parser.parse_args()
     if args.num_parallel_experiments < 1:
@@ -721,6 +824,9 @@ def main():
         data_config = load_config(args.data_config)
         model_config = load_config(args.model_config)
         training_config = load_config(args.training_config)
+        if args.dry_run:
+            training_config.setdefault("training", {})
+            training_config["training"]["dry_run"] = True
         configure_reproducibility(data_config=data_config, training_config=training_config)
         
         loaders = load_data_from_config(
@@ -750,6 +856,18 @@ def main():
             data_config,
             device=args.device
         )
+        if args.dry_run:
+            run_evaluation(
+                model,
+                latent_dim,
+                loaders,
+                training_config,
+                data_config,
+                device=args.device,
+                load_saved_model=False,
+                dry_run=True,
+                delete_model_after_eval=False,
+            )
         print("=" * 60)
         
     elif args.mode == 'eval':
@@ -815,7 +933,9 @@ def main():
                     node[name] = value
 
         experiment_specs = []
-        completed_signatures = load_completed_experiment_signatures(project_path / "results")
+        completed_signatures = set()
+        if not args.dry_run:
+            completed_signatures = load_completed_experiment_signatures(project_path / "results")
         seen_signatures = set()
         skipped_completed = 0
         skipped_duplicates = 0
@@ -925,6 +1045,7 @@ def main():
                     training_config=tc,
                     delete_model_after_eval=args.delete_model_after_eval,
                     num_workers=args.num_workers,
+                    dry_run=args.dry_run,
                 )
         else:
             if any(_get_reproducibility_settings(dc, tc)["enabled"] for dc, _, tc in experiment_specs):
@@ -946,6 +1067,7 @@ def main():
                         tc,
                         args.delete_model_after_eval,
                         args.num_workers,
+                        args.dry_run,
                     )
                     futures[future] = i
 

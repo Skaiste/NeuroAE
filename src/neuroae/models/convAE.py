@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from . import ModelBase
+from .head import PredHeadAvg, PredHeadConv, PredHeadTemporalPool, PredHeadGatedTemporalPool
 
 
 class _ConvEncoder(nn.Module):
@@ -241,6 +242,125 @@ class ConvAE(ModelBase):
 
 
 class ConvVAE(ConvAE):
+    def __init__(self, *args, **kwargs):
+        kwargs["variational"] = True
+        super().__init__(*args, **kwargs)
+
+
+
+def _build_pred_heads(pred_head_type, pred_head_num, latent_dim, output_dim):
+    pred_head_idx = {
+        "avg": PredHeadAvg,
+        "conv": PredHeadConv,
+        "conv_no_hidden": lambda l, r: PredHeadConv(l, r, with_hidden=False),
+        "temp_pool": PredHeadTemporalPool,
+        "gated_temp_pool": PredHeadGatedTemporalPool,
+    }
+    if pred_head_type not in pred_head_idx:
+        raise ValueError(f"Selected prediction head type - '{pred_head_type}' is not available.")
+
+    return nn.ModuleList(
+        [pred_head_idx[pred_head_type](latent_dim, output_dim) for _ in range(pred_head_num)]
+    )
+
+
+class ConvAEPredHeads(ConvAE):
+    """ConvAE + temporal prediction heads for biomarker prediction."""
+
+    def __init__(
+        self,
+        regions,
+        timepoints,
+        latent_dim=32,
+        pred_head_type: str = "gated_temp_pool",
+        pred_head_num: int = 1,
+        hidden_channels=(32, 64),
+        kernel_size: int = 3,
+        variational: bool = False,
+        device: str = "cuda" if torch.cuda.is_available() else "cpu",
+    ) -> None:
+        super().__init__(
+            regions=regions,
+            timepoints=timepoints,
+            latent_dim=latent_dim,
+            hidden_channels=hidden_channels,
+            kernel_size=kernel_size,
+            variational=variational,
+            device=device,
+        )
+        self.heads = _build_pred_heads(
+            pred_head_type=pred_head_type,
+            pred_head_num=pred_head_num,
+            latent_dim=self.latent_dim,
+            output_dim=self.regions,
+        )
+
+    def forward(self, x):
+        model_output = super().forward(x)
+        if self.variational:
+            x_hat, mean, log_var, z = model_output
+        else:
+            x_hat, z = model_output
+        z_heads_input = z.transpose(1, 2)
+        z_heads = [head(z_heads_input) for head in self.heads]
+        if self.variational:
+            return x_hat, mean, log_var, z_heads, z
+        return x_hat, z_heads, z
+
+    def loss(self, x, x_heads, model_output):
+        loss_fn_params = getattr(self, "loss_fn_params", {})
+        pred_heads_delta = float(loss_fn_params.get("pred_heads_delta", 0.0))
+
+        if self.variational:
+            x_hat, mu, log_var, z_heads, _ = model_output
+            beta = loss_fn_params.get("beta", 0.5)
+            error_per_feature = loss_fn_params.get("loss_per_feature", True)
+
+            if error_per_feature:
+                recon = F.mse_loss(x_hat, x, reduction="mean")
+                kld = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
+                kld = kld.sum(dim=(1, 2)).mean() / (log_var.size(1) * log_var.size(2))
+            else:
+                recon = F.mse_loss(x_hat, x, reduction="none")
+                recon = recon.flatten(1).sum(dim=1).mean()
+                kld = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
+                kld = kld.sum(dim=(1, 2)).mean() / (log_var.size(1) * log_var.size(2))
+
+            loss = {
+                "loss": recon + beta * kld,
+                "recon": recon,
+                "kld": kld,
+            }
+        else:
+            x_hat, z_heads, _ = model_output
+            recon = F.mse_loss(x_hat, x)
+            loss = {
+                "loss": recon,
+                "recon": recon,
+            }
+
+        assert len(x_heads) == len(z_heads), (
+            f"label heads ({len(x_heads)}) is not the same as predicted heads ({len(z_heads)})"
+        )
+        pred_head_loss = []
+        for i, bl in enumerate(x_heads):
+            head_loss = F.smooth_l1_loss(z_heads[i], x_heads[bl], reduction="mean", beta=1.0)
+            pred_head_loss.append(head_loss)
+            loss[f"{bl}_loss"] = head_loss
+
+        if pred_head_loss:
+            loss["loss"] += pred_heads_delta * sum(pred_head_loss) / len(pred_head_loss)
+
+        if self.swfcd is not None:
+            swfcd = self.swfcd.apply(x, x_hat)
+            swfcd_beta = loss_fn_params.get("swfcd_beta", 1.0)
+            loss["swfcd_rmse"] = swfcd["rmse"]
+            loss["loss"] += swfcd_beta * swfcd["rmse"]
+
+        return loss
+
+
+class ConvVAEPredHeads(ConvAEPredHeads):
     def __init__(self, *args, **kwargs):
         kwargs["variational"] = True
         super().__init__(*args, **kwargs)

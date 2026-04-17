@@ -190,8 +190,6 @@ class VAEPredHeads(VAE):
             latent_dim=latent_dim,
             device=device,
         )
-        self.regions = self.region_dim
-        self.latent_regions = latent_dim
         pred_head_idx = {
             "avg": PredHeadAvg,
             "conv": PredHeadConv,
@@ -202,7 +200,7 @@ class VAEPredHeads(VAE):
         if pred_head_type not in pred_head_idx:
             raise ValueError(f"Selected prediction head type - '{pred_head_type}' is not available.")
         
-        self.heads = [pred_head_idx[pred_head_type](self.latent_regions, self.regions) for i in range(pred_head_num)]
+        self.heads = [pred_head_idx[pred_head_type](latent_dim, self.region_dim) for i in range(pred_head_num)]
 
     def to(self, device):
         self.heads = [h.to(device) for h in self.heads]

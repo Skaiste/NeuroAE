@@ -50,36 +50,46 @@ default:
       warn_only: false
 
 
-LAE:
-  static_params:
-    model:
-      name: LAE
-      latent_dim: 32
-  exp_params:
-    training:
-      reproducibility:
-        seed: [42, 100, 1, 111, 1007]
+# LAEPredHeads:
+#   static_params:
+#     model:
+#       name: LAEPredHeads
+#       latent_dim: 32
+#   exp_params:
+#     data:
+#       data:
+#         use_bio_levels: [['ABeta', 'Tau'], ['ABeta'], ['Tau']]
+#     model:
+      # pred_head_type: [avg, conv, conv_no_hidden, temp_pool, gated_temp_pool]
+    # training:
+    #   reproducibility:
+    #     seed: [42, 100, 1, 111, 1007]
   
 
-VAE:
-  static_params:
-    model:
-      name: VAE
-      latent_dim: 8
-      hidden_dims: [32]
-    training:
-      loss_params:
-        beta: 1
-  exp_params:
-    training:
-      reproducibility:
-        seed: [42, 100, 1, 111, 1007]
+# VAEPredHeads:
+#   static_params:
+#     model:
+#       name: VAEPredHeads
+#       latent_dim: 8
+#       hidden_dims: [32]
+#     training:
+#       loss_params:
+#         beta: 1
+#   exp_params:
+#     data:
+#       data:
+#         use_bio_levels: [['ABeta', 'Tau'], ['ABeta'], ['Tau']]
+#     model:
+#       pred_head_type: [avg, conv, conv_no_hidden, temp_pool, gated_temp_pool]
+    # training:
+    #   reproducibility:
+    #     seed: [42, 100, 1, 111, 1007]
 
 
-ConvAE:
+ConvAEPredHeads:
   static_params:
     model:
-      name: ConvAE
+      name: ConvAEPredHeads
       latent_dim: 32
       hidden_dims: [16]
       kernel_size: 3
@@ -87,15 +97,20 @@ ConvAE:
       reproducibility:
         deterministic: false
   exp_params:
-    training:
-      reproducibility:
-        seed: [42, 100, 1, 111, 1007]
+    data:
+      data:
+        use_bio_levels: [['ABeta', 'Tau'], ['ABeta'], ['Tau']]
+    model:
+      pred_head_type: [avg, conv, conv_no_hidden, temp_pool, gated_temp_pool]
+    # training:
+    #   reproducibility:
+    #     seed: [42, 100, 1, 111, 1007]
 
 
-ConvVAE:
+ConvVAEPredHeads:
   static_params:
     model:
-      name: ConvVAE
+      name: ConvVAEPredHeads
       latent_dim: 32
       hidden_dims: [32, 16]
       kernel_size: 3
@@ -105,6 +120,11 @@ ConvVAE:
       loss_params:
         beta: 1.0
   exp_params:
-    training:
-      reproducibility:
-        seed: [42, 100, 1, 111, 1007]
+    data:
+      data:
+        use_bio_levels: [['ABeta', 'Tau'], ['ABeta'], ['Tau']]
+    model:
+      pred_head_type: [avg, conv, conv_no_hidden, temp_pool, gated_temp_pool]
+    # training:
+    #   reproducibility:
+    #     seed: [42, 100, 1, 111, 1007]

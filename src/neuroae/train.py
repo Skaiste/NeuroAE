@@ -235,6 +235,7 @@ def train_vae(
     convergence_min_delta=0.0,
     convergence_warmup_epochs=0,
     checkpoint_selection_metric="swfcd_logreg_joint",
+    save_checkpoint=True,
 ):
     device = torch.device(device)
     model = model.to(device)
@@ -407,7 +408,8 @@ def train_vae(
         if improved:
             best_model_losses = current_metrics
             epochs_without_improvement = 0
-            torch.save(model.state_dict(), f'{save_dir}/{name}_model.pt')
+            if save_checkpoint:
+                torch.save(model.state_dict(), f'{save_dir}/{name}_model.pt')
         else:
             epochs_without_improvement += 1
 

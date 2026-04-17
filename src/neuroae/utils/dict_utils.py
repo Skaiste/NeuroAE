@@ -28,13 +28,17 @@ def deepupdate(target: dict, update: dict):
     """
     for k, v in update.items():
         curr_val = None
+        inserted = False
         if isinstance(target, dict):
             if k not in target:
                 target[k] = copy.deepcopy(v)
+                inserted = True
 
             curr_val = target[k]
 
         if isinstance(curr_val, list):
+            if inserted:
+                continue
             if isinstance(v, list):
                 curr_val.extend(copy.deepcopy(v))
             elif isinstance(v, dict):
