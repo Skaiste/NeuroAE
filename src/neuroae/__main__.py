@@ -485,7 +485,7 @@ def load_completed_experiment_signatures(results_dir):
     return completed_signatures
 
 
-def run_training(model, model_name, latent_dim, loaders, training_config, model_config, data_config, device):
+def run_training(model, model_name, latent_dim, loaders, training_config, model_config, data_config, device, results_dir):
     from .train import train_vae
 
     use_pred_heads = len(data_config['data'].get('use_bio_levels', [])) > 0
@@ -502,7 +502,7 @@ def run_training(model, model_name, latent_dim, loaders, training_config, model_
     tracker = None
     experiment_id = None
     if not dry_run:
-        tracker = TrainingResultsManager(results_dir=project_path / "results")
+        tracker = TrainingResultsManager(results_dir=results_dir)
         experiment_id = tracker.build_experiment_id(
             model_type=model_name,
             model_params=model_config.get('model', {}),
@@ -588,6 +588,7 @@ def run_evaluation(
     delete_model_after_eval=True,
     load_saved_model=True,
     dry_run=False,
+    results_dir=None,
 ):
     from .eval import eval_vae
 
@@ -604,7 +605,9 @@ def run_evaluation(
 
     model_path = None
     if load_saved_model:
-        target_experiment_id = experiment_id or get_most_recent_experiment_id(project_path / "results" / "index.jsonl")
+        if results_dir is None:
+            raise ValueError("results_dir is required when load_saved_model=True")
+        target_experiment_id = experiment_id or get_most_recent_experiment_id(pathlib.Path(results_dir) / "index.jsonl")
         print(f"Evaluating experiment: {target_experiment_id}")
         model_path = pathlib.Path(training_config['training']['save_dir']) / f"{target_experiment_id}_model.pt"
         torch_device = torch.device(device)
@@ -629,7 +632,7 @@ def run_evaluation(
         )
         return eval_metrics
 
-    tracker = TrainingResultsManager(results_dir=project_path / "results")
+    tracker = TrainingResultsManager(results_dir=results_dir)
     tracker.set_evaluation_metrics(
         experiment_id=target_experiment_id,
         evaluation=eval_metrics,
@@ -653,6 +656,7 @@ def run_experiment_pipeline(
     delete_model_after_eval=True,
     num_workers=0,
     dry_run=False,
+    results_dir=None,
 ):
     if dry_run:
         training_config = deepcopy(training_config)
@@ -683,6 +687,7 @@ def run_experiment_pipeline(
         model_config,
         data_config,
         device=device,
+        results_dir=results_dir,
     )
     run_evaluation(
         model,
@@ -695,6 +700,7 @@ def run_experiment_pipeline(
         delete_model_after_eval=delete_model_after_eval,
         load_saved_model=not dry_run,
         dry_run=dry_run,
+        results_dir=results_dir,
     )
     return exp_id
 
@@ -776,6 +782,12 @@ def main():
         help='Safety cap for Cartesian combinations per experiment set in exp mode (default: 100000).'
     )
     parser.add_argument(
+        '--results-dir-name',
+        type=str,
+        default='results',
+        help='Name of the results directory under the project root (default: results).'
+    )
+    parser.add_argument(
         '--dry-run',
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -783,6 +795,7 @@ def main():
     )
     
     args = parser.parse_args()
+    results_dir = project_path / args.results_dir_name
     if args.num_parallel_experiments < 1:
         parser.error('--num-parallel-experiments must be >= 1')
     if args.num_workers < 0:
@@ -854,7 +867,8 @@ def main():
             training_config,
             model_config,
             data_config,
-            device=args.device
+            device=args.device,
+            results_dir=results_dir,
         )
         if args.dry_run:
             run_evaluation(
@@ -867,6 +881,7 @@ def main():
                 load_saved_model=False,
                 dry_run=True,
                 delete_model_after_eval=False,
+                results_dir=results_dir,
             )
         print("=" * 60)
         
@@ -904,6 +919,7 @@ def main():
             device=args.device,
             experiment_id=args.exp_name,
             delete_model_after_eval=args.delete_model_after_eval,
+            results_dir=results_dir,
         )
     elif args.mode == 'exp':
         print("\n" + "=" * 60)
@@ -935,7 +951,7 @@ def main():
         experiment_specs = []
         completed_signatures = set()
         if not args.dry_run:
-            completed_signatures = load_completed_experiment_signatures(project_path / "results")
+            completed_signatures = load_completed_experiment_signatures(results_dir)
         seen_signatures = set()
         skipped_completed = 0
         skipped_duplicates = 0
@@ -1046,6 +1062,7 @@ def main():
                     delete_model_after_eval=args.delete_model_after_eval,
                     num_workers=args.num_workers,
                     dry_run=args.dry_run,
+                    results_dir=results_dir,
                 )
         else:
             if any(_get_reproducibility_settings(dc, tc)["enabled"] for dc, _, tc in experiment_specs):
@@ -1068,6 +1085,7 @@ def main():
                         args.delete_model_after_eval,
                         args.num_workers,
                         args.dry_run,
+                        results_dir,
                     )
                     futures[future] = i
 
