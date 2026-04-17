@@ -535,14 +535,14 @@ def run_evaluation(
         model,
         loaders['test_loader'],
         pca=pca,
+        evaluation_scope=training_config["training"].get("evaluation_scope", "combined"),
         device=device,
     )
 
     tracker = TrainingResultsManager(results_dir=project_path / "results")
     tracker.set_evaluation_metrics(
         experiment_id=target_experiment_id,
-        model_metrics=eval_metrics.get("model", {}),
-        pca_metrics=eval_metrics.get("pca"),
+        evaluation=eval_metrics,
     )
     print(f"Stored evaluation metrics for experiment: {target_experiment_id}")
     if delete_model_after_eval:

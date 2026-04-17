@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn.functional as F
 
@@ -111,8 +112,16 @@ def _to_scalar_metric(value):
 def _extract_model_outputs(model_out):
     """Return reconstruction and latent matrix from model outputs."""
     if isinstance(model_out, dict):
-        recon_x = model_out.get("x_hat") or model_out.get("recon") or model_out.get("reconstruction")
-        latent = model_out.get("z") or model_out.get("mu")
+        recon_x = None
+        latent = None
+        for key in ("x_hat", "recon", "reconstruction"):
+            if key in model_out:
+                recon_x = model_out[key]
+                break
+        for key in ("z", "mu"):
+            if key in model_out:
+                latent = model_out[key]
+                break
     elif isinstance(model_out, (tuple, list)):
         recon_x = model_out[0]
         latent = model_out[-1]
@@ -160,11 +169,95 @@ def _compute_pca_metrics(pca, swfcd, inputs, latents, labels, dataset, valid_mas
     }
 
 
+def _compute_model_metrics(sw_fcd, inputs, recons, latents, labels, dataset, valid_mask=None):
+    mse = _masked_mse_torch(recons, inputs, valid_mask)
+    fc_preservation = fc_preservation_score(inputs, recons, dataset)
+
+    swfcd_results = sw_fcd.apply(inputs, recons)
+    swfcd_pearson = _to_scalar_metric(swfcd_results["pearson"]) if swfcd_results else np.nan
+    swfcd_mad = _to_scalar_metric(swfcd_results["mad"]) if swfcd_results else np.nan
+    swfcd_rmse = _to_scalar_metric(swfcd_results["rmse"]) if swfcd_results else np.nan
+
+    z_np = to_numpy(latents)
+    label_array = np.asarray(labels)
+    sil = silhouette(z_np, label_array)
+    logreg_acc = logreg_accuracy_cv(z_np, label_array)
+
+    return {
+        "mse": mse,
+        "fc_preservation": fc_preservation,
+        "silhouette": sil,
+        "logreg_accuracy": logreg_acc,
+        "swfcd_pearson": swfcd_pearson,
+        "swfcd_mad": swfcd_mad,
+        "swfcd_rmse": swfcd_rmse,
+    }
+
+
+def _comparison_deltas(model_metrics, pca_metrics):
+    if not isinstance(model_metrics, dict) or not isinstance(pca_metrics, dict):
+        return None
+    return {
+        "mse_delta_model_minus_pca": model_metrics["mse"] - pca_metrics["mse"],
+        "fc_delta_model_minus_pca": model_metrics["fc_preservation"] - pca_metrics["fc_preservation"],
+        "silhouette_delta_model_minus_pca": model_metrics["silhouette"] - pca_metrics["silhouette"],
+        "logreg_delta_model_minus_pca": model_metrics["logreg_accuracy"] - pca_metrics["logreg_accuracy"],
+        "swfcd_pearson_delta_model_minus_pca": model_metrics["swfcd_pearson"] - pca_metrics["swfcd_pearson"],
+        "swfcd_mad_delta_model_minus_pca": model_metrics["swfcd_mad"] - pca_metrics["swfcd_mad"],
+        "swfcd_rmse_delta_model_minus_pca": model_metrics["swfcd_rmse"] - pca_metrics["swfcd_rmse"],
+    }
+
+
+def _subset_tensor(values, indices):
+    if values is None:
+        return None
+    return values[indices]
+
+
+def _sorted_unique_labels(labels):
+    label_array = np.asarray(labels, dtype=object)
+    unique_values = pd.unique(label_array)
+    cleaned = [value for value in unique_values if value is not None and not pd.isna(value)]
+    return sorted((str(value) for value in cleaned), key=str)
+
+
+def _print_metric_summary(title, metrics):
+    print(title)
+    print(f"  MSE: {metrics['mse']:.6f}")
+    print(
+        f"  FC preservation: {metrics['fc_preservation']:.6f}"
+        if np.isfinite(metrics["fc_preservation"])
+        else "  FC preservation: nan"
+    )
+    print(f"  Silhouette: {metrics['silhouette']:.6f}" if np.isfinite(metrics["silhouette"]) else "  Silhouette: nan")
+    print(
+        f"  Logistic regression accuracy (CV): {metrics['logreg_accuracy']:.6f}"
+        if np.isfinite(metrics["logreg_accuracy"])
+        else "  Logistic regression accuracy (CV): nan"
+    )
+    print(
+        f"  SwFCD Pearson: {metrics['swfcd_pearson']:.6f}"
+        if np.isfinite(metrics["swfcd_pearson"])
+        else "  SwFCD Pearson: nan"
+    )
+    print(
+        f"  SwFCD Mean absolute difference: {metrics['swfcd_mad']:.6f}"
+        if np.isfinite(metrics["swfcd_mad"])
+        else "  SwFCD Mean absolute difference: nan"
+    )
+    print(
+        f"  SwFCD RMSE: {metrics['swfcd_rmse']:.6f}"
+        if np.isfinite(metrics["swfcd_rmse"])
+        else "  SwFCD RMSE: nan"
+    )
+
+
 def eval_vae(
     model,
     data_loader,
     pca=None,
     use_pred_heads=False,
+    evaluation_scope="combined",
     device='cuda' if torch.cuda.is_available() else 'cpu',
 ):
     """
@@ -208,49 +301,37 @@ def eval_vae(
     z_all = torch.cat(all_latents, dim=0)
     valid_mask_all = torch.cat(all_masks, dim=0) if all_masks else None
 
-    mse = _masked_mse_torch(x_hat_all, x_all, valid_mask_all)
-    fc_preservation = fc_preservation_score(x_all, x_hat_all, data_loader.dataset)
+    labels = np.asarray(getattr(data_loader.dataset, "labels", []), dtype=object)
+    scope = str(evaluation_scope or "combined")
+    if scope not in {"combined", "per_group"}:
+        raise ValueError(f"Unsupported evaluation_scope: {evaluation_scope}")
 
-    swfcd_results = swfcd.apply(x_all, x_hat_all)
-    swfcd_pearson = _to_scalar_metric(swfcd_results['pearson']) if swfcd_results else np.nan
-    swfcd_mad = _to_scalar_metric(swfcd_results['mad']) if swfcd_results else np.nan
-    swfcd_rmse = _to_scalar_metric(swfcd_results['rmse']) if swfcd_results else np.nan
-
-    z_np = to_numpy(z_all)
-    labels = np.asarray(getattr(data_loader.dataset, "labels", []))
-    sil = silhouette(z_np, labels)
-    logreg_acc = logreg_accuracy_cv(z_np, labels)
-
+    model_metrics = _compute_model_metrics(
+        sw_fcd=swfcd,
+        inputs=x_all,
+        recons=x_hat_all,
+        latents=z_all,
+        labels=labels,
+        dataset=data_loader.dataset,
+        valid_mask=valid_mask_all,
+    )
     metrics = {
-        "model": {
-            "mse": mse,
-            "fc_preservation": fc_preservation,
-            "silhouette": sil,
-            "logreg_accuracy": logreg_acc,
-            "swfcd_pearson": swfcd_pearson,
-            "swfcd_mad": swfcd_mad,
-            "swfcd_rmse": swfcd_rmse,
-        }
+        "scope": scope,
+        "model": model_metrics,
     }
 
-    print("Inference metrics (model):")
-    print(f"  MSE: {mse:.6f}")
-    print(f"  FC preservation: {fc_preservation:.6f}" if np.isfinite(fc_preservation) else "  FC preservation: nan")
-    print(f"  Silhouette: {sil:.6f}" if np.isfinite(sil) else "  Silhouette: nan")
-    print(f"  Logistic regression accuracy (CV): {logreg_acc:.6f}" if np.isfinite(logreg_acc) else "  Logistic regression accuracy (CV): nan")
-    print(f"  SwFCD Pearson: {swfcd_pearson:.6f}" if np.isfinite(swfcd_pearson) else "  SwFCD Pearson: nan")
-    print(f"  SwFCD Mean absolute difference: {swfcd_mad:.6f}" if np.isfinite(swfcd_mad) else "  SwFCD Mean absolute difference: nan")
-    print(f"  SwFCD RMSE: {swfcd_rmse:.6f}" if np.isfinite(swfcd_rmse) else "  SwFCD RMSE: nan")
+    _print_metric_summary("Inference metrics (model):", model_metrics)
 
+    x_all_np = None
     if pca is not None:
-        x_all = x_all.detach().cpu().numpy()
+        x_all_np = x_all.detach().cpu().numpy()
         valid_mask_np = to_numpy(valid_mask_all) if valid_mask_all is not None else None
-        z_pca = pca.transform(x_all)
+        z_pca = pca.transform(x_all_np)
 
         pca_metrics = _compute_pca_metrics(
             pca=pca,
             swfcd=swfcd,
-            inputs=x_all,
+            inputs=x_all_np,
             latents=z_pca,
             labels=labels,
             dataset=data_loader.dataset,
@@ -258,15 +339,7 @@ def eval_vae(
         )
 
         metrics["pca"] = pca_metrics
-        metrics["comparison"] = {
-            "mse_delta_model_minus_pca": metrics["model"]["mse"] - pca_metrics["mse"],
-            "fc_delta_model_minus_pca": metrics["model"]["fc_preservation"] - pca_metrics["fc_preservation"],
-            "silhouette_delta_model_minus_pca": metrics["model"]["silhouette"] - pca_metrics["silhouette"],
-            "logreg_delta_model_minus_pca": metrics["model"]["logreg_accuracy"] - pca_metrics["logreg_accuracy"],
-            "swfcd_pearson_delta_model_minus_pca": metrics["model"]["swfcd_pearson"] - pca_metrics["swfcd_pearson"],
-            "swfcd_mad_delta_model_minus_pca": metrics["model"]["swfcd_mad"] - pca_metrics["swfcd_mad"],
-            "swfcd_rmse_delta_model_minus_pca": metrics["model"]["swfcd_rmse"] - pca_metrics["swfcd_rmse"],
-        }
+        metrics["comparison"] = _comparison_deltas(metrics["model"], pca_metrics)
 
         # print("Inference metrics (PCA baseline):")
         # print(f"  MSE: {pca_metrics['mse']:.6f}" if np.isfinite(pca_metrics['mse']) else "  MSE: nan")
@@ -329,5 +402,51 @@ def eval_vae(
         #     if np.isfinite(metrics['comparison']['swfcd_rmse_delta_model_minus_pca'])
         #     else "  SwFCD RMSE delta: nan"
         # )
+
+    if scope == "per_group":
+        groups = {}
+        for group_name in _sorted_unique_labels(labels):
+            group_indices = np.flatnonzero(labels.astype(str) == group_name)
+            if group_indices.size == 0:
+                continue
+            group_idx_tensor = torch.as_tensor(group_indices, dtype=torch.long)
+            group_inputs = _subset_tensor(x_all if torch.is_tensor(x_all) else torch.as_tensor(x_all), group_idx_tensor)
+            group_recons = _subset_tensor(x_hat_all, group_idx_tensor)
+            group_latents = _subset_tensor(z_all, group_idx_tensor)
+            group_valid_mask = _subset_tensor(valid_mask_all, group_idx_tensor) if valid_mask_all is not None else None
+            group_labels = labels[group_indices]
+
+            group_model_metrics = _compute_model_metrics(
+                sw_fcd=swfcd,
+                inputs=group_inputs,
+                recons=group_recons,
+                latents=group_latents,
+                labels=group_labels,
+                dataset=data_loader.dataset,
+                valid_mask=group_valid_mask,
+            )
+            group_metrics = {"model": group_model_metrics}
+
+            if pca is not None:
+                group_inputs_np = to_numpy(group_inputs)
+                group_valid_mask_np = to_numpy(group_valid_mask) if group_valid_mask is not None else None
+                group_latents_pca = pca.transform(group_inputs_np)
+                group_pca_metrics = _compute_pca_metrics(
+                    pca=pca,
+                    swfcd=swfcd,
+                    inputs=group_inputs_np,
+                    latents=group_latents_pca,
+                    labels=group_labels,
+                    dataset=data_loader.dataset,
+                    valid_mask=group_valid_mask_np,
+                )
+                group_metrics["pca"] = group_pca_metrics
+                group_metrics["comparison"] = _comparison_deltas(group_model_metrics, group_pca_metrics)
+
+            groups[group_name] = group_metrics
+            _print_metric_summary(f"Inference metrics (model) [{group_name}]:", group_model_metrics)
+
+        if groups:
+            metrics["groups"] = groups
 
     return metrics
