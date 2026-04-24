@@ -12,6 +12,12 @@ For data analysis and processing, a Schaefer 2018 400-region partitioning was ap
 
 ## Setup
 Requirements: python 3.9 & [uv](https://docs.astral.sh/uv/guides/install-python/)
+Clone the repo and the submodules:
+```bash
+git clone https://github.com/Skaiste/NeuroAE.git
+git submodule update --init
+```
+
 To setup project run:
 ```bash
 uv sync
@@ -20,6 +26,18 @@ uv sync
 To run training make sure the data (`.mat` files) are in the `data` directory, then run command:
 ```bash
 uv run neuroae
+```
+
+To verify model creation without writing checkpoints or results, use dry-run mode:
+```bash
+uv run neuroae --dry-run
+uv run neuroae --mode exp --dry-run
+```
+
+To store experiment metadata under a different results directory name:
+```bash
+uv run neuroae --results-dir-name results_alt
+uv run neuroae --mode exp --results-dir-name results_alt
 ```
 
 ## Configuration
@@ -35,11 +53,6 @@ Full configuration reference for all models and config files:
 - [ ] Model improvements
 - [x] Framework for parameter tuning
 
-#### Todo's:
-- copy the experiments with the basic, linear, autoencoderKLv3 from exp_run 2.1, 2.2 and basic conv AE from exp_run 3.0, to compare all 2D input models before the architectures are experimented with.
-- add prediction heads to basic and linear models
-- figure out a way to make sliding window calculations faster
-- 
 
 ## Report Writing Checklist
 - [ ] [ 0% ] State of the art
