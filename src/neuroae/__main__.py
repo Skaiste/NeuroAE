@@ -23,11 +23,11 @@ from sklearn.preprocessing import StandardScaler
 
 from .utils import *
 from .utils.dict_utils import deepupdate
-from .load_data import load_adni, prepare_data_loaders
+from .load_data import load_adni, load_hcp, prepare_data_loaders
 from .models.old.pca import PCA, PCA_multi
 from training_tracker import TrainingResultsManager
 
-CACHED_ADNI = None
+CACHED_DATA = None
 CACHED_FILTER = None
 
 
@@ -103,30 +103,71 @@ def load_config(config_path):
 
 
 def load_data_from_config(data_dir, data_config, num_workers=0):
-    global CACHED_ADNI
-    if CACHED_ADNI is None:
-        # Load ADNI data
-        print(f"\nLoading ADNI-B dataset...")
-        data_loader = load_adni(data_dir=data_dir)
-        CACHED_ADNI = data_loader
+    global CACHED_DATA
+    data_type = data_config['data'].get("type", 'ADNI')
+    cache_mode = data_config['data'].get('cache_mode', 'none')
+    cache_file = data_config['data'].get('cache_file')
 
-        # Print dataset information
-        print(f"\nDataset: ADNI-B")
-        print(f"Number of ROIs: {data_loader.N()}")
-        print(f"TR: {data_loader.TR()} seconds")
-        print(f"\nSubject counts:")
-        counts = data_loader.get_subject_count()
-        for group, count in counts.items():
-            print(f"  {group}: {count}")
+    data_loader = None
+    if cache_mode != "load" and CACHED_DATA is None:
+        if data_type == 'ADNI':
+            # Load ADNI data
+            print(f"\nLoading ADNI-B dataset...")
+            data_loader = load_adni(data_dir=data_dir)
+            CACHED_DATA = data_loader
+
+            # Print dataset information
+            print(f"\nDataset: ADNI-B")
+            print(f"Number of ROIs: {data_loader.N()}")
+            print(f"TR: {data_loader.TR()} seconds")
+            print(f"\nSubject counts:")
+            counts = data_loader.get_subject_count()
+            for group, count in counts.items():
+                print(f"  {group}: {count}")
+        elif data_type == "HCP":
+            print(f"\nLoading HCP dataset...")
+            data_loader = load_hcp(data_dir)
+            CACHED_DATA = data_loader
+
+            # Print dataset information
+            print(f"\nDataset: HCP")
+            print(f"Number of ROIs: {data_loader.N()}")
+            print(f"TR: {data_loader.TR()} seconds")
+            print(f"\nSubject counts:")
+            counts = data_loader.get_subject_count()
+            for group, count in counts.items():
+                print(f"  {group}: {count}")
+        else:
+            raise ValueError(f"Data type '{data_type}' is invalid, available only 'ADNI' and 'HCP'")
+    elif cache_mode != "load":
+        data_loader = CACHED_DATA
     else:
-        data_loader = CACHED_ADNI
+        print(f"\nLoading preprocessed data cache from {cache_file}...")
 
     # setup filter
     global CACHED_FILTER
-    if CACHED_FILTER is None and 'filter' in data_config and data_config['filter']['type'] == 'BandPassFilter':
+    if cache_mode == "load" and 'filter' in data_config and data_config['filter']['type'] == 'BandPassFilter':
         filter_config = data_config['filter']
+        tr = filter_config.get('tr')
+        if data_type == "HCP":
+            tr = 720.0
         filter = BandPassFilter(
-            tr=filter_config['tr'],
+            tr=tr,
+            flp=filter_config['flp'],
+            fhi=filter_config['fhi'],
+            k=filter_config['k'],
+            remove_artifacts=filter_config['remove_artifacts'],
+            apply_demean=filter_config['apply_demean'],
+            apply_detrend=filter_config['apply_detrend'],
+            apply_finalDetrend=filter_config['apply_finalDetrend'],
+        )
+    elif cache_mode == "load":
+        filter = None
+    elif CACHED_FILTER is None and 'filter' in data_config and data_config['filter']['type'] == 'BandPassFilter':
+        filter_config = data_config['filter']
+        tr = data_loader.TR() * 1000
+        filter = BandPassFilter(
+            tr=tr,
             flp=filter_config['flp'],
             fhi=filter_config['fhi'],
             k=filter_config['k'],
@@ -144,12 +185,16 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
 
     # Prepare PyTorch DataLoaders
     print(f"\nPreparing PyTorch DataLoaders...")
-    split_mode = data_config['data'].get('datasplit_mode', 'none')
-    datasplit_file = data_config['data'].get('datasplit_file')
     # setup normaliser
     normaliser = None
     if data_config['data'].get('normalize', False):
         normaliser = StandardScaler()
+
+    group_defaults = (
+        list(data_loader.get_subject_count().keys())
+        if data_loader is not None
+        else data_config['data'].get('groups', [])
+    )
     loaders = prepare_data_loaders(
         data_loader,
         batch_size=data_config['data'].get('batch_size', 16),
@@ -161,15 +206,16 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
         train_split=data_config['data'].get('train_split', 0.7),
         val_split=data_config['data'].get('val_split', 0.15),
         random_seed=data_config['data'].get('random_seed', 42),
-        train_groups=data_config['data'].get('groups', ["HC", "MCI", "AD"]),
+        train_groups=data_config['data'].get('groups', group_defaults),
         timepoints_as_samples=data_config['data'].get('timepoints_as_samples', False),
         fc_input=data_config['data'].get('fc_input', False),
         preserve_timepoints=data_config['data'].get('preserve_timepoints', False),
-        split_mode=split_mode,
-        datasplit_file=datasplit_file,
+        cache_mode=cache_mode,
+        cache_file=cache_file,
         filter=filter,
         normaliser=normaliser,
         use_bio_levels=data_config['data'].get('use_bio_levels', []),
+        data_type=data_type,
     )
 
     print(f"\nDataLoader information:")
@@ -544,6 +590,7 @@ def run_training(model, model_name, latent_dim, loaders, training_config, model_
         convergence_warmup_epochs=training_config['training'].get('convergence_warmup_epochs', 0),
         checkpoint_selection_metric=training_config['training'].get('checkpoint_selection_metric', 'val_loss'),
         save_checkpoint=not dry_run,
+        vectorize_val_reference=training_config['training'].get('vectorize_val_reference', False),
     )
     if dry_run:
         print(

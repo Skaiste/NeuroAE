@@ -7,7 +7,7 @@ training:
   learning_rate: 0.001
   loss_params:
     loss_per_feature: true
-    pred_heads_delta: 1
+    pred_heads_delta: 0
     swfcd_beta: 0
     swfcd_step: 3
     swfcd_window: 30
@@ -19,4 +19,5 @@ training:
     seed: 42
     warn_only: false
   save_dir: ./models
+  vectorize_val_reference: false
   weight_decay: 0.0001

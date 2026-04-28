@@ -4,8 +4,8 @@ default:
       batch_size: 32
       groups: [HC, MCI, AD]
       random_seed: 42
-      datasplit_file: data/train_val_test_split.csv
-      datasplit_mode: load
+      cache_file: data/preprocessed_cache.pt
+      cache_mode: load
       normalize: true
       transpose: true
       pad_features: false
@@ -32,6 +32,7 @@ default:
     num_epochs: 1000
     save_dir: ./models
     evaluation_scope: combined
+    vectorize_val_reference: false
     learning_rate: 1e-3
     weight_decay: 1e-4
     loss_params:
@@ -53,79 +54,80 @@ default:
 
 LAEPredHeads:
   static_params:
+    data:
+      data:
+        use_bio_levels: ['ABeta']
     model:
       name: LAEPredHeads
       latent_dim: 32
+      pred_head_type: temp_pool
   exp_params:
-    data:
-      data:
-        use_bio_levels: [['ABeta', 'Tau'], ['ABeta'], ['Tau']]
-    model:
-      pred_head_type: [avg, conv, conv_no_hidden, temp_pool, gated_temp_pool]
     training:
+      loss_params:
+        pred_heads_delta: [0, 0.5, 1, 1.5]
       reproducibility:
         seed: [42, 100, 1, 111, 1007]
   
 
-VAEPredHeads:
-  static_params:
-    model:
-      name: VAEPredHeads
-      latent_dim: 8
-      hidden_dims: [32]
-    training:
-      loss_params:
-        beta: 1
-  exp_params:
-    data:
-      data:
-        use_bio_levels: [['ABeta', 'Tau'], ['ABeta'], ['Tau']]
-    model:
-      pred_head_type: [avg, conv, conv_no_hidden, temp_pool, gated_temp_pool]
-    training:
-      reproducibility:
-        seed: [42, 100, 1, 111, 1007]
+# VAEPredHeads:
+#   static_params:
+#     model:
+#       name: VAEPredHeads
+#       latent_dim: 8
+#       hidden_dims: [32]
+#     training:
+#       loss_params:
+#         beta: 1
+#   exp_params:
+#     data:
+#       data:
+#         use_bio_levels: [['ABeta', 'Tau'], ['ABeta'], ['Tau']]
+#     model:
+#       pred_head_type: [avg, conv, conv_no_hidden, temp_pool, gated_temp_pool]
+#     training:
+#       reproducibility:
+#         seed: [42, 100, 1, 111, 1007]
 
 
-ConvAEPredHeads:
-  static_params:
-    model:
-      name: ConvAEPredHeads
-      latent_dim: 32
-      hidden_dims: [16]
-      kernel_size: 3
-    training:
-      reproducibility:
-        deterministic: false
-  exp_params:
-    data:
-      data:
-        use_bio_levels: [['ABeta', 'Tau'], ['ABeta'], ['Tau']]
-    model:
-      pred_head_type: [avg, conv, conv_no_hidden, temp_pool, gated_temp_pool]
-    training:
-      reproducibility:
-        seed: [42, 100, 1, 111, 1007]
+# ConvAEPredHeads:
+#   static_params:
+#     model:
+#       name: ConvAEPredHeads
+#       latent_dim: 32
+#       hidden_dims: [16]
+#       kernel_size: 3
+#     training:
+#       reproducibility:
+#         deterministic: false
+#   exp_params:
+#     data:
+#       data:
+#         use_bio_levels: [['ABeta', 'Tau'], ['ABeta'], ['Tau']]
+#     model:
+#       pred_head_type: [avg, conv, conv_no_hidden, temp_pool, gated_temp_pool]
+#     training:
+#       reproducibility:
+#         seed: [42, 100, 1, 111, 1007]
 
 
-ConvVAEPredHeads:
-  static_params:
-    model:
-      name: ConvVAEPredHeads
-      latent_dim: 32
-      hidden_dims: [32, 16]
-      kernel_size: 3
-    training:
-      reproducibility:
-        deterministic: false
-      loss_params:
-        beta: 1.0
-  exp_params:
-    data:
-      data:
-        use_bio_levels: [['ABeta', 'Tau'], ['ABeta'], ['Tau']]
-    model:
-      pred_head_type: [avg, conv, conv_no_hidden, temp_pool, gated_temp_pool]
-    training:
-      reproducibility:
-        seed: [42, 100, 1, 111, 1007]
+# ConvVAEPredHeads:
+#   static_params:
+#     model:
+#       name: ConvVAEPredHeads
+#       latent_dim: 32
+#       hidden_dims: [32, 16]
+#       kernel_size: 3
+#     training:
+#       reproducibility:
+#         deterministic: false
+#       loss_params:
+#         beta: 1.0
+#   exp_params:
+#     data:
+#       data:
+#         use_bio_levels: [['ABeta', 'Tau'], ['ABeta'], ['Tau']]
+#     model:
+#       pred_head_type: [avg, conv, conv_no_hidden, temp_pool, gated_temp_pool]
+#     training:
+#       reproducibility:
+#         seed: [42, 100, 1, 111, 1007]

@@ -7,7 +7,9 @@ interface for use in main.py and other scripts.
 """
 
 import sys
-import csv
+import json
+import os
+import pickle
 import platform
 import random
 import numpy as np
@@ -23,7 +25,32 @@ from DataLoaders.ADNI_B import (
     ADNI_B_N193_no_filt as LibBrain_ADNI_B_N193_no_filt,
     ADNI_B_Alt,
 )
+from DataLoaders.HCP_Schaefer1000 import HCP as LibBrain_HCP
 from tools.hdf import loadmat
+
+
+class HCP(LibBrain_HCP):
+    def __init__(self, path):
+        self.SchaeferSize = 1000
+        self.set_basePath(path)
+        self.timeseries = {}
+        self.excluded = {}
+        self.__loadFilteredData()
+
+    def set_basePath(self, path):
+        self.base_folder = path
+        self.fMRI_path = str(path / str(self.SchaeferSize) / 'hcp_{}_LR_schaefer1000.mat')
+        
+def load_hcp(data_dir):
+    data = HCP(data_dir)
+    # filter out nan data
+    rows = set(np.concatenate(
+               [[i for i in range(data.timeseries['REST1'][(j, 'REST1')].shape[0]) if np.any(np.isnan(data.timeseries['REST1'][(j, 'REST1')][i]))]
+                for j in range(len(data.timeseries['REST1']))]))
+    for subject in range(len(data.timeseries['REST1'])):
+        data.timeseries['REST1'][(subject, 'REST1')] = np.delete(data.timeseries['REST1'][(subject, 'REST1')], list(rows), axis=0)
+    
+    return data
 
 
 class ADNI_B_N193_no_filt(LibBrain_ADNI_B_N193_no_filt):
@@ -289,7 +316,7 @@ class ADNIDataset(Dataset):
 
             self.data.append(ts_array)
         
-        self.data = np.array(self.data)
+        self.data = np.asarray(self.data, dtype=np.float32)
 
         if timepoints_as_samples and not fc_input:
             timepoint_dim = self.data.shape[1]
@@ -304,10 +331,12 @@ class ADNIDataset(Dataset):
         if pad_features and self.data.shape[-1]%4 != 0:
             pad_by = 4 - self.data.shape[-1]%4
             self.data = np.pad(self.data, [(0,0),(0,0),(0,pad_by)], mode='constant', constant_values=0)
+            self.data = self.data.astype(np.float32, copy=False)
 
         if truncate_features:
             ft_size = self.data.shape[-1] - self.data.shape[-1]%4
             self.data = self.data[:,:,:ft_size]
+            self.data = self.data.astype(np.float32, copy=False)
 
         self.labels = labels if labels is not None else [None] * len(self.data)
         if self.subject_ids is None:
@@ -463,6 +492,57 @@ class ADNIDatasetBL(ADNIDataset):
         return data, (label, {bl:d[idx] for bl,d in self.bio_data.items()})
 
 
+class CachedDataset(Dataset):
+    def __init__(
+        self,
+        data,
+        labels=None,
+        subject_ids=None,
+        bio_data=None,
+        flatten=True,
+        fc_input=False,
+        preserve_timepoints=False,
+        timepoint_dim=None,
+        timepoints_as_samples=False,
+        transpose=False,
+    ):
+        self.data = np.asarray(data, dtype=np.float32)
+        self.labels = labels if labels is not None else [None] * len(self.data)
+        self.subject_ids = subject_ids if subject_ids is not None else [None] * len(self.data)
+        self.bio_data = {
+            key: np.asarray(values, dtype=np.float32) for key, values in (bio_data or {}).items()
+        }
+        self.flatten = flatten
+        self.fc_input = fc_input
+        self.timepoints_as_samples = timepoints_as_samples
+        self.transpose = transpose
+        self.preserve_timepoints = preserve_timepoints
+        self.timepoint_dim = timepoint_dim
+        self.original_shape = self.data[0].shape if len(self.data) > 0 else None
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        sample = torch.as_tensor(self.data[idx], dtype=torch.float32)
+        label = self.labels[idx]
+        if self.bio_data:
+            return sample, (label, {bl: values[idx] for bl, values in self.bio_data.items()})
+        if label is not None:
+            return sample, label
+        return sample
+
+    def describe(self):
+        print(f"Dataset description:")
+        print("="*60)
+        print(f"\tshape: {self.data.shape}")
+        print(f"\tmean: {self.data.mean()}")
+        print(f"\tstd: {self.data.std()}")
+        print(f"\tmin: {self.data.min()}")
+        print(f"\tmax: {self.data.max()}")
+        print("="*60)
+
+
 def extract_timeseries_from_loader(data_loader, groups=None, bio_levels=[]):
     """
     Extract timeseries data from ADNI DataLoader.
@@ -525,53 +605,181 @@ def _resolve_split_path(split_path):
     return project_root / split_path
 
 
-def _load_split_assignments(split_path):
-    id_column = "subject_id"
-    label_column = "label"
-    split_column = "split"
-    assignments = {}
-    with split_path.open("r", newline="") as csv_file:
-        reader = csv.DictReader(csv_file)
-        required_columns = {id_column, label_column, split_column}
-        missing_columns = required_columns.difference(reader.fieldnames or [])
-        if missing_columns:
-            raise ValueError(
-                f"Split file {split_path} is missing required columns: {sorted(missing_columns)}"
-            )
-
-        for row in reader:
-            subject_id = str(row[id_column]).strip()
-            split_name = str(row[split_column]).strip().lower()
-            if split_name not in {"train", "val", "test"}:
-                raise ValueError(
-                    f"Invalid split '{split_name}' for subject '{subject_id}' in {split_path}."
-                )
-            assignments[subject_id] = {
-                "split": split_name,
-                "label": str(row[label_column]).strip(),
+def _build_cache_signature(
+    data_type,
+    train_groups,
+    val_groups,
+    test_groups,
+    transpose,
+    flatten,
+    pad_features,
+    truncate_features,
+    train_split,
+    val_split,
+    random_seed,
+    timepoints_as_samples,
+    fc_input,
+    preserve_timepoints,
+    use_bio_levels,
+    normaliser,
+    filter,
+):
+    return {
+        "data_type": data_type,
+        "train_groups": list(train_groups) if train_groups is not None else None,
+        "val_groups": list(val_groups) if val_groups is not None else None,
+        "test_groups": list(test_groups) if test_groups is not None else None,
+        "transpose": bool(transpose),
+        "flatten": bool(flatten),
+        "pad_features": bool(pad_features),
+        "truncate_features": bool(truncate_features),
+        "train_split": float(train_split),
+        "val_split": float(val_split),
+        "random_seed": int(random_seed),
+        "timepoints_as_samples": bool(timepoints_as_samples),
+        "fc_input": bool(fc_input),
+        "preserve_timepoints": bool(preserve_timepoints),
+        "use_bio_levels": list(use_bio_levels),
+        "normalizer": (
+            {
+                "type": type(normaliser).__name__,
+                "params": normaliser.get_params(deep=True),
             }
-    return assignments
+            if normaliser is not None else None
+        ),
+        "filter": (
+            {
+                "type": type(filter).__name__,
+                "params": {
+                    key: value
+                    for key, value in vars(filter).items()
+                    if isinstance(value, (str, int, float, bool, list, tuple, type(None)))
+                },
+            }
+            if filter is not None else None
+        ),
+    }
 
 
-def _save_split_assignments(split_path, rows):
-    id_column = "subject_id"
-    label_column = "label"
-    split_column = "split"
-    split_path.parent.mkdir(parents=True, exist_ok=True)
-    with split_path.open("w", newline="") as csv_file:
-        writer = csv.DictWriter(
-            csv_file,
-            fieldnames=[id_column, label_column, split_column],
+def _save_preprocessed_cache(cache_path, signature, datasets):
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "signature": signature,
+        "splits": {},
+    }
+    for split_name, dataset in datasets.items():
+        payload["splits"][split_name] = {
+            "data": dataset.data.astype(np.float32, copy=False),
+            "labels": list(dataset.labels),
+            "subject_ids": list(dataset.subject_ids),
+            "bio_data": {
+                key: np.asarray(values, dtype=np.float32)
+                for key, values in getattr(dataset, "bio_data", {}).items()
+            },
+            "flatten": bool(getattr(dataset, "flatten", False)),
+            "fc_input": bool(getattr(dataset, "fc_input", False)),
+            "preserve_timepoints": bool(getattr(dataset, "preserve_timepoints", False)),
+            "timepoint_dim": getattr(dataset, "timepoint_dim", None),
+        }
+    temp_cache_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+    try:
+        torch.save(payload, temp_cache_path, pickle_protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(temp_cache_path, cache_path)
+    except Exception:
+        if temp_cache_path.exists():
+            temp_cache_path.unlink()
+        raise
+
+
+def _load_preprocessed_cache(cache_path, expected_signature=None):
+    if cache_path.stat().st_size == 0:
+        raise ValueError(
+            f"Cache file is empty: {cache_path}. Rebuild it with cache_mode=create."
         )
-        writer.writeheader()
-        for subject_id, label, split_name in sorted(rows, key=lambda row: (row[2], row[0])):
-            writer.writerow(
-                {
-                    id_column: subject_id,
-                    label_column: label,
-                    split_column: split_name,
-                }
+    payload = torch.load(cache_path, map_location="cpu", weights_only=False)
+    cache_signature = payload.get("signature", {})
+    if expected_signature is not None:
+        if json.dumps(cache_signature, sort_keys=True) != json.dumps(expected_signature, sort_keys=True):
+            raise ValueError(
+                f"Cache at {cache_path} does not match the requested preprocessing configuration."
             )
+
+    datasets = {}
+    for split_name, split_payload in payload.get("splits", {}).items():
+        datasets[split_name] = CachedDataset(
+            data=split_payload["data"],
+            labels=split_payload.get("labels"),
+            subject_ids=split_payload.get("subject_ids"),
+            bio_data=split_payload.get("bio_data"),
+            flatten=split_payload.get("flatten", False),
+            fc_input=split_payload.get("fc_input", False),
+            preserve_timepoints=split_payload.get("preserve_timepoints", False),
+            timepoint_dim=split_payload.get("timepoint_dim"),
+            timepoints_as_samples=split_payload.get("timepoints_as_samples", False),
+            transpose=split_payload.get("transpose", False),
+        )
+    return datasets
+
+
+def _build_data_loader_result(datasets, batch_size, shuffle_train, num_workers, random_seed, preserve_timepoints):
+    def _seed_worker(worker_id):
+        worker_seed = torch.initial_seed() % 2**32
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
+
+    data_loader_generator = torch.Generator()
+    data_loader_generator.manual_seed(int(random_seed))
+    pin_memory = platform.system().lower() != "darwin"
+
+    train_dataset = datasets["train"]
+    print("Training dataset")
+    train_dataset.describe()
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=shuffle_train,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        worker_init_fn=_seed_worker,
+        generator=data_loader_generator,
+    )
+
+    result = {
+        "train_loader": train_loader,
+        "input_dim": train_dataset.data[0].shape,
+        "timepoint_dim": train_dataset.timepoint_dim,
+        "preserve_timepoints": preserve_timepoints,
+        "num_samples": {"train": len(train_dataset)},
+    }
+
+    if "val" in datasets:
+        val_loader = DataLoader(
+            datasets["val"],
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            worker_init_fn=_seed_worker,
+            generator=data_loader_generator,
+        )
+        result["val_loader"] = val_loader
+        result["num_samples"]["val"] = len(datasets["val"])
+
+    if "test" in datasets:
+        test_loader = DataLoader(
+            datasets["test"],
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            worker_init_fn=_seed_worker,
+            generator=data_loader_generator,
+        )
+        result["test_loader"] = test_loader
+        result["num_samples"]["test"] = len(datasets["test"])
+
+    return result
 
 
 def prepare_data_loaders(
@@ -590,13 +798,14 @@ def prepare_data_loaders(
     random_seed=42,
     timepoints_as_samples=False,
     fc_input=False,
-    split_mode="none",
-    datasplit_file=None,
+    cache_mode="none",
+    cache_file=None,
     preserve_timepoints=False,
     num_workers=0,
     filter=None,
     normaliser=None,
-    use_bio_levels=[]
+    use_bio_levels=[],
+    data_type=None,
 ):
     """
     Prepare PyTorch DataLoaders from ADNI DataLoader.
@@ -621,13 +830,53 @@ def prepare_data_loaders(
             - 'input_dim': Input dimension for the model
             - 'num_samples': Dictionary with number of samples per split
     """
-    def _seed_worker(worker_id):
-        worker_seed = torch.initial_seed() % 2**32
-        np.random.seed(worker_seed)
-        random.seed(worker_seed)
+    cache_mode = (cache_mode or "none").lower()
+    supported_cache_modes = {"none", "load", "create"}
+    if cache_mode not in supported_cache_modes:
+        raise ValueError(
+            f"Unsupported cache_mode '{cache_mode}'. Expected one of {sorted(supported_cache_modes)}"
+        )
+    cache_path = _resolve_split_path(cache_file) if cache_file else None
+    if cache_mode in {"load", "create"} and cache_path is None:
+        raise ValueError(
+            "cache_mode requires 'cache_file' to be set when not using none mode."
+        )
+    cache_signature = _build_cache_signature(
+        data_type=data_type,
+        train_groups=train_groups,
+        val_groups=val_groups,
+        test_groups=test_groups,
+        transpose=transpose,
+        flatten=flatten,
+        pad_features=pad_features,
+        truncate_features=truncate_features,
+        train_split=train_split,
+        val_split=val_split,
+        random_seed=random_seed,
+        timepoints_as_samples=timepoints_as_samples,
+        fc_input=fc_input,
+        preserve_timepoints=preserve_timepoints,
+        use_bio_levels=use_bio_levels,
+        normaliser=normaliser,
+        filter=filter,
+    )
 
-    data_loader_generator = torch.Generator()
-    data_loader_generator.manual_seed(int(random_seed))
+    if cache_mode == "load":
+        if not cache_path.exists():
+            raise FileNotFoundError(f"cache_mode=load, but cache file does not exist: {cache_path}")
+        cached_datasets = _load_preprocessed_cache(cache_path, expected_signature=cache_signature)
+        print(f"Loaded preprocessed data cache from {cache_path}")
+        return _build_data_loader_result(
+            cached_datasets,
+            batch_size=batch_size,
+            shuffle_train=shuffle_train,
+            num_workers=num_workers,
+            random_seed=random_seed,
+            preserve_timepoints=preserve_timepoints,
+        )
+
+    if data_loader is None:
+        raise ValueError("data_loader is required unless cache_mode='load'.")
 
     # Extract all timeseries data
     if train_groups is None:
@@ -639,116 +888,42 @@ def prepare_data_loaders(
     
     # Split data if val/test groups not specified
     if val_groups is None and test_groups is None:
-        split_mode = (split_mode or "none").lower()
-        supported_split_modes = {"none", "load", "create"}
-        if split_mode not in supported_split_modes:
-            raise ValueError(
-                f"Unsupported split_mode '{split_mode}'. Expected one of {sorted(supported_split_modes)}"
-            )
-
-        split_path = _resolve_split_path(datasplit_file) if datasplit_file else None
-        if split_mode in {"load", "create"} and split_path is None:
-            raise ValueError(
-                "split_mode requires 'datasplit_file' to be set when not using none mode."
-            )
-
         train_data, train_ids, train_labels = [], [], []
         train_bio_levels = {bl:[] for bl in use_bio_levels}
         val_data, val_ids, val_labels = [], [], []
         val_bio_levels = {bl:[] for bl in use_bio_levels}
         test_data, test_ids, test_labels = [], [], []
         test_bio_levels = {bl:[] for bl in use_bio_levels}
+        split_rng = np.random.default_rng(random_seed)
+        indices = split_rng.permutation(len(all_timeseries))
 
-        split_loaded = False
-        if split_mode == "load" and split_path.exists():
-            split_assignments = _load_split_assignments(
-                split_path,
-            )
-            seen_subjects = set()
-            idxs = [i for i in range(len(all_subject_ids))]
-            for idx, timeseries, subject_id, label in zip(idxs, all_timeseries, all_subject_ids, all_labels):
-                assignment = split_assignments.get(subject_id)
-                if assignment is None:
-                    raise ValueError(
-                        f"Subject '{subject_id}' was not found in split file {split_path}."
-                    )
-                split_name = assignment["split"]
-                seen_subjects.add(subject_id)
-                if split_name == "train":
-                    train_data.append(timeseries)
-                    train_ids.append(subject_id)
-                    train_labels.append(label)
-                    for bl in use_bio_levels:
-                        train_bio_levels[bl].append(all_bio_levels[bl][idx])
-                elif split_name == "val":
-                    val_data.append(timeseries)
-                    val_ids.append(subject_id)
-                    val_labels.append(label)
-                    for bl in use_bio_levels:
-                        val_bio_levels[bl].append(all_bio_levels[bl][idx])
-                else:
-                    test_data.append(timeseries)
-                    test_ids.append(subject_id)
-                    test_labels.append(label)
-                    for bl in use_bio_levels:
-                        test_bio_levels[bl].append(all_bio_levels[bl][idx])
+        n_train = int(len(all_timeseries) * train_split)
+        n_val = int(len(all_timeseries) * val_split)
 
-            missing_subjects = set(split_assignments.keys()).difference(seen_subjects)
-            if missing_subjects:
-                print(
-                    f"Warning: {len(missing_subjects)} subjects in {split_path} were not found in the loaded dataset."
-                )
-            print(f"Loaded data split from {split_path}")
-            split_loaded = True
-        elif split_mode == "load":
-            raise FileNotFoundError(f"split_mode=load, but split file does not exist: {split_path}")
+        train_indices = indices[:n_train]
+        val_indices = indices[n_train:n_train + n_val]
+        test_indices = indices[n_train + n_val:]
 
-        if not split_loaded:
-            split_rng = np.random.default_rng(random_seed)
-            indices = split_rng.permutation(len(all_timeseries))
+        train_data = [all_timeseries[i] for i in train_indices]
+        train_ids = [all_subject_ids[i] for i in train_indices]
+        train_labels = [all_labels[i] for i in train_indices]
+        for bl in use_bio_levels:
+            train_bio_levels[bl] = [all_bio_levels[bl][i] for i in train_indices]
 
-            n_train = int(len(all_timeseries) * train_split)
-            n_val = int(len(all_timeseries) * val_split)
+        val_data = [all_timeseries[i] for i in val_indices]
+        val_ids = [all_subject_ids[i] for i in val_indices]
+        val_labels = [all_labels[i] for i in val_indices]
+        for bl in use_bio_levels:
+            val_bio_levels[bl] = [all_bio_levels[bl][i] for i in val_indices]
 
-            train_indices = indices[:n_train]
-            val_indices = indices[n_train:n_train + n_val]
-            test_indices = indices[n_train + n_val:]
-
-            train_data = [all_timeseries[i] for i in train_indices]
-            train_ids = [all_subject_ids[i] for i in train_indices]
-            train_labels = [all_labels[i] for i in train_indices]
-            for bl in use_bio_levels:
-                train_bio_levels[bl] = [all_bio_levels[bl][i] for i in train_indices]
-
-            val_data = [all_timeseries[i] for i in val_indices]
-            val_ids = [all_subject_ids[i] for i in val_indices]
-            val_labels = [all_labels[i] for i in val_indices]
-            for bl in use_bio_levels:
-                val_bio_levels[bl] = [all_bio_levels[bl][i] for i in val_indices]
-
-            test_data = [all_timeseries[i] for i in test_indices]
-            test_ids = [all_subject_ids[i] for i in test_indices]
-            test_labels = [all_labels[i] for i in test_indices]
-            for bl in use_bio_levels:
-                test_bio_levels[bl] = [all_bio_levels[bl][i] for i in test_indices]
-
-            if split_mode == "create":
-                split_rows = []
-                for i in train_indices:
-                    split_rows.append((all_subject_ids[i], all_labels[i], "train"))
-                for i in val_indices:
-                    split_rows.append((all_subject_ids[i], all_labels[i], "val"))
-                for i in test_indices:
-                    split_rows.append((all_subject_ids[i], all_labels[i], "test"))
-
-                _save_split_assignments(
-                    split_path,
-                    split_rows,
-                )
-                print(f"Saved data split to {split_path}")
+        test_data = [all_timeseries[i] for i in test_indices]
+        test_ids = [all_subject_ids[i] for i in test_indices]
+        test_labels = [all_labels[i] for i in test_indices]
+        for bl in use_bio_levels:
+            test_bio_levels[bl] = [all_bio_levels[bl][i] for i in test_indices]
     else:
-        if split_mode and (split_mode.lower() != "none"):
-            print("Ignoring split_mode/export_datasplit because val_groups/test_groups were explicitly provided.")
+        if cache_mode == "create":
+            print("Creating cache from explicitly provided train/val/test groups.")
         # Use specified groups
         train_data, train_bio_levels, train_ids, train_labels = extract_timeseries_from_loader(
             data_loader, groups=train_groups, bio_levels=use_bio_levels
@@ -795,31 +970,8 @@ def prepare_data_loaders(
         # train_dataset.prepare(bl, normaliser=bio_norm[bl], fit=True)
         bio_means[bl] = train_dataset.prepare(bl, fit=True)
 
-    print("Training dataset")
-    train_dataset.describe()
+    datasets = {"train": train_dataset}
 
-    pin_memory = platform.system().lower() != "darwin"
-
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=shuffle_train,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        worker_init_fn=_seed_worker,
-        generator=data_loader_generator,
-    )
-
-    input_dim = train_dataset.data[0].shape
-    
-    result = {
-        'train_loader': train_loader,
-        'input_dim': input_dim,
-        'timepoint_dim': train_dataset.timepoint_dim,
-        'preserve_timepoints': preserve_timepoints,
-        'num_samples': {'train': len(train_dataset)},
-    }
-    
     if val_data:
         val_dataset = DATASET(val_data, val_labels, val_ids,
             filter=filter,
@@ -835,17 +987,7 @@ def prepare_data_loaders(
         for bl in use_bio_levels:
             # val_dataset.prepare(bl, normaliser=bio_norm[bl])
             val_dataset.prepare(bl, means=bio_means[bl])
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            worker_init_fn=_seed_worker,
-            generator=data_loader_generator,
-        )
-        result['val_loader'] = val_loader
-        result['num_samples']['val'] = len(val_dataset)
+        datasets["val"] = val_dataset
     
     if test_data:
         test_dataset = DATASET(test_data, test_labels, test_ids,
@@ -862,16 +1004,17 @@ def prepare_data_loaders(
         for bl in use_bio_levels:
             # test_dataset.prepare(bl, normaliser=bio_norm[bl])
             test_dataset.prepare(bl, means=bio_means[bl])
-        test_loader = DataLoader(
-            test_dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            worker_init_fn=_seed_worker,
-            generator=data_loader_generator,
-        )
-        result['test_loader'] = test_loader
-        result['num_samples']['test'] = len(test_dataset)
-    
-    return result
+        datasets["test"] = test_dataset
+
+    if cache_mode == "create":
+        _save_preprocessed_cache(cache_path, cache_signature, datasets)
+        print(f"Saved preprocessed data cache to {cache_path}")
+
+    return _build_data_loader_result(
+        datasets,
+        batch_size=batch_size,
+        shuffle_train=shuffle_train,
+        num_workers=num_workers,
+        random_seed=random_seed,
+        preserve_timepoints=preserve_timepoints,
+    )

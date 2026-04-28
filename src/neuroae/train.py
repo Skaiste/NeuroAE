@@ -236,6 +236,7 @@ def train_vae(
     convergence_warmup_epochs=0,
     checkpoint_selection_metric="swfcd_logreg_joint",
     save_checkpoint=True,
+    vectorize_val_reference=False,
 ):
     device = torch.device(device)
     model = model.to(device)
@@ -254,12 +255,12 @@ def train_vae(
     val_valid_last_dim = _dataset_valid_last_dim(val_loader.dataset)
     val_swfcd = SwFCD(val_loader.dataset, 30, 3)
     val_reference_vec = None
-    if not getattr(val_loader.dataset, "fc_input", False):
+    breakpoint()
+    if vectorize_val_reference and not getattr(val_loader.dataset, "fc_input", False):
         val_reference = torch.as_tensor(val_loader.dataset.data, dtype=torch.float32)
         val_reference_vec = val_swfcd.vectorize(val_reference, track_grad=False)
     for epoch in range(num_epochs):
         train_loss_params = {}
-
         model.train()
         for batch_idx, (data, labels) in enumerate(train_loader):
             x = data.to(device)
@@ -302,9 +303,11 @@ def train_vae(
         # validation
         model.eval()
         val_loss_params = {}
-        val_recons = []
+        val_recons = [] if val_reference_vec is not None else None
         val_latents = []
         val_labels = []
+        swfcd_pearson_sum = 0.0
+        swfcd_pearson_count = 0
         with torch.no_grad():
             for batch_idx, (data, labels) in enumerate(val_loader):
                 x = data.to(device)
@@ -324,7 +327,14 @@ def train_vae(
                     val_loss_params[p] += loss[p]
 
                 recon_x, latent = _extract_model_outputs(output)
-                val_recons.append(recon_x.detach().cpu())
+                recon_x_cpu = recon_x.detach().cpu()
+                if val_recons is not None:
+                    val_recons.append(recon_x_cpu)
+                elif not getattr(val_loader.dataset, "fc_input", False):
+                    swfcd_results = val_swfcd.apply(data.detach().cpu(), recon_x_cpu)
+                    if swfcd_results is not None:
+                        swfcd_pearson_sum += float(swfcd_results["pearson"].detach().cpu().item()) * data.shape[0]
+                        swfcd_pearson_count += int(data.shape[0])
                 if latent is not None:
                     val_latents.append(latent.detach().cpu())
 
@@ -349,6 +359,8 @@ def train_vae(
             swfcd_results = val_swfcd.apply(None, torch.cat(val_recons, dim=0), x_vec=val_reference_vec)
             if swfcd_results is not None:
                 swfcd_pearson = float(swfcd_results["pearson"].detach().cpu().item())
+        elif swfcd_pearson_count > 0:
+            swfcd_pearson = swfcd_pearson_sum / swfcd_pearson_count
         _append_history_metric(history, 'val', 'swfcd_pearson', swfcd_pearson)
         val_metric_str += (
             f" | Val swfcd_pearson: {swfcd_pearson:.4f}"

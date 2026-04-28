@@ -1,6 +1,5 @@
 model:
   freeze_encoder: false
-  latent_dim: 4
-  name: MonaiAEKL
-  hidden_dims: [16, 8]
+  latent_dim: 32
+  name: LAE
   reset_decoder: false
