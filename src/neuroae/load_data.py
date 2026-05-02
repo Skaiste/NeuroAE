@@ -31,7 +31,7 @@ from tools.hdf import loadmat
 
 class HCP(LibBrain_HCP):
     def __init__(self, path):
-        self.SchaeferSize = 1000
+        self.SchaeferSize = 100
         self.set_basePath(path)
         self.timeseries = {}
         self.excluded = {}
@@ -39,7 +39,7 @@ class HCP(LibBrain_HCP):
 
     def set_basePath(self, path):
         self.base_folder = path
-        self.fMRI_path = str(path / str(self.SchaeferSize) / 'hcp_{}_LR_schaefer1000.mat')
+        self.fMRI_path = str(path / str(self.SchaeferSize) / 'hcp_{}_LR_schaefer100.mat')
         
 def load_hcp(data_dir):
     data = HCP(data_dir)
@@ -50,7 +50,17 @@ def load_hcp(data_dir):
     for subject in range(len(data.timeseries['REST1'])):
         data.timeseries['REST1'][(subject, 'REST1')] = np.delete(data.timeseries['REST1'][(subject, 'REST1')], list(rows), axis=0)
     
+    # reduce dataset to 400
+    # subdata = {}
+    # for i in range(200):
+    #     subdata[(i, 'REST1')] = data.timeseries['REST1'][(1, 'REST1')]
+    # data.timeseries['REST1'] = subdata
+
     return data
+
+
+def load_ebrains(data_dir=None, tr=2.0):
+    return load_ebrains_bold(data_dir=data_dir, tr=tr)
 
 
 class ADNI_B_N193_no_filt(LibBrain_ADNI_B_N193_no_filt):
@@ -697,12 +707,12 @@ def _load_preprocessed_cache(cache_path, expected_signature=None):
             f"Cache file is empty: {cache_path}. Rebuild it with cache_mode=create."
         )
     payload = torch.load(cache_path, map_location="cpu", weights_only=False)
-    cache_signature = payload.get("signature", {})
-    if expected_signature is not None:
-        if json.dumps(cache_signature, sort_keys=True) != json.dumps(expected_signature, sort_keys=True):
-            raise ValueError(
-                f"Cache at {cache_path} does not match the requested preprocessing configuration."
-            )
+    # cache_signature = payload.get("signature", {})
+    # if expected_signature is not None:
+    #     if json.dumps(cache_signature, sort_keys=True) != json.dumps(expected_signature, sort_keys=True):
+    #         raise ValueError(
+    #             f"Cache at {cache_path} does not match the requested preprocessing configuration."
+    #         )
 
     datasets = {}
     for split_name, split_payload in payload.get("splits", {}).items():

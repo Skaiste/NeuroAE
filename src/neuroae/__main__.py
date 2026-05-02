@@ -23,7 +23,7 @@ from sklearn.preprocessing import StandardScaler
 
 from .utils import *
 from .utils.dict_utils import deepupdate
-from .load_data import load_adni, load_hcp, prepare_data_loaders
+from .load_data import load_adni, load_ebrains, load_hcp, prepare_data_loaders
 from .models.old.pca import PCA, PCA_multi
 from training_tracker import TrainingResultsManager
 
@@ -137,8 +137,26 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
             counts = data_loader.get_subject_count()
             for group, count in counts.items():
                 print(f"  {group}: {count}")
+        elif data_type == "EBRAINS":
+            print(f"\nLoading EBRAINS dataset...")
+            data_loader = load_ebrains(
+                data_dir=data_dir,
+                tr=data_config["data"].get("tr", 2.25),
+            )
+            CACHED_DATA = data_loader
+
+            # Print dataset information
+            print(f"\nDataset: EBRAINS")
+            print(f"Number of ROIs: {data_loader.N()}")
+            print(f"TR: {data_loader.TR()} seconds")
+            print(f"\nSubject counts:")
+            counts = data_loader.get_subject_count()
+            for group, count in counts.items():
+                print(f"  {group}: {count}")
         else:
-            raise ValueError(f"Data type '{data_type}' is invalid, available only 'ADNI' and 'HCP'")
+            raise ValueError(
+                f"Data type '{data_type}' is invalid, available only 'ADNI', 'HCP', and 'EBRAINS'"
+            )
     elif cache_mode != "load":
         data_loader = CACHED_DATA
     else:

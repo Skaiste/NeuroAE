@@ -255,9 +255,8 @@ def train_vae(
     val_valid_last_dim = _dataset_valid_last_dim(val_loader.dataset)
     val_swfcd = SwFCD(val_loader.dataset, 30, 3)
     val_reference_vec = None
-    breakpoint()
     if vectorize_val_reference and not getattr(val_loader.dataset, "fc_input", False):
-        val_reference = torch.as_tensor(val_loader.dataset.data, dtype=torch.float32)
+        val_reference = torch.as_tensor(val_loader.dataset.data, dtype=torch.float32, device=device)
         val_reference_vec = val_swfcd.vectorize(val_reference, track_grad=False)
     for epoch in range(num_epochs):
         train_loss_params = {}
@@ -327,11 +326,11 @@ def train_vae(
                     val_loss_params[p] += loss[p]
 
                 recon_x, latent = _extract_model_outputs(output)
-                recon_x_cpu = recon_x.detach().cpu()
+                recon_x_detached = recon_x.detach()
                 if val_recons is not None:
-                    val_recons.append(recon_x_cpu)
+                    val_recons.append(recon_x_detached)
                 elif not getattr(val_loader.dataset, "fc_input", False):
-                    swfcd_results = val_swfcd.apply(data.detach().cpu(), recon_x_cpu)
+                    swfcd_results = val_swfcd.apply(x.detach(), recon_x_detached)
                     if swfcd_results is not None:
                         swfcd_pearson_sum += float(swfcd_results["pearson"].detach().cpu().item()) * data.shape[0]
                         swfcd_pearson_count += int(data.shape[0])

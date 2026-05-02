@@ -11,3 +11,5 @@ trd_party_path = src_path / "3rd_party"
 libbrain_path = trd_party_path / "LibBrain"
 if str(libbrain_path) not in sys.path:
     sys.path.insert(0, str(libbrain_path))
+
+from .ebrains_loader import EBRAINSBOLDLoader, load_ebrains_bold

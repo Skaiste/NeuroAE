@@ -1,5 +1,7 @@
-import torch
+import os
 from typing import Optional
+
+import torch
 
 from ..load_data import ADNIDataset
 
@@ -16,6 +18,7 @@ class SwFCD:
         if self.window_step <= 0:
             raise ValueError("window_step must be > 0")
         self._triu_cache = {}
+        self.debug = os.environ.get("NEUROAE_SWFCD_DEBUG", "").lower() in {"1", "true", "yes", "on"}
 
     def ensure_correct_dim(self, x: torch.Tensor):# -> torch.Tensor | None:
         """Convert supported dataset layouts to (B, T, R)."""
@@ -52,6 +55,75 @@ class SwFCD:
             self._triu_cache[key] = cached
         return cached
 
+    def _describe_input(self, x_btr: torch.Tensor) -> str:
+        return (
+            f"shape={tuple(x_btr.shape)}, dtype={x_btr.dtype}, device={x_btr.device}, "
+            f"window_size={self.window_size}, window_step={self.window_step}, "
+            f"dataset(flatten={getattr(self.dataset, 'flatten', None)}, "
+            f"transpose={getattr(self.dataset, 'transpose', None)}, "
+            f"timepoints_as_samples={getattr(self.dataset, 'timepoints_as_samples', None)}, "
+            f"fc_input={getattr(self.dataset, 'fc_input', None)}, "
+            f"original_shape={getattr(self.dataset, 'original_shape', None)})"
+        )
+
+    def _validate_bold_input(self, x_btr: torch.Tensor) -> None:
+        if x_btr.ndim != 3:
+            raise ValueError(f"SwFCD expects (B, T, R) after reshaping, got {tuple(x_btr.shape)}")
+
+        batches, t_len, n_rois = x_btr.shape
+        if batches <= 0:
+            raise ValueError(f"SwFCD received an empty batch: {tuple(x_btr.shape)}")
+        if t_len < self.window_size:
+            raise ValueError(
+                f"SwFCD requires at least {self.window_size} timepoints, got {t_len}. "
+                f"Input context: {self._describe_input(x_btr)}"
+            )
+        if n_rois < 2:
+            raise ValueError(
+                f"SwFCD requires at least 2 ROIs, got {n_rois}. "
+                f"Input context: {self._describe_input(x_btr)}"
+            )
+        if not torch.isfinite(x_btr).all():
+            nan_count = int(torch.isnan(x_btr).sum().item())
+            inf_count = int(torch.isinf(x_btr).sum().item())
+            raise ValueError(
+                f"SwFCD input contains non-finite values (nan={nan_count}, inf={inf_count}). "
+                f"Input context: {self._describe_input(x_btr)}"
+            )
+
+    def _window_count(self, t_len: int) -> int:
+        return 1 + (t_len - self.window_size) // self.window_step
+
+    def _estimate_impl2_bytes(self, x_btr: torch.Tensor) -> tuple[int, int]:
+        batches, t_len, n_rois = x_btr.shape
+        n_windows = self._window_count(t_len)
+        bytes_per_elem = max(x_btr.element_size(), 4)
+        corr_mtx = batches * n_windows * n_rois * n_rois * bytes_per_elem
+        cotsampling = batches * n_windows * max(n_windows - 1, 0) // 2 * bytes_per_elem
+        return n_windows, corr_mtx + cotsampling
+
+    def _raise_if_impl2_too_large(self, x_btr: torch.Tensor) -> None:
+        n_windows, estimated_bytes = self._estimate_impl2_bytes(x_btr)
+        limit_bytes = int(float(os.environ.get("NEUROAE_SWFCD_MAX_MB", "1024")) * 1024 * 1024)
+        if estimated_bytes > limit_bytes:
+            estimated_mb = estimated_bytes / (1024 * 1024)
+            limit_mb = limit_bytes / (1024 * 1024)
+            raise MemoryError(
+                "SwFCD would allocate too much memory before computing correlations. "
+                f"Estimated working set for `_swfcd_vector_from_bold_2`: {estimated_mb:.1f} MB "
+                f"(limit {limit_mb:.1f} MB, n_windows={n_windows}). "
+                f"Input context: {self._describe_input(x_btr)}. "
+                "Reduce batch size / ROI count, increase window_step, or use the more memory-efficient implementation."
+            )
+        if self.debug:
+            estimated_mb = estimated_bytes / (1024 * 1024)
+            print(
+                "SWFCD DEBUG:",
+                f"n_windows={n_windows}",
+                f"estimated_impl2_memory={estimated_mb:.1f}MB",
+                self._describe_input(x_btr),
+            )
+
     def _swfcd_vector_from_bold(self, x_btr: torch.Tensor) -> torch.Tensor:
         """Compute SWFCD vector per batch element from BOLD time series (B, T, R)."""
         bsz, t_len, n_roi = x_btr.shape
@@ -81,6 +153,41 @@ class SwFCD:
 
         iu_w = self._triu_indices(n_windows, n_windows, offset=1, device=x_btr.device)
         return fcd[..., iu_w[0], iu_w[1]]
+
+
+    def _swfcd_vector_from_bold_2(self, x_btr: torch.Tensor) -> torch.Tensor:
+        x_btr = x_btr.transpose(2,1)
+        batches, t_max, n_rois = x_btr.shape
+
+        self._validate_bold_input(x_btr)
+        # self._raise_if_impl2_too_large(x_btr)
+
+        last_window_start = t_max - self.window_size
+        n_windows = self._window_count(t_max)
+
+        corr_mtrxs = x_btr.new_zeros((batches, n_windows, n_rois, n_rois))
+
+        for b in range(batches):
+            w_idx = 0
+            for t in range(0, last_window_start + 1, self.window_step):
+                w_data = x_btr[b, t:t + self.window_size, :].T
+                cm = torch.corrcoef(w_data)
+                cm = torch.nan_to_num(cm, nan=0.0)
+                cm.fill_diagonal_(1.0)
+                corr_mtrxs[b, w_idx] = cm
+                w_idx += 1
+
+        rows, cols = torch.tril_indices(n_rois, n_rois, offset=-1)
+        lower_triangular_parts = corr_mtrxs[:, :, rows, cols]
+        
+        cotsampling = x_btr.new_zeros((batches, n_windows * (n_windows - 1) // 2))
+        rows, cols = torch.triu_indices(n_windows, n_windows, offset=1)
+        for b in range(batches):
+            corr = torch.corrcoef(lower_triangular_parts[b])
+            cotsampling[b] = corr[rows, cols]
+
+        return cotsampling
+
 
     def _pairwise_metrics(self, x_vec: torch.Tensor, x_hat_vec: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         common_len = min(x_vec.shape[-1], x_hat_vec.shape[-1])
@@ -116,10 +223,20 @@ class SwFCD:
             track_grad = bool(x.requires_grad)
 
         if track_grad:
-            return self._swfcd_vector_from_bold(x_btr)
+            try:
+                return self._swfcd_vector_from_bold_2(x_btr)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"SwFCD vectorization failed with gradients enabled. {self._describe_input(x_btr)}"
+                ) from exc
 
         with torch.no_grad():
-            return self._swfcd_vector_from_bold(x_btr)
+            try:
+                return self._swfcd_vector_from_bold_2(x_btr)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"SwFCD vectorization failed under no_grad. {self._describe_input(x_btr)}"
+                ) from exc
 
     def apply(self, x: Optional[torch.Tensor], x_hat: torch.Tensor, x_vec: Optional[torch.Tensor] = None):
         if x_vec is None:
@@ -132,7 +249,12 @@ class SwFCD:
             # raise ValueError("SWFCD cannot be computed when dataset.fc_input is True")
             return None
 
-        x_hat_vec = self._swfcd_vector_from_bold(x_hat_btr)
+        try:
+            x_hat_vec = self._swfcd_vector_from_bold_2(x_hat_btr)
+        except Exception as exc:
+            raise RuntimeError(
+                f"SwFCD apply failed while vectorizing reconstruction. {self._describe_input(x_hat_btr)}"
+            ) from exc
 
         pearson, mad, rmse = self._pairwise_metrics(x_vec, x_hat_vec)
 

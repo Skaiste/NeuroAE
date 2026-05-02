@@ -5,8 +5,6 @@ data:
   cache_mode: load
   fc_input: false
   flatten: false
-  groups:
-  - REST1
   normalize: true
   pad_features: false
   preserve_timepoints: false

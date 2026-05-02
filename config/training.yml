@@ -16,7 +16,7 @@ training:
     benchmark: false
     deterministic: true
     enabled: true
-    seed: 42
+    seed: 1007
     warn_only: false
   save_dir: ./models
   vectorize_val_reference: false
