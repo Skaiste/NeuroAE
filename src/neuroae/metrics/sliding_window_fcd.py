@@ -2,11 +2,11 @@ import numpy as np
 from neuronumba.observables.sw_fcd import SwFCD as Numba_SwFCD
 
 from ..utils.np_utils import to_numpy
-from ..load_data import ADNIDataset
+from ..data import BaseTimeseriesDataset
 
 
 class SwFCD:
-    def __init__(self, dataset:ADNIDataset, window_size:int, window_step:int):
+    def __init__(self, dataset:BaseTimeseriesDataset, window_size:int, window_step:int):
         self.dataset = dataset
         self.swfcd = Numba_SwFCD(window_size=window_size, window_step=window_step)
 

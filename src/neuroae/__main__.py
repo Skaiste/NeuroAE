@@ -23,7 +23,7 @@ from sklearn.preprocessing import StandardScaler
 
 from .utils import *
 from .utils.dict_utils import deepupdate
-from .load_data import load_adni, load_ebrains, load_hcp, prepare_data_loaders
+from .data import load_adni, load_ebrains, load_hcp, prepare_data_loaders
 from .models.old.pca import PCA, PCA_multi
 from training_tracker import TrainingResultsManager
 
@@ -105,6 +105,7 @@ def load_config(config_path):
 def load_data_from_config(data_dir, data_config, num_workers=0):
     global CACHED_DATA
     data_type = data_config['data'].get("type", 'ADNI')
+    parcelations = int(data_config["data"].get("parcelations", 100))
     cache_mode = data_config['data'].get('cache_mode', 'none')
     cache_file = data_config['data'].get('cache_file')
 
@@ -126,7 +127,7 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
                 print(f"  {group}: {count}")
         elif data_type == "HCP":
             print(f"\nLoading HCP dataset...")
-            data_loader = load_hcp(data_dir)
+            data_loader = load_hcp(data_dir, parcelations=parcelations)
             CACHED_DATA = data_loader
 
             # Print dataset information
@@ -142,6 +143,7 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
             data_loader = load_ebrains(
                 data_dir=data_dir,
                 tr=data_config["data"].get("tr", 2.25),
+                parcelations=parcelations,
             )
             CACHED_DATA = data_loader
 

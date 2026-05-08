@@ -3,11 +3,11 @@ from typing import Optional
 
 import torch
 
-from ..load_data import ADNIDataset
+from ..data import BaseTimeseriesDataset
 
 
 class SwFCD:
-    def __init__(self, dataset: ADNIDataset, window_size: int, window_step: int, eps: float = 1e-8):
+    def __init__(self, dataset: BaseTimeseriesDataset, window_size: int, window_step: int, eps: float = 1e-8):
         self.dataset = dataset
         self.window_size = int(window_size)
         self.window_step = int(window_step)
