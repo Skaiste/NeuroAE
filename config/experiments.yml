@@ -1,11 +1,9 @@
 default:
   data:
     data:
-      type: HCP
+      type: EBRAINS
       batch_size: 32
-      groups: [HC, MCI, AD]
       random_seed: 42
-      cache_file: data/HCP_preprocessed_cache.pt
       cache_mode: load
       normalize: true
       transpose: true
@@ -53,12 +51,149 @@ default:
       warn_only: false
 
 
-LAE:
+LAE_200:
   static_params:
+    data:
+      data:
+        parcelations: 200
+        cache_file: data/EBRAINS_preprocessed_cache_200.pt
     model:
       name: LAE
       latent_dim: 32
   exp_params:
     training:
       reproducibility:
-        seed: [42, 100, 1, 111, 1007]
+        seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
+
+LAE_100:
+  static_params:
+    data:
+      data:
+        parcelations: 100
+        cache_file: data/EBRAINS_preprocessed_cache_100.pt
+    model:
+      name: LAE
+      latent_dim: 32
+  exp_params:
+    training:
+      reproducibility:
+        seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
+
+
+VAE_200:
+  static_params:
+    data:
+      data:
+        parcelations: 200
+        cache_file: data/EBRAINS_preprocessed_cache_200.pt
+    model:
+      name: VAE
+      latent_dim: 8
+      hidden_dims: [32]
+    training:
+      loss_params:
+        beta: 1
+  exp_params:
+    training:
+      reproducibility:
+        seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
+
+VAE_100:
+  static_params:
+    data:
+      data:
+        parcelations: 100
+        cache_file: data/EBRAINS_preprocessed_cache_100.pt
+    model:
+      name: VAE
+      latent_dim: 8
+      hidden_dims: [32]
+    training:
+      loss_params:
+        beta: 1
+  exp_params:
+    training:
+      reproducibility:
+        seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
+
+
+ConvAE_200:
+  static_params:
+    data:
+      data:
+        parcelations: 200
+        cache_file: data/EBRAINS_preprocessed_cache_200.pt
+    model:
+      name: ConvAE
+      latent_dim: 32
+      hidden_dims: [16]
+      kernel_size: 3
+    training:
+      reproducibility:
+        deterministic: false
+  exp_params:
+    training:
+      reproducibility:
+        seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
+
+ConvAE_100:
+  static_params:
+    data:
+      data:
+        parcelations: 100
+        cache_file: data/EBRAINS_preprocessed_cache_100.pt
+    model:
+      name: ConvAE
+      latent_dim: 32
+      hidden_dims: [16]
+      kernel_size: 3
+    training:
+      reproducibility:
+        deterministic: false
+  exp_params:
+    training:
+      reproducibility:
+        seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
+
+
+ConvVAE_200:
+  static_params:
+    data:
+      data:
+        parcelations: 200
+        cache_file: data/EBRAINS_preprocessed_cache_200.pt
+    model:
+      name: ConvVAE
+      latent_dim: 32
+      hidden_dims: [32, 16]
+      kernel_size: 3
+    training:
+      reproducibility:
+        deterministic: false
+      loss_params:
+        beta: 1.0
+  exp_params:
+    training:
+      reproducibility:
+        seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
+
+ConvVAE_100:
+  static_params:
+    data:
+      data:
+        parcelations: 100
+        cache_file: data/EBRAINS_preprocessed_cache_100.pt
+    model:
+      name: ConvVAE
+      latent_dim: 32
+      hidden_dims: [32, 16]
+      kernel_size: 3
+    training:
+      reproducibility:
+        deterministic: false
+      loss_params:
+        beta: 1.0
+  exp_params:
+    training:
+      reproducibility:
+        seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]

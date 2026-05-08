@@ -1,10 +1,10 @@
 import numpy as np
 from sklearn.decomposition import PCA as sklearn_PCA
 
-from ...data import ADNIDataset
+from ...data import BaseTimeseriesDataset
 
 class PCA(sklearn_PCA):
-    def __init__(self, dataset:ADNIDataset, n_components = None, *, copy = True, whiten = False, svd_solver = "auto", tol = 0, iterated_power = "auto", n_oversamples = 10, power_iteration_normalizer = "auto", random_state = None):
+    def __init__(self, dataset:BaseTimeseriesDataset, n_components = None, *, copy = True, whiten = False, svd_solver = "auto", tol = 0, iterated_power = "auto", n_oversamples = 10, power_iteration_normalizer = "auto", random_state = None):
         if dataset.preserve_timepoints:
             n_components = n_components // dataset.timepoint_dim
 

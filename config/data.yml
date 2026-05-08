@@ -1,8 +1,9 @@
 data:
-  type: HCP
+  type: EBRAINS
+  parcelations: 200
   batch_size: 32
-  cache_file: data/HCP_preprocessed_cache.pt
-  cache_mode: load
+  cache_file: data/EBRAINS_preprocessed_cache_200.pt
+  cache_mode: create
   fc_input: false
   flatten: false
   normalize: true
