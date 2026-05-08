@@ -1,8 +1,8 @@
 data:
-  type: EBRAINS
-  parcelations: 200
+  type: ADNI2
+  parcelations: 400
   batch_size: 32
-  cache_file: data/EBRAINS_preprocessed_cache_200.pt
+  cache_file: data/ADNI_preprocessed_cache_400.pt
   cache_mode: create
   fc_input: false
   flatten: false
@@ -13,13 +13,13 @@ data:
   timepoints_as_samples: false
   transpose: true
   truncate_features: false
-filter:
-  apply_demean: true
-  apply_detrend: true
-  apply_finalDetrend: false
-  fhi: 0.08
-  flp: 0.01
-  k: 2
-  remove_artifacts: true
-  tr: 3000
-  type: BandPassFilter
+# filter:
+#   apply_demean: true
+#   apply_detrend: true
+#   apply_finalDetrend: false
+#   fhi: 0.08
+#   flp: 0.01
+#   k: 2
+#   remove_artifacts: true
+#   tr: 3000
+#   type: BandPassFilter

@@ -1,7 +1,7 @@
 default:
   data:
     data:
-      type: EBRAINS
+      type: ADNI2
       batch_size: 32
       random_seed: 42
       cache_mode: load
@@ -14,16 +14,16 @@ default:
       fc_input: false
       preserve_timepoints: false
 
-    filter:
-      apply_demean: true
-      apply_detrend: true
-      apply_finalDetrend: false
-      fhi: 0.08
-      flp: 0.01
-      k: 2
-      remove_artifacts: true
-      tr: 3000
-      type: BandPassFilter
+    # filter:
+    #   apply_demean: true
+    #   apply_detrend: true
+    #   apply_finalDetrend: false
+    #   fhi: 0.08
+    #   flp: 0.01
+    #   k: 2
+    #   remove_artifacts: true
+    #   tr: 3000
+    #   type: BandPassFilter
   model:
     freeze_encoder: false
     reset_decoder: false
@@ -51,12 +51,12 @@ default:
       warn_only: false
 
 
-LAE_200:
+LAE_400:
   static_params:
     data:
       data:
-        parcelations: 200
-        cache_file: data/EBRAINS_preprocessed_cache_200.pt
+        parcelations: 400
+        cache_file: data/ADNI_preprocessed_cache_400.pt
     model:
       name: LAE
       latent_dim: 32
@@ -70,7 +70,7 @@ LAE_100:
     data:
       data:
         parcelations: 100
-        cache_file: data/EBRAINS_preprocessed_cache_100.pt
+        cache_file: data/ADNI_preprocessed_cache_100.pt
     model:
       name: LAE
       latent_dim: 32
@@ -80,12 +80,12 @@ LAE_100:
         seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
 
 
-VAE_200:
+VAE_400:
   static_params:
     data:
       data:
-        parcelations: 200
-        cache_file: data/EBRAINS_preprocessed_cache_200.pt
+        parcelations: 400
+        cache_file: data/ADNI_preprocessed_cache_400.pt
     model:
       name: VAE
       latent_dim: 8
@@ -103,7 +103,7 @@ VAE_100:
     data:
       data:
         parcelations: 100
-        cache_file: data/EBRAINS_preprocessed_cache_100.pt
+        cache_file: data/ADNI_preprocessed_cache_100.pt
     model:
       name: VAE
       latent_dim: 8
@@ -117,12 +117,12 @@ VAE_100:
         seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
 
 
-ConvAE_200:
+ConvAE_400:
   static_params:
     data:
       data:
-        parcelations: 200
-        cache_file: data/EBRAINS_preprocessed_cache_200.pt
+        parcelations: 400
+        cache_file: data/ADNI_preprocessed_cache_400.pt
     model:
       name: ConvAE
       latent_dim: 32
@@ -141,7 +141,7 @@ ConvAE_100:
     data:
       data:
         parcelations: 100
-        cache_file: data/EBRAINS_preprocessed_cache_100.pt
+        cache_file: data/ADNI_preprocessed_cache_100.pt
     model:
       name: ConvAE
       latent_dim: 32
@@ -156,12 +156,12 @@ ConvAE_100:
         seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
 
 
-ConvVAE_200:
+ConvVAE_400:
   static_params:
     data:
       data:
-        parcelations: 200
-        cache_file: data/EBRAINS_preprocessed_cache_200.pt
+        parcelations: 400
+        cache_file: data/ADNI_preprocessed_cache_400.pt
     model:
       name: ConvVAE
       latent_dim: 32
@@ -182,7 +182,7 @@ ConvVAE_100:
     data:
       data:
         parcelations: 100
-        cache_file: data/EBRAINS_preprocessed_cache_100.pt
+        cache_file: data/ADNI_preprocessed_cache_100.pt
     model:
       name: ConvVAE
       latent_dim: 32
