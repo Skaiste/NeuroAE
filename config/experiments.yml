@@ -4,8 +4,6 @@ default:
       type: ADNI2
       batch_size: 32
       random_seed: 42
-      parcelations: 400
-      cache_file: data/ADNI_preprocessed_cache_400.pt
       cache_mode: load
       normalize: true
       transpose: true
@@ -53,64 +51,151 @@ default:
       warn_only: false
 
 
-LAE:
+LAE_400:
   static_params:
+    data:
+      data:
+        parcelations: 400
+        cache_file: data/ADNI_preprocessed_cache_400.pt
     model:
       name: LAE
+      latent_dim: 32
   exp_params:
-    model:
-      latent_dim: [32, 16, 8, 4]
     training:
       reproducibility:
         seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
   
 
-VAE:
+LAE_100:
   static_params:
+    data:
+      data:
+        parcelations: 100
+        cache_file: data/ADNI_preprocessed_cache_100.pt
+    model:
+      name: LAE
+      latent_dim: 32
+  exp_params:
+    training:
+      reproducibility:
+        seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
+
+
+VAE_400:
+  static_params:
+    data:
+      data:
+        parcelations: 400
+        cache_file: data/ADNI_preprocessed_cache_400.pt
     model:
       name: VAE
-  exp_params:
-    model:
-      latent_dim: [32, 16, 8, 4]
-      hidden_dims: [[32, 16], [32], [16]]
+      latent_dim: 32
+      hidden_dims: [32]
     training:
       loss_params:
-        beta: [1.0, 0.5, 0]
+        beta: 0
+  exp_params:
+    model:
+    training:
+      reproducibility:
+        seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
+
+VAE_100:
+  static_params:
+    data:
+      data:
+        parcelations: 100
+        cache_file: data/ADNI_preprocessed_cache_100.pt
+    model:
+      name: VAE
+      latent_dim: 32
+      hidden_dims: [32]
+    training:
+      loss_params:
+        beta: 0
+  exp_params:
+    model:
+    training:
       reproducibility:
         seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
 
 
-ConvAE:
+ConvAE_400:
   static_params:
+    data:
+      data:
+        parcelations: 400
+        cache_file: data/ADNI_preprocessed_cache_400.pt
     model:
       name: ConvAE
+      kernel_size: 5
+      latent_dim: 32
+      hidden_dims: [32, 16]
     training:
       reproducibility:
         deterministic: false
   exp_params:
-    model:
-      latent_dim: [32, 16, 8, 4]
-      hidden_dims: [[32, 16], [32], [16]]
-      kernel_size: [3, 5]
     training:
       reproducibility:
         seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
 
-
-ConvVAE:
+ConvAE_100:
   static_params:
+    data:
+      data:
+        parcelations: 100
+        cache_file: data/ADNI_preprocessed_cache_100.pt
+    model:
+      name: ConvAE
+      kernel_size: 5
+      latent_dim: 32
+      hidden_dims: [32, 16]
+    training:
+      reproducibility:
+        deterministic: false
+  exp_params:
+    training:
+      reproducibility:
+        seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
+
+ConvVAE_400:
+  static_params:
+    data:
+      data:
+        parcelations: 400
+        cache_file: data/ADNI_preprocessed_cache_400.pt
     model:
       name: ConvVAE
+      kernel_size: 5
+      latent_dim: 32
+      hidden_dims: [32, 16]
     training:
       reproducibility:
         deterministic: false
+      loss_params:
+        beta: 0.5
   exp_params:
-    model:
-      latent_dim: [32, 16, 8, 4]
-      hidden_dims: [[32, 16], [32], [16]]
-      kernel_size: [3, 5]
     training:
       reproducibility:
         seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
+
+ConvVAE_100:
+  static_params:
+    data:
+      data:
+        parcelations: 100
+        cache_file: data/ADNI_preprocessed_cache_100.pt
+    model:
+      name: ConvVAE
+      kernel_size: 5
+      latent_dim: 32
+      hidden_dims: [32, 16]
+    training:
+      reproducibility:
+        deterministic: false
       loss_params:
-        beta: [1.0, 0.5]
+        beta: 0.5
+  exp_params:
+    training:
+      reproducibility:
+        seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
