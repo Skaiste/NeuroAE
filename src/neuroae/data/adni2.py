@@ -5,7 +5,7 @@ import h5py
 import numpy as np
 import scipy.io as sio
 
-from . import utils as _utils  # noqa: F401
+from .. import utils as _utils  # noqa: F401
 from DataLoaders.baseDataLoader import DataLoader
 
 

@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 
 from .. import utils as _utils  # noqa: F401
-from DataLoaders.HCP_Schaefer1000 import HCP as LibBrain_HCP
+from DataLoaders.HCP_Schaefer2018 import HCP as LibBrain_HCP
 
 
 class HCP(LibBrain_HCP):

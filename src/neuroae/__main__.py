@@ -23,7 +23,7 @@ from sklearn.preprocessing import StandardScaler
 
 from .utils import *
 from .utils.dict_utils import deepupdate
-from .data import load_adni, load_adni2, load_ebrains, load_hcp, prepare_data_loaders
+from .data import load_adni, load_adni2, load_adni3, load_ebrains, load_hcp, prepare_data_loaders
 from .models.old.pca import PCA, PCA_multi
 from training_tracker import TrainingResultsManager
 
@@ -140,6 +140,21 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
             counts = data_loader.get_subject_count()
             for group, count in counts.items():
                 print(f"  {group}: {count}")
+        elif data_type == 'ADNI3':
+            print(f"\nLoading ADNI3 dataset...")
+            data_loader = load_adni3(
+                data_dir=data_dir,
+                parcelation=parcelations,
+            )
+            CACHED_DATA = data_loader
+
+            print(f"\nDataset: ADNI3")
+            print(f"Number of ROIs: {data_loader.N()}")
+            print(f"TR: {data_loader.TR()} seconds")
+            print(f"\nSubject counts:")
+            counts = data_loader.get_subject_count()
+            for group, count in counts.items():
+                print(f"  {group}: {count}")
         elif data_type == "HCP":
             print(f"\nLoading HCP dataset...")
             data_loader = load_hcp(data_dir, parcelations=parcelations)
@@ -172,7 +187,7 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
                 print(f"  {group}: {count}")
         else:
             raise ValueError(
-                f"Data type '{data_type}' is invalid, available only 'ADNI', 'ADNI2', 'HCP', and 'EBRAINS'"
+                f"Data type '{data_type}' is invalid, available only 'ADNI', 'ADNI2', 'ADNI3', 'HCP', and 'EBRAINS'"
             )
     elif cache_mode != "load":
         data_loader = CACHED_DATA
