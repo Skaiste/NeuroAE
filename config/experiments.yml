@@ -27,12 +27,12 @@ default:
     #   tr: 3000
     #   type: BandPassFilter
   model:
-    freeze_encoder: false
-    reset_decoder: false
+    name: LAE
   training:
     num_epochs: 1000
     save_dir: ./models
     evaluation_scope: combined
+    pipeline: group_transfer_matrix
     vectorize_val_reference: false
     learning_rate: 1e-3
     weight_decay: 1e-4

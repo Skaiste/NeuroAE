@@ -23,7 +23,16 @@ from sklearn.preprocessing import StandardScaler
 
 from .utils import *
 from .utils.dict_utils import deepupdate
-from .data import load_adni, load_adni2, load_adni3, load_ebrains, load_hcp, prepare_data_loaders
+from .data import (
+    filter_dataset_by_labels,
+    load_adni,
+    load_adni2,
+    load_adni3,
+    load_ebrains,
+    load_hcp,
+    prepare_data_loaders,
+)
+from .data.utils import build_data_loader_result
 from .models.old.pca import PCA, PCA_multi
 from training_tracker import TrainingResultsManager
 
@@ -274,7 +283,112 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
     for split, num in loaders['num_samples'].items():
         print(f"    {split}: {num}")
 
+    loaders["group_names"] = list(data_config["data"].get("groups", group_defaults))
+
     return loaders
+
+
+def _get_training_pipeline(training_config):
+    training_section = training_config.get("training", {})
+    return str(training_section.get("pipeline", "standard"))
+
+
+def _validate_non_exp_pipeline_usage(mode, training_config):
+    pipeline = _get_training_pipeline(training_config)
+    if mode != "exp" and pipeline != "standard":
+        raise ValueError(f"training.pipeline={pipeline!r} is only supported in --mode exp.")
+
+
+def _validate_group_transfer_matrix_config(model_config):
+    supported_models = {"LAE", "VAE", "ConvAE", "ConvVAE", "MonaiAEKL"}
+    model_name = str(model_config["model"]["name"])
+    if model_name.endswith("PredHeads"):
+        raise ValueError("training.pipeline='group_transfer_matrix' does not support *PredHeads models.")
+    if model_name not in supported_models:
+        supported = ", ".join(sorted(supported_models))
+        raise ValueError(
+            "training.pipeline='group_transfer_matrix' only supports "
+            f"{supported}; got {model_name}."
+        )
+
+
+def _has_model_transfer_hooks(model):
+    return callable(getattr(model, "freeze_encoder", None)) and callable(getattr(model, "reset_decoder", None))
+
+
+def _resolve_transfer_groups(data_config, loaders):
+    configured_groups = data_config.get("data", {}).get("groups")
+    if configured_groups:
+        return list(configured_groups)
+    group_names = loaders.get("group_names")
+    if group_names:
+        return list(group_names)
+
+    labels = []
+    for split_name in ("train_loader", "val_loader", "test_loader"):
+        loader = loaders.get(split_name)
+        dataset = getattr(loader, "dataset", None)
+        if dataset is None:
+            continue
+        for label in getattr(dataset, "labels", []):
+            if label not in labels:
+                labels.append(label)
+    return labels
+
+
+def _build_group_transfer_loaders(loaders, group_name, training_config):
+    if "val_loader" not in loaders or "test_loader" not in loaders:
+        raise ValueError("group_transfer_matrix requires train, val, and test splits.")
+
+    filtered_train = filter_dataset_by_labels(loaders["train_loader"].dataset, [group_name])
+    filtered_val = filter_dataset_by_labels(loaders["val_loader"].dataset, [group_name])
+
+    if len(filtered_train) == 0 or len(filtered_val) == 0:
+        raise ValueError(
+            f"Group {group_name!r} has zero train or val samples after the shared split. "
+            "Adjust split ratios or group selection."
+        )
+
+    datasets = {
+        "train": filtered_train,
+        "val": filtered_val,
+        "test": loaders["test_loader"].dataset,
+    }
+    group_loaders = build_data_loader_result(
+        datasets=datasets,
+        batch_size=training_config["training"].get("batch_size", loaders["train_loader"].batch_size),
+        shuffle_train=True,
+        num_workers=training_config["training"].get("num_workers", loaders["train_loader"].num_workers),
+        random_seed=training_config["training"].get(
+            "reproducibility",
+            {},
+        ).get("seed", 42),
+        preserve_timepoints=loaders.get("preserve_timepoints", False),
+    )
+    group_loaders["group_names"] = list(loaders.get("group_names", []))
+    return group_loaders
+
+
+def _is_group_transfer_matrix_complete(metadata, tracker):
+    if not _has_evaluation_results(metadata):
+        return False
+    if metadata.get("pipeline_complete") is not True:
+        return False
+
+    transfer_groups = metadata.get("transfer_groups")
+    group_finetune_ids = metadata.get("group_finetune_ids")
+    if not isinstance(transfer_groups, list) or not isinstance(group_finetune_ids, dict):
+        return False
+
+    for group_name in transfer_groups:
+        child_experiment_id = group_finetune_ids.get(group_name)
+        if not child_experiment_id:
+            return False
+        try:
+            tracker.get_experiment(child_experiment_id)
+        except FileNotFoundError:
+            return False
+    return True
 
 
 def _build_training_summary(history, mse_pca, checkpoint_selection_metric="val_loss"):
@@ -568,7 +682,14 @@ def load_completed_experiment_signatures(results_dir):
         except FileNotFoundError:
             continue
 
-        if not _has_evaluation_results(metadata):
+        pipeline = metadata.get("pipeline", "standard")
+        transfer_stage = metadata.get("transfer_stage")
+        if pipeline == "group_transfer_matrix":
+            if transfer_stage not in (None, "general"):
+                continue
+            if not _is_group_transfer_matrix_complete(metadata, tracker):
+                continue
+        elif not _has_evaluation_results(metadata):
             continue
 
         signature = build_experiment_signature(
@@ -581,7 +702,18 @@ def load_completed_experiment_signatures(results_dir):
     return completed_signatures
 
 
-def run_training(model, model_name, latent_dim, loaders, training_config, model_config, data_config, device, results_dir):
+def run_training(
+    model,
+    model_name,
+    latent_dim,
+    loaders,
+    training_config,
+    model_config,
+    data_config,
+    device,
+    results_dir,
+    extra_metadata=None,
+):
     from .train import train_vae
 
     use_pred_heads = len(data_config['data'].get('use_bio_levels', [])) > 0
@@ -666,6 +798,8 @@ def run_training(model, model_name, latent_dim, loaders, training_config, model_
             'model_path': str(model_artifact),
         },
     }
+    if isinstance(extra_metadata, dict):
+        experiment_metadata.update(deepcopy(extra_metadata))
     tracked_experiment_id = tracker.register_experiment(
         metadata=experiment_metadata,
         history=history,
@@ -686,6 +820,7 @@ def run_evaluation(
     load_saved_model=True,
     dry_run=False,
     results_dir=None,
+    evaluation_scope_override=None,
 ):
     from .eval import eval_vae
 
@@ -718,7 +853,7 @@ def run_evaluation(
         model,
         loaders['test_loader'],
         pca=pca,
-        evaluation_scope=training_config["training"].get("evaluation_scope", "combined"),
+        evaluation_scope=evaluation_scope_override or training_config["training"].get("evaluation_scope", "combined"),
         device=device,
     )
 
@@ -744,7 +879,7 @@ def run_evaluation(
     return eval_metrics
 
 
-def run_experiment_pipeline(
+def run_standard_experiment_pipeline(
     data_dir,
     device,
     data_config,
@@ -754,17 +889,19 @@ def run_experiment_pipeline(
     num_workers=0,
     dry_run=False,
     results_dir=None,
+    loaders=None,
 ):
     if dry_run:
         training_config = deepcopy(training_config)
         training_config.setdefault("training", {})
         training_config["training"]["dry_run"] = True
     configure_reproducibility(data_config=data_config, training_config=training_config)
-    loaders = load_data_from_config(
-        data_dir=data_dir,
-        data_config=data_config,
-        num_workers=num_workers,
-    )
+    if loaders is None:
+        loaders = load_data_from_config(
+            data_dir=data_dir,
+            data_config=data_config,
+            num_workers=num_workers,
+        )
     input_dim = loaders['input_dim']
     timepoint_dim = loaders['timepoint_dim']
     model, model_name, latent_dim = load_model_from_config(
@@ -800,6 +937,198 @@ def run_experiment_pipeline(
         results_dir=results_dir,
     )
     return exp_id
+
+
+def run_group_transfer_matrix_pipeline(
+    data_dir,
+    device,
+    data_config,
+    model_config,
+    training_config,
+    delete_model_after_eval=True,
+    num_workers=0,
+    dry_run=False,
+    results_dir=None,
+):
+    training_config = deepcopy(training_config)
+    training_config.setdefault("training", {})
+    if dry_run:
+        training_config["training"]["dry_run"] = True
+
+    _validate_group_transfer_matrix_config(model_config)
+    configure_reproducibility(data_config=data_config, training_config=training_config)
+
+    loaders = load_data_from_config(
+        data_dir=data_dir,
+        data_config=data_config,
+        num_workers=num_workers,
+    )
+    transfer_groups = _resolve_transfer_groups(data_config, loaders)
+    if not transfer_groups:
+        raise ValueError("group_transfer_matrix requires at least one training group.")
+
+    input_dim = loaders["input_dim"]
+    timepoint_dim = loaders["timepoint_dim"]
+    general_model, model_name, latent_dim = load_model_from_config(
+        model_config=model_config,
+        data_config=data_config,
+        input_dim=input_dim,
+        timepoint_dim=timepoint_dim,
+        device=device,
+        preserve_timepoints=loaders.get("preserve_timepoints", False),
+    )
+    if not _has_model_transfer_hooks(general_model):
+        raise ValueError(f"Model {model_name} does not provide freeze_encoder/reset_decoder hooks.")
+
+    general_metadata = {
+        "pipeline": "group_transfer_matrix",
+        "transfer_stage": "general",
+        "transfer_groups": list(transfer_groups),
+        "group_finetune_ids": {},
+        "pipeline_complete": False,
+    }
+    general_experiment_id = run_training(
+        general_model,
+        model_name,
+        latent_dim,
+        loaders,
+        training_config,
+        model_config,
+        data_config,
+        device=device,
+        results_dir=results_dir,
+        extra_metadata=general_metadata,
+    )
+    general_eval_metrics = run_evaluation(
+        general_model,
+        latent_dim,
+        loaders,
+        training_config,
+        data_config,
+        device=device,
+        experiment_id=general_experiment_id,
+        delete_model_after_eval=False,
+        load_saved_model=not dry_run,
+        dry_run=dry_run,
+        results_dir=results_dir,
+        evaluation_scope_override="per_group",
+    )
+
+    if dry_run:
+        general_state_dict = deepcopy(general_model.state_dict())
+        general_model_path = None
+    else:
+        general_model_path = pathlib.Path(training_config["training"]["save_dir"]) / f"{general_experiment_id}_model.pt"
+        general_state_dict = torch.load(general_model_path, map_location=torch.device(device))
+
+    group_finetune_ids = {}
+    for group_name in transfer_groups:
+        print(f"Running transfer fine-tune for group: {group_name}")
+        group_loaders = _build_group_transfer_loaders(loaders, group_name, training_config)
+        transfer_model, _, _ = load_model_from_config(
+            model_config=model_config,
+            data_config=data_config,
+            input_dim=input_dim,
+            timepoint_dim=timepoint_dim,
+            device=device,
+            preserve_timepoints=group_loaders.get("preserve_timepoints", False),
+        )
+        transfer_model.load_state_dict(general_state_dict)
+        transfer_model.freeze_encoder()
+        transfer_model.reset_decoder()
+
+        child_metadata = {
+            "pipeline": "group_transfer_matrix",
+            "transfer_stage": "group_finetune",
+            "source_experiment_id": general_experiment_id,
+            "target_group": group_name,
+        }
+        child_experiment_id = run_training(
+            transfer_model,
+            model_name,
+            latent_dim,
+            group_loaders,
+            training_config,
+            model_config,
+            data_config,
+            device=device,
+            results_dir=results_dir,
+            extra_metadata=child_metadata,
+        )
+        run_evaluation(
+            transfer_model,
+            latent_dim,
+            group_loaders,
+            training_config,
+            data_config,
+            device=device,
+            experiment_id=child_experiment_id,
+            delete_model_after_eval=delete_model_after_eval,
+            load_saved_model=not dry_run,
+            dry_run=dry_run,
+            results_dir=results_dir,
+            evaluation_scope_override="per_group",
+        )
+        if not dry_run:
+            group_finetune_ids[group_name] = child_experiment_id
+
+    if not dry_run:
+        tracker = TrainingResultsManager(results_dir=results_dir)
+        tracker.update_experiment_metadata(
+            general_experiment_id,
+            {
+                "group_finetune_ids": group_finetune_ids,
+                "pipeline_complete": True,
+                "transfer_groups": list(transfer_groups),
+            },
+        )
+        if delete_model_after_eval and general_model_path is not None:
+            if general_model_path.exists():
+                general_model_path.unlink()
+                print(f"Deleted model artifact after transfer pipeline: {general_model_path}")
+            else:
+                print(f"Model artifact already missing, nothing to delete: {general_model_path}")
+
+    return general_experiment_id if not dry_run else general_eval_metrics
+
+
+def run_experiment_pipeline(
+    data_dir,
+    device,
+    data_config,
+    model_config,
+    training_config,
+    delete_model_after_eval=True,
+    num_workers=0,
+    dry_run=False,
+    results_dir=None,
+):
+    pipeline = _get_training_pipeline(training_config)
+    if pipeline == "standard":
+        return run_standard_experiment_pipeline(
+            data_dir=data_dir,
+            device=device,
+            data_config=data_config,
+            model_config=model_config,
+            training_config=training_config,
+            delete_model_after_eval=delete_model_after_eval,
+            num_workers=num_workers,
+            dry_run=dry_run,
+            results_dir=results_dir,
+        )
+    if pipeline == "group_transfer_matrix":
+        return run_group_transfer_matrix_pipeline(
+            data_dir=data_dir,
+            device=device,
+            data_config=data_config,
+            model_config=model_config,
+            training_config=training_config,
+            delete_model_after_eval=delete_model_after_eval,
+            num_workers=num_workers,
+            dry_run=dry_run,
+            results_dir=results_dir,
+        )
+    raise ValueError(f"Unsupported training.pipeline: {pipeline}")
 
 
 def main():
@@ -934,6 +1263,7 @@ def main():
         data_config = load_config(args.data_config)
         model_config = load_config(args.model_config)
         training_config = load_config(args.training_config)
+        _validate_non_exp_pipeline_usage("train", training_config)
         if args.dry_run:
             training_config.setdefault("training", {})
             training_config["training"]["dry_run"] = True
@@ -989,6 +1319,7 @@ def main():
 
         data_config = load_config(args.data_config)
         training_config = load_config(args.training_config)
+        _validate_non_exp_pipeline_usage("eval", training_config)
         configure_reproducibility(data_config=data_config, training_config=training_config)
         loaders = load_data_from_config(
             data_dir=args.data_dir,

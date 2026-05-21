@@ -53,6 +53,35 @@ def extract_timeseries_from_loader(data_loader, groups=None, bio_levels=None):
     return timeseries_list, bio_level_lists, subject_ids, labels
 
 
+def filter_dataset_by_labels(dataset, allowed_labels):
+    allowed = {str(label) for label in allowed_labels}
+    indices = [idx for idx, label in enumerate(getattr(dataset, "labels", [])) if str(label) in allowed]
+
+    filtered_bio_data = {
+        key: np.asarray(values)[indices]
+        for key, values in getattr(dataset, "bio_data", {}).items()
+    }
+    original_shape = getattr(dataset, "original_shape", None)
+    if original_shape is not None:
+        original_shape = tuple(original_shape)
+
+    return CachedDataset(
+        data=np.asarray(dataset.data)[indices],
+        labels=[dataset.labels[idx] for idx in indices],
+        subject_ids=[dataset.subject_ids[idx] for idx in indices],
+        bio_data=filtered_bio_data,
+        flatten=bool(getattr(dataset, "flatten", False)),
+        fc_input=bool(getattr(dataset, "fc_input", False)),
+        preserve_timepoints=bool(getattr(dataset, "preserve_timepoints", False)),
+        timepoint_dim=getattr(dataset, "timepoint_dim", None),
+        timepoints_as_samples=bool(getattr(dataset, "timepoints_as_samples", False)),
+        transpose=bool(getattr(dataset, "transpose", False)),
+        pad_features=bool(getattr(dataset, "pad_features", False)),
+        truncate_features=bool(getattr(dataset, "truncate_features", False)),
+        original_shape=original_shape,
+    )
+
+
 def resolve_split_path(split_path):
     if split_path is None:
         return None
@@ -140,6 +169,11 @@ def save_preprocessed_cache(cache_path, signature, datasets):
             "fc_input": bool(getattr(dataset, "fc_input", False)),
             "preserve_timepoints": bool(getattr(dataset, "preserve_timepoints", False)),
             "timepoint_dim": getattr(dataset, "timepoint_dim", None),
+            "timepoints_as_samples": bool(getattr(dataset, "timepoints_as_samples", False)),
+            "transpose": bool(getattr(dataset, "transpose", False)),
+            "pad_features": bool(getattr(dataset, "pad_features", False)),
+            "truncate_features": bool(getattr(dataset, "truncate_features", False)),
+            "original_shape": tuple(getattr(dataset, "original_shape", ()) or ()),
         }
     temp_cache_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
     try:
@@ -171,6 +205,9 @@ def load_preprocessed_cache(cache_path, expected_signature=None):
             timepoint_dim=split_payload.get("timepoint_dim"),
             timepoints_as_samples=split_payload.get("timepoints_as_samples", False),
             transpose=split_payload.get("transpose", False),
+            pad_features=split_payload.get("pad_features", False),
+            truncate_features=split_payload.get("truncate_features", False),
+            original_shape=split_payload.get("original_shape"),
         )
     return datasets
 

@@ -63,6 +63,14 @@ class LAE(ModelBase):
             loss["loss"] += swfcd_beta * swfcd["rmse"]
         return loss
 
+    def freeze_encoder(self):
+        for param in self.encoder.parameters():
+            param.requires_grad = False
+
+    def reset_decoder(self):
+        device = next(self.parameters()).device
+        self.decoder = nn.Linear(self.latent_dim, self.region_dim, bias=True).to(device)
+
 
 
 class LAEPredHeads(LAE):

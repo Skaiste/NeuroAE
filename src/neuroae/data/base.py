@@ -265,6 +265,9 @@ class CachedDataset(Dataset):
         timepoint_dim=None,
         timepoints_as_samples=False,
         transpose=False,
+        pad_features=False,
+        truncate_features=False,
+        original_shape=None,
     ):
         self.data = np.asarray(data, dtype=np.float32)
         self.labels = labels if labels is not None else [None] * len(self.data)
@@ -278,7 +281,12 @@ class CachedDataset(Dataset):
         self.transpose = transpose
         self.preserve_timepoints = preserve_timepoints
         self.timepoint_dim = timepoint_dim
-        self.original_shape = self.data[0].shape if len(self.data) > 0 else None
+        self.pad_features = bool(pad_features)
+        self.truncate_features = bool(truncate_features)
+        if original_shape is None:
+            self.original_shape = self.data[0].shape if len(self.data) > 0 else None
+        else:
+            self.original_shape = tuple(original_shape)
 
     def __len__(self):
         return len(self.data)

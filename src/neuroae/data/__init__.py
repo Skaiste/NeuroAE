@@ -4,4 +4,4 @@ from .adni3 import ADNI3Loader, load_adni3
 from .base import BaseTimeseriesDataset, BioLevelDataset, CachedDataset
 from .ebrains import EBRAINSBOLDLoader, load_ebrains, load_ebrains_bold
 from .hcp import HCP, load_hcp
-from .utils import extract_timeseries_from_loader, prepare_data_loaders
+from .utils import extract_timeseries_from_loader, filter_dataset_by_labels, prepare_data_loaders
