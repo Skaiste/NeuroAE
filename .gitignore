@@ -211,6 +211,7 @@ models/
 models_*/
 !src/neuroae/models/
 !src/neuroae/models/archive/
+!src/neuroae/data/
 checkpoints/
 results/
 results_*/

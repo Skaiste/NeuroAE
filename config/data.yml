@@ -1,12 +1,12 @@
 data:
   type: ADNI
-  parcelations: 100
   batch_size: 32
-  cache_file: data/ADNI0_preprocessed_cache_400.pt
-  cache_mode: create
+  parcelations: 400
+  cache_file: data/ADNI_preprocessed_cache_400.pt
+  cache_mode: none
   fc_input: false
   flatten: false
-  normalize: false
+  normalize: true
   pad_features: false
   preserve_timepoints: false
   random_seed: 42
@@ -17,8 +17,8 @@ filter:
   apply_demean: true
   apply_detrend: true
   apply_finalDetrend: false
-  fhi: 0.008
-  flp: 0.001
+  fhi: 0.08
+  flp: 0.008
   k: 2
   remove_artifacts: true
   tr: 3000

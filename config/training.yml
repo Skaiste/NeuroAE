@@ -5,6 +5,7 @@ training:
   convergence_warmup_epochs: 10
   evaluation_scope: combined
   learning_rate: 0.001
+  pipeline: standard
   loss_params:
     loss_per_feature: true
     pred_heads_delta: 0

@@ -1,11 +1,11 @@
 default:
   data:
     data:
-      type: ADNI2
+      type: ADNI3
       batch_size: 32
       random_seed: 42
-      parcelations: 400
-      cache_file: data/ADNI_preprocessed_cache_400.pt
+      parcellation_type: Glasser
+      cache_file: data/ADNI_preprocessed_cache_Glasser.pt
       cache_mode: load
       normalize: true
       transpose: true
@@ -32,7 +32,7 @@ default:
     num_epochs: 1000
     save_dir: ./models
     evaluation_scope: combined
-    pipeline: group_transfer_matrix
+    pipeline: standard
     vectorize_val_reference: false
     learning_rate: 1e-3
     weight_decay: 1e-4

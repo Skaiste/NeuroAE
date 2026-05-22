@@ -127,7 +127,14 @@ def resolve_results_dir(project_root, results_dir_arg):
 def load_data_from_config(data_dir, data_config, num_workers=0):
     global CACHED_DATA
     data_type = data_config['data'].get("type", 'ADNI')
-    parcelations = int(data_config["data"].get("parcelations", 100))
+    parcellation_type = data_config["data"].get(
+        "parcellation_type",
+        data_config["data"].get("parcelation_type"),
+    )
+    merge_groups = bool(data_config["data"].get("merge_groups", True))
+    raw_parcelations = data_config["data"].get("parcelations")
+    parcelations = int(raw_parcelations) if raw_parcelations is not None else None
+    default_parcelations = parcelations if parcelations is not None else 100
     cache_mode = data_config['data'].get('cache_mode', 'none')
     cache_file = data_config['data'].get('cache_file')
 
@@ -151,7 +158,7 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
             print(f"\nLoading ADNI2 dataset...")
             data_loader = load_adni2(
                 data_dir=data_dir,
-                parcelation=parcelations,
+                parcelation=default_parcelations,
             )
             CACHED_DATA = data_loader
 
@@ -167,10 +174,14 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
             data_loader = load_adni3(
                 data_dir=data_dir,
                 parcelation=parcelations,
+                parcellation_type=parcellation_type,
+                merge_groups=merge_groups,
             )
             CACHED_DATA = data_loader
 
             print(f"\nDataset: ADNI3")
+            print(f"Parcellation: {data_loader.parcellation}")
+            print(f"Merged groups: {data_loader.merge_groups}")
             print(f"Number of ROIs: {data_loader.N()}")
             print(f"TR: {data_loader.TR()} seconds")
             print(f"\nSubject counts:")
@@ -179,7 +190,7 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
                 print(f"  {group}: {count}")
         elif data_type == "HCP":
             print(f"\nLoading HCP dataset...")
-            data_loader = load_hcp(data_dir, parcelations=parcelations)
+            data_loader = load_hcp(data_dir, parcelations=default_parcelations)
             CACHED_DATA = data_loader
 
             # Print dataset information
@@ -195,7 +206,7 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
             data_loader = load_ebrains(
                 data_dir=data_dir,
                 tr=data_config["data"].get("tr", 2.25),
-                parcelations=parcelations,
+                parcelations=default_parcelations,
             )
             CACHED_DATA = data_loader
 
@@ -1493,6 +1504,11 @@ def main():
                         'attention_levels' in mc['model'] and
                         (len(mc['model']['num_res_blocks']) != len(mc['model']['hidden_dims']) or
                          len(mc['model']['num_res_blocks']) != len(mc['model']['attention_levels']))):
+                    continue
+
+                # skip if data filter lower and upper band is the same
+                if ('filter' in mc['data'] and
+                        mc['data']['filter']['flp'] == mc['data']['filter']['fhi']):
                     continue
 
                 print(f"Running experiment {i}/{total_experiments}...")
