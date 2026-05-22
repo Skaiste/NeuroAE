@@ -55,8 +55,8 @@ LAE:
   exp_params:
     data:
       filter:
-        fhi: [0.001, 0.008, 0.01]
-        flp: [0.08, 0.1, 0.01]
+        flp: [0.001, 0.008, 0.01]
+        fhi: [0.08, 0.1, 0.01]
     training:
       reproducibility:
         seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
