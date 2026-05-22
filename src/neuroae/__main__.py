@@ -1507,8 +1507,8 @@ def main():
                     continue
 
                 # skip if data filter lower and upper band is the same
-                if ('filter' in dc['data'] and
-                        dc['data']['filter']['flp'] == dc['data']['filter']['fhi']):
+                if ('filter' in dc and
+                        dc['filter']['flp'] == dc['filter']['fhi']):
                     continue
 
                 print(f"Running experiment {i}/{total_experiments}...")
