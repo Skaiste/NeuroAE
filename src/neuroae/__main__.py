@@ -111,6 +111,19 @@ def load_config(config_path):
     return _normalize_numeric_values(conf)
 
 
+def resolve_results_dir(project_root, results_dir_arg):
+    candidate = pathlib.Path(results_dir_arg)
+    if not candidate.is_absolute():
+        candidate = project_root / candidate
+
+    nested_results = candidate / "results"
+    if not (candidate / "index.jsonl").exists() and (nested_results / "index.jsonl").exists():
+        print(f"Resolved results directory from {candidate} to nested results root {nested_results}")
+        return nested_results
+
+    return candidate
+
+
 def load_data_from_config(data_dir, data_config, num_workers=0):
     global CACHED_DATA
     data_type = data_config['data'].get("type", 'ADNI')
@@ -1211,7 +1224,7 @@ def main():
         '--results-dir-name',
         type=str,
         default='results',
-        help='Name of the results directory under the project root (default: results).'
+        help='Results directory path/name. Accepts either a results root or a parent containing results/ (default: results).'
     )
     parser.add_argument(
         '--dry-run',
@@ -1221,7 +1234,7 @@ def main():
     )
     
     args = parser.parse_args()
-    results_dir = project_path / args.results_dir_name
+    results_dir = resolve_results_dir(project_path, args.results_dir_name)
     if args.num_parallel_experiments < 1:
         parser.error('--num-parallel-experiments must be >= 1')
     if args.num_workers < 0:
@@ -1232,6 +1245,7 @@ def main():
     print("=" * 60)
     print("ADNI-B VAE")
     print("=" * 60)
+    print(f"Results directory: {results_dir}")
     # Mode-specific actions
     if args.mode == 'load':
         # Just load and display data
@@ -1469,6 +1483,7 @@ def main():
 
         max_workers = min(args.num_parallel_experiments, total_experiments)
         if max_workers == 1:
+            failed = []
             for i, (dc, mc, tc) in enumerate(experiment_specs, start=1):
 
                 # skip incompatible AutoencoderKL parameters
@@ -1481,17 +1496,25 @@ def main():
                     continue
 
                 print(f"Running experiment {i}/{total_experiments}...")
-                run_experiment_pipeline(
-                    data_dir=args.data_dir,
-                    device=args.device,
-                    data_config=dc,
-                    model_config=mc,
-                    training_config=tc,
-                    delete_model_after_eval=args.delete_model_after_eval,
-                    num_workers=args.num_workers,
-                    dry_run=args.dry_run,
-                    results_dir=results_dir,
-                )
+                try:
+                    exp_id = run_experiment_pipeline(
+                        data_dir=args.data_dir,
+                        device=args.device,
+                        data_config=dc,
+                        model_config=mc,
+                        training_config=tc,
+                        delete_model_after_eval=args.delete_model_after_eval,
+                        num_workers=args.num_workers,
+                        dry_run=args.dry_run,
+                        results_dir=results_dir,
+                    )
+                    print(f"Experiment {i}/{total_experiments} completed: {exp_id}")
+                except Exception as exc:
+                    failed.append((i, exc))
+                    print(f"Experiment {i}/{total_experiments} failed: {exc}")
+            if failed:
+                failed_indexes = ", ".join(str(idx) for idx, _ in failed)
+                raise RuntimeError(f"{len(failed)} experiment(s) failed: {failed_indexes}")
         else:
             if any(_get_reproducibility_settings(dc, tc)["enabled"] for dc, _, tc in experiment_specs):
                 raise ValueError(
