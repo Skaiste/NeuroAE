@@ -13,6 +13,14 @@ default:
       timepoints_as_samples: false
       fc_input: false
       preserve_timepoints: false
+    filter:
+      apply_demean: true
+      apply_detrend: true
+      apply_finalDetrend: false
+      k: 2
+      remove_artifacts: true
+      tr: 3000
+      type: BandPassFilter
   model:
     name: LAE
   training:
