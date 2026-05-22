@@ -36,8 +36,8 @@ from .data.utils import build_data_loader_result
 from .models.old.pca import PCA, PCA_multi
 from training_tracker import TrainingResultsManager
 
-CACHED_DATA = None
-CACHED_FILTER = None
+CACHED_DATA = {}
+CACHED_FILTER = {}
 
 
 def _get_reproducibility_settings(data_config=None, training_config=None):
@@ -124,6 +124,32 @@ def resolve_results_dir(project_root, results_dir_arg):
     return candidate
 
 
+def _build_data_cache_key(data_config):
+    data_section = deepcopy(data_config.get("data", {}))
+    key_fields = {
+        "type": data_section.get("type", "ADNI"),
+        "parcellation_type": data_section.get(
+            "parcellation_type",
+            data_section.get("parcelation_type"),
+        ),
+        "merge_groups": bool(data_section.get("merge_groups", True)),
+        "parcelations": data_section.get("parcelations"),
+        "tr": data_section.get("tr"),
+    }
+    return json.dumps(key_fields, sort_keys=True, default=str)
+
+
+def _build_filter_cache_key(data_config, data_loader=None):
+    filter_config = deepcopy(data_config.get("filter"))
+    if not filter_config or filter_config.get("type") != "BandPassFilter":
+        return None
+
+    key_fields = {"filter": filter_config}
+    if data_loader is not None:
+        key_fields["loader_tr_ms"] = data_loader.TR() * 1000
+    return json.dumps(key_fields, sort_keys=True, default=str)
+
+
 def load_data_from_config(data_dir, data_config, num_workers=0):
     global CACHED_DATA
     data_type = data_config['data'].get("type", 'ADNI')
@@ -139,12 +165,13 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
     cache_file = data_config['data'].get('cache_file')
 
     data_loader = None
-    if cache_mode != "load" and CACHED_DATA is None:
+    data_cache_key = _build_data_cache_key(data_config)
+    if cache_mode != "load" and data_cache_key not in CACHED_DATA:
         if data_type == 'ADNI':
             # Load ADNI data
             print(f"\nLoading ADNI-B dataset...")
             data_loader = load_adni(data_dir=data_dir)
-            CACHED_DATA = data_loader
+            CACHED_DATA[data_cache_key] = data_loader
 
             # Print dataset information
             print(f"\nDataset: ADNI-B")
@@ -160,7 +187,7 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
                 data_dir=data_dir,
                 parcelation=default_parcelations,
             )
-            CACHED_DATA = data_loader
+            CACHED_DATA[data_cache_key] = data_loader
 
             print(f"\nDataset: ADNI2")
             print(f"Number of ROIs: {data_loader.N()}")
@@ -177,7 +204,7 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
                 parcellation_type=parcellation_type,
                 merge_groups=merge_groups,
             )
-            CACHED_DATA = data_loader
+            CACHED_DATA[data_cache_key] = data_loader
 
             print(f"\nDataset: ADNI3")
             print(f"Parcellation: {data_loader.parcellation}")
@@ -191,7 +218,7 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
         elif data_type == "HCP":
             print(f"\nLoading HCP dataset...")
             data_loader = load_hcp(data_dir, parcelations=default_parcelations)
-            CACHED_DATA = data_loader
+            CACHED_DATA[data_cache_key] = data_loader
 
             # Print dataset information
             print(f"\nDataset: HCP")
@@ -208,7 +235,7 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
                 tr=data_config["data"].get("tr", 2.25),
                 parcelations=default_parcelations,
             )
-            CACHED_DATA = data_loader
+            CACHED_DATA[data_cache_key] = data_loader
 
             # Print dataset information
             print(f"\nDataset: EBRAINS")
@@ -223,7 +250,7 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
                 f"Data type '{data_type}' is invalid, available only 'ADNI', 'ADNI2', 'ADNI3', 'HCP', and 'EBRAINS'"
             )
     elif cache_mode != "load":
-        data_loader = CACHED_DATA
+        data_loader = CACHED_DATA[data_cache_key]
     else:
         print(f"\nLoading preprocessed data cache from {cache_file}...")
 
@@ -246,24 +273,26 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
         )
     elif cache_mode == "load":
         filter = None
-    elif CACHED_FILTER is None and 'filter' in data_config and data_config['filter']['type'] == 'BandPassFilter':
-        filter_config = data_config['filter']
-        tr = data_loader.TR() * 1000
-        filter = BandPassFilter(
-            tr=tr,
-            flp=filter_config['flp'],
-            fhi=filter_config['fhi'],
-            k=filter_config['k'],
-            remove_artifacts=filter_config['remove_artifacts'],
-            apply_demean=filter_config['apply_demean'],
-            apply_detrend=filter_config['apply_detrend'],
-            apply_finalDetrend=filter_config['apply_finalDetrend'],
-        )
-        CACHED_FILTER = filter
-    elif CACHED_FILTER is not None:
-        filter = CACHED_FILTER
     else:
-        filter = None
+        filter_cache_key = _build_filter_cache_key(data_config, data_loader=data_loader)
+        if filter_cache_key is None:
+            filter = None
+        elif filter_cache_key not in CACHED_FILTER:
+            filter_config = data_config['filter']
+            tr = data_loader.TR() * 1000
+            filter = BandPassFilter(
+                tr=tr,
+                flp=filter_config['flp'],
+                fhi=filter_config['fhi'],
+                k=filter_config['k'],
+                remove_artifacts=filter_config['remove_artifacts'],
+                apply_demean=filter_config['apply_demean'],
+                apply_detrend=filter_config['apply_detrend'],
+                apply_finalDetrend=filter_config['apply_finalDetrend'],
+            )
+            CACHED_FILTER[filter_cache_key] = filter
+        else:
+            filter = CACHED_FILTER[filter_cache_key]
 
 
     # Prepare PyTorch DataLoaders
