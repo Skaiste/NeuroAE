@@ -98,6 +98,19 @@ class TrainingResultsManager:
 
         return read_json(self._resolve_from_base(history_path))
 
+    def update_experiment_metadata(self, experiment_id: str, updates: dict) -> None:
+        if not isinstance(updates, dict):
+            raise TypeError("updates must be a dict.")
+
+        index_entry = find_index_entry(self.index_path, experiment_id)
+        if index_entry is None:
+            raise FileNotFoundError(f"Experiment not found in index: {experiment_id}")
+
+        metadata_path = self._resolve_from_base(index_entry["metadata_path"])
+        metadata = read_json(metadata_path)
+        metadata.update(deepcopy(updates))
+        write_json_atomic(metadata_path, metadata)
+
     def set_evaluation_metrics(
         self,
         experiment_id: str,

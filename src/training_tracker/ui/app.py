@@ -210,6 +210,7 @@ def _build_compare_labels(selected_rows: list[dict]) -> list[str]:
     """
     fields = [
         ("model_type", "model"),
+        ("target_group", "target_group"),
         ("latent_dim", "latent"),
         ("model_hidden_dim", "hidden"),
         ("training_beta", "beta"),
@@ -263,6 +264,7 @@ def _build_compare_param_details(selected_rows: list[dict]) -> list[str]:
     """Build hover details from varying parameters across selected experiments."""
     fields = [
         ("model_type", "model"),
+        ("target_group", "target_group"),
         ("latent_dim", "latent"),
         ("model_hidden_dim", "hidden"),
         ("training_beta", "beta"),
@@ -325,7 +327,7 @@ def _extract_group_metric_rows(groups_payload: dict | None) -> pd.DataFrame:
 
     metric_specs = [
         ("mse", "MSE"),
-        ("fc_preservation", "FC Preservation"),
+        ("fc_preservation", "FC Pearson"),
         ("silhouette", "Silhouette"),
         ("logreg_accuracy", "LogReg Accuracy"),
         ("swfcd_pearson", "SWFCD Pearson"),
@@ -536,9 +538,15 @@ def _attach_significance(
         model_params = metadata.get("model_params", {}) if isinstance(metadata, dict) else {}
         training_params = metadata.get("training_params", {}) if isinstance(metadata, dict) else {}
         data_params = metadata.get("data_params", {}) if isinstance(metadata, dict) else {}
+        experiment_params = {}
+        if isinstance(metadata, dict):
+            if metadata.get("target_group") is not None:
+                experiment_params["target_group"] = metadata.get("target_group")
         row_copy["_model_params"] = model_params if isinstance(model_params, dict) else {}
         row_copy["_training_params"] = training_params if isinstance(training_params, dict) else {}
         row_copy["_data_params"] = data_params if isinstance(data_params, dict) else {}
+        row_copy["_experiment_params"] = experiment_params
+        row_copy["target_group"] = experiment_params.get("target_group")
         significance = _to_float(metadata.get("summary", {}).get("significance"))
         row_copy["significance"] = significance
         evaluation = metadata.get("evaluation", {}) if isinstance(metadata, dict) else {}
@@ -827,12 +835,15 @@ def _parameter_options_for_model_type(model_type: str, rows: list[dict]) -> dict
         model_params = row.get("_model_params")
         training_params = row.get("_training_params")
         data_params = row.get("_data_params")
+        experiment_params = row.get("_experiment_params")
         if isinstance(model_params, dict):
             paths |= {("model",) + path for path in _collect_leaf_paths_from_dict(model_params)}
         if isinstance(training_params, dict):
             paths |= {("training",) + path for path in _collect_leaf_paths_from_dict(training_params)}
         if isinstance(data_params, dict):
             paths |= {("data",) + path for path in _collect_leaf_paths_from_dict(data_params)}
+        if isinstance(experiment_params, dict):
+            paths |= {("experiment",) + path for path in _collect_leaf_paths_from_dict(experiment_params)}
 
     options: dict[str, str] = {}
     for path in sorted(paths):
@@ -860,12 +871,15 @@ def _parameter_options_for_rows(
         model_params = row.get("_model_params")
         training_params = row.get("_training_params")
         data_params = row.get("_data_params")
+        experiment_params = row.get("_experiment_params")
         if isinstance(model_params, dict):
             paths |= {("model",) + path for path in _collect_leaf_paths_from_dict(model_params)}
         if isinstance(training_params, dict):
             paths |= {("training",) + path for path in _collect_leaf_paths_from_dict(training_params)}
         if isinstance(data_params, dict):
             paths |= {("data",) + path for path in _collect_leaf_paths_from_dict(data_params)}
+        if isinstance(experiment_params, dict):
+            paths |= {("experiment",) + path for path in _collect_leaf_paths_from_dict(experiment_params)}
 
     options: dict[str, str] = {}
     for path in sorted(paths):
@@ -902,6 +916,8 @@ def _get_param_value_from_row(row: dict, path: tuple[str, ...]):
         current = row.get("_training_params")
     elif root == "data":
         current = row.get("_data_params")
+    elif root == "experiment":
+        current = row.get("_experiment_params")
     else:
         return None
 
@@ -1004,7 +1020,7 @@ def _build_compare_markdown_table(
 ) -> str:
     headers = ["Experiment"]
     if include_fc:
-        headers.append("FC Preservation")
+        headers.append("FC Pearson")
     headers.extend(["LogReg Accuracy", "SWFCD Pearson"])
     lines = [
         "| " + " | ".join(headers) + " |",
@@ -1036,7 +1052,7 @@ def _build_parameter_compare_markdown_table(
 ) -> str:
     headers = ["Parameter value"]
     if include_fc:
-        headers.append("FC Preservation")
+        headers.append("FC Pearson")
     headers.extend(["LogReg Accuracy", "SWFCD Pearson"])
     lines = [
         "| " + " | ".join(headers) + " |",
@@ -1106,7 +1122,7 @@ def _build_parameter_compare_boxplot_spec(
 ) -> str:
     metric_specs = []
     if include_fc:
-        metric_specs.append(("test_fc_preservation", "FC Preservation"))
+        metric_specs.append(("test_fc_preservation", "FC Pearson"))
     metric_specs.extend([
         ("test_logreg_accuracy", "LogReg Accuracy"),
         ("test_swfcd_pearson", "SWFCD Pearson"),
@@ -1153,7 +1169,7 @@ def _build_parameter_compare_boxplot_spec(
 
 def _build_model_compare_boxplot_spec(grouped: dict[str, dict[str, list[float]]]) -> str:
     metric_specs = [
-        ("test_fc_preservation", "FC Preservation"),
+        ("test_fc_preservation", "FC Pearson"),
         ("test_logreg_accuracy", "LogReg Accuracy"),
         ("test_swfcd_pearson", "SWFCD Pearson"),
     ]
@@ -1203,7 +1219,7 @@ def _build_raincloud_spec(
 ) -> dict[str, object]:
     metric_specs: list[tuple[str, str]] = []
     if include_fc:
-        metric_specs.append(("test_fc_preservation", "FC Preservation"))
+        metric_specs.append(("test_fc_preservation", "FC Pearson"))
     metric_specs.extend([
         ("test_logreg_accuracy", "LogReg Accuracy"),
         ("test_swfcd_pearson", "SWFCD Pearson"),
@@ -1224,6 +1240,7 @@ def _build_raincloud_spec(
 
     return {
         "type": "raincloud",
+        "facetByLabel": True,
         "labels": [metric_title for _, metric_title in metric_specs],
         "series": series,
     }
@@ -1304,11 +1321,11 @@ def _style_pvalue_matrix(matrix_df: pd.DataFrame):
 def _render_pvalue_matrices(grouped: dict[str, dict[str, list[float]]]) -> None:
     st.markdown("**P-value Matrices**")
     metric_specs = [
-        ("test_fc_preservation", "FC Preservation"),
+        ("test_fc_preservation", "FC Pearson"),
         ("test_logreg_accuracy", "LogReg Accuracy"),
         ("test_swfcd_pearson", "SWFCD Pearson"),
     ]
-    row_cols = st.columns(3)
+    row_cols = st.columns(len(metric_specs))
     for col, (metric_key, metric_title) in zip(row_cols, metric_specs):
         with col:
             st.markdown(f"**{metric_title}**")
@@ -1630,7 +1647,7 @@ def main() -> None:
             return
 
         metric_specs = [
-            ("test_fc_preservation", "FC Preservation"),
+            ("test_fc_preservation", "FC Pearson"),
             ("test_logreg_accuracy", "LogReg Accuracy"),
             ("test_swfcd_pearson", "SWFCD Pearson"),
             ("test_mse", "MSE"),
@@ -1697,7 +1714,7 @@ def main() -> None:
         export_cols = st.columns([1, 1.2])
         with export_cols[1]:
             exclude_fc = st.checkbox(
-                "Exclude FC preservation",
+                "Exclude FC Pearson",
                 value=False,
                 key="compare_exclude_fc",
             )
@@ -1721,6 +1738,8 @@ def main() -> None:
     elif active_view == "Model Parameters":
         st.subheader("Model Parameters")
         filter_col, charts_col = st.columns([1, 3], gap="large")
+        param_compare_grouped = None
+        param_compare_display_grouped = None
 
         with filter_col:
             st.markdown("**Filters**")
@@ -1850,7 +1869,7 @@ def main() -> None:
 
             metric_specs = [
                 ("test_mse", "MSE"),
-                ("test_fc_preservation", "FC Preservation"),
+                ("test_fc_preservation", "FC Pearson"),
                 ("test_swfcd_pearson", "SWFCD Pearson"),
                 ("test_logreg_accuracy", "LogReg Accuracy"),
             ]
@@ -1928,19 +1947,23 @@ def main() -> None:
                                 use_container_width=True,
                             )
 
-            _render_pvalue_matrices(display_grouped)
+            param_compare_grouped = grouped
+            param_compare_display_grouped = display_grouped
+
+        if param_compare_grouped is not None and param_compare_display_grouped is not None:
+            _render_pvalue_matrices(param_compare_display_grouped)
             st.markdown("---")
             export_cols = st.columns([1, 1, 1, 1.2])
             with export_cols[3]:
                 exclude_fc = st.checkbox(
-                    "Exclude FC preservation",
+                    "Exclude FC Pearson",
                     value=False,
                     key="param_compare_exclude_fc",
                 )
             with export_cols[2]:
                 if st.button("Save Raincloud plot spec", key="param_compare_save_raincloud"):
                     output_path = _save_raincloud_spec(
-                        display_grouped,
+                        param_compare_display_grouped,
                         results_dir=results_dir,
                         tab_name="model_parameters",
                         include_fc=not exclude_fc,
@@ -1949,7 +1972,7 @@ def main() -> None:
             with export_cols[0]:
                 if st.button("Copy as markdown table", key="param_compare_copy_markdown"):
                     markdown_table = _build_parameter_compare_markdown_table(
-                        grouped,
+                        param_compare_grouped,
                         include_fc=not exclude_fc,
                     )
                     components.html(
@@ -1965,7 +1988,7 @@ def main() -> None:
             with export_cols[1]:
                 if st.button("Copy boxplot spec", key="param_compare_copy_boxplot_spec"):
                     boxplot_spec = _build_parameter_compare_boxplot_spec(
-                        grouped,
+                        param_compare_grouped,
                         include_fc=not exclude_fc,
                     )
                     components.html(
@@ -1982,6 +2005,8 @@ def main() -> None:
     elif active_view == "Parameter Comparison":
         st.subheader("Parameter Comparison")
         filter_col, charts_col = st.columns([1, 3], gap="large")
+        allparam_compare_grouped = None
+        allparam_compare_display_grouped = None
 
         with filter_col:
             st.markdown("**Filters**")
@@ -2097,7 +2122,7 @@ def main() -> None:
 
             metric_specs = [
                 ("test_mse", "MSE"),
-                ("test_fc_preservation", "FC Preservation"),
+                ("test_fc_preservation", "FC Pearson"),
                 ("test_swfcd_pearson", "SWFCD Pearson"),
                 ("test_logreg_accuracy", "LogReg Accuracy"),
             ]
@@ -2174,19 +2199,23 @@ def main() -> None:
                                 use_container_width=True,
                             )
 
-            _render_pvalue_matrices(display_grouped)
+            allparam_compare_grouped = grouped
+            allparam_compare_display_grouped = display_grouped
+
+        if allparam_compare_grouped is not None and allparam_compare_display_grouped is not None:
+            _render_pvalue_matrices(allparam_compare_display_grouped)
             st.markdown("---")
             export_cols = st.columns([1, 1, 1, 1.2])
             with export_cols[3]:
                 exclude_fc = st.checkbox(
-                    "Exclude FC preservation",
+                    "Exclude FC Pearson",
                     value=False,
                     key="allparam_compare_exclude_fc",
                 )
             with export_cols[2]:
                 if st.button("Save Raincloud plot spec", key="allparam_compare_save_raincloud"):
                     output_path = _save_raincloud_spec(
-                        display_grouped,
+                        allparam_compare_display_grouped,
                         results_dir=results_dir,
                         tab_name="parameter_comparison",
                         include_fc=not exclude_fc,
@@ -2195,7 +2224,7 @@ def main() -> None:
             with export_cols[0]:
                 if st.button("Copy as markdown table", key="allparam_compare_copy_markdown"):
                     markdown_table = _build_parameter_compare_markdown_table(
-                        grouped,
+                        allparam_compare_grouped,
                         include_fc=not exclude_fc,
                     )
                     components.html(
@@ -2211,7 +2240,7 @@ def main() -> None:
             with export_cols[1]:
                 if st.button("Copy boxplot spec", key="allparam_compare_copy_boxplot_spec"):
                     boxplot_spec = _build_parameter_compare_boxplot_spec(
-                        grouped,
+                        allparam_compare_grouped,
                         include_fc=not exclude_fc,
                     )
                     components.html(
@@ -2245,6 +2274,13 @@ def main() -> None:
             st.markdown("**FC input**")
             fc_input_true = st.checkbox("True", value=False, key="modelf_fc_input_true")
             fc_input_false = st.checkbox("False", value=False, key="modelf_fc_input_false")
+        model_options = sorted({str(row.get("model_type", "unknown")) for row in rows})
+        excluded_models = st.multiselect(
+            "Exclude models",
+            options=model_options,
+            default=[],
+            key="modelf_excluded_models",
+        )
 
         filtered_model_rows = [
             row for row in rows
@@ -2252,13 +2288,14 @@ def main() -> None:
             and _bool_match(bool(row.get("data_transpose", False)), transpose_true, transpose_false)
             and _bool_match(bool(row.get("data_timepoints_as_samples", False)), tas_true, tas_false)
             and _bool_match(bool(row.get("data_fc_input", False)), fc_input_true, fc_input_false)
+            and str(row.get("model_type", "unknown")) not in excluded_models
         ]
         if not filtered_model_rows:
-            st.info("No experiments match the selected data filters.")
+            st.info("No experiments match the selected data/model filters.")
             return
 
         metric_specs = [
-            ("test_fc_preservation", "FC Preservation"),
+            ("test_fc_preservation", "FC Pearson"),
             ("test_logreg_accuracy", "LogReg Accuracy"),
             ("test_swfcd_pearson", "SWFCD Pearson"),
             ("test_mse", "MSE"),
@@ -2354,7 +2391,7 @@ def main() -> None:
     elif active_view == "Data Comparison":
         st.subheader("Data Comparison")
         metric_specs = [
-            ("test_fc_preservation", "FC Preservation"),
+            ("test_fc_preservation", "FC Pearson"),
             ("test_logreg_accuracy", "LogReg Accuracy"),
             ("test_swfcd_pearson", "SWFCD Pearson"),
             ("test_mse", "MSE"),
