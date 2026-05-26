@@ -1,0 +1,140 @@
+default:
+  data:
+    data:
+      type: ADNI3
+      batch_size: 32
+      cache_file: data/ADNI2_preprocessed_cache_400.pt
+      cache_mode: none
+      normalize: true
+      transpose: true
+      flatten: false
+      timepoints_as_samples: false
+      preserve_timepoints: false
+      random_seed: 42
+      parcelations: 400
+      parcellation_type: Schaefer
+      merge_groups: true
+      train_split: 0.7
+      val_split: 0.15
+      feature_cache_dir: data/neurocls_features
+      scale_features: true
+  model:
+    name: logreg
+    input_mode: raw_flat
+    max_iter: 1000
+    C: 1.0
+    solver: lbfgs
+    class_weight: balanced
+  training:
+    pipeline: standard
+    evaluation_scope: test
+    num_epochs: 1000
+    learning_rate: 0.001
+    weight_decay: 0.0001
+    save_dir: ./models
+    delete_model_after_eval: true
+    feature_scaler: standard
+    convergence_patience: 10
+    convergence_min_delta: 0.0001
+    convergence_warmup_epochs: 5
+    classifier_metric: macro_f1
+    reproducibility:
+      benchmark: false
+      deterministic: true
+      enabled: true
+      seed: 42
+      warn_only: false
+
+logreg_all:
+  static_params:
+    model:
+      name: logreg
+  exp_params:
+    model:
+      input_mode: [raw_flat, fc_flat]
+      max_iter: [500, 1000, 2000]
+      C: [0.01, 0.1, 1.0, 10.0, 100.0]
+      solver: [lbfgs, newton-cg, saga]
+      class_weight: [balanced, null]
+
+svm_all:
+  static_params:
+    model:
+      name: svm
+      probability: true
+  exp_params:
+    model:
+      input_mode: [raw_flat, fc_flat]
+      C: [0.1, 1.0, 10.0, 100.0]
+      kernel: [linear, rbf, poly, sigmoid]
+      gamma: [scale, auto]
+      class_weight: [balanced, null]
+
+xgboost_all:
+  static_params:
+    model:
+      name: xgboost
+  exp_params:
+    model:
+      input_mode: [raw_flat, fc_flat]
+      n_estimators: [100, 200, 400]
+      max_depth: [3, 4, 6, 8]
+      learning_rate: [0.01, 0.05, 0.1]
+      subsample: [0.7, 0.85, 1.0]
+      colsample_bytree: [0.7, 0.85, 1.0]
+      reg_lambda: [0.1, 1.0, 10.0]
+      random_state: [42, 100, 1007]
+
+mlp_all:
+  static_params:
+    model:
+      name: mlp
+  exp_params:
+    model:
+      input_mode: [raw_flat, fc_flat]
+      hidden_dims:
+        - [128, 64]
+        - [256, 64]
+        - [256, 128]
+        - [512, 128]
+      dropout: [0.0, 0.2, 0.4]
+    training:
+      batch_size: [16, 32]
+      num_epochs: [50, 100]
+      learning_rate: [0.0001, 0.001, 0.005]
+      weight_decay: [0.0, 0.0001]
+      convergence_patience: [5, 10]
+      convergence_min_delta: [0.0, 0.0001]
+      convergence_warmup_epochs: [0, 5]
+      classifier_metric: [macro_f1, balanced_accuracy]
+      reproducibility:
+        seed: [42, 1007]
+
+braingnn_all:
+  static_params:
+    model:
+      name: braingnn
+      input_mode: graph
+  exp_params:
+    model:
+      hidden_dims:
+        - [64, 32]
+        - [128, 64]
+        - [256, 128]
+      pool_ratios:
+        - [0.5, 0.5]
+        - [0.6, 0.5]
+        - [0.75, 0.5]
+      dropout: [0.0, 0.2, 0.4]
+      aux_loss_weight: [0.01, 0.1, 0.5]
+    training:
+      batch_size: [8, 16]
+      num_epochs: [50, 100]
+      learning_rate: [0.0001, 0.001, 0.005]
+      weight_decay: [0.0, 0.0001]
+      convergence_patience: [5, 10]
+      convergence_min_delta: [0.0, 0.0001]
+      convergence_warmup_epochs: [0, 5]
+      classifier_metric: [macro_f1, balanced_accuracy]
+      reproducibility:
+        seed: [42, 1007]

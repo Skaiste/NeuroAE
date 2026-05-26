@@ -1,0 +1,21 @@
+training:
+  pipeline: standard
+  evaluation_scope: test
+  num_epochs: 100
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  save_dir: ./models
+  delete_model_after_eval: true
+  feature_scaler: standard
+  log_level: INFO
+  log_every_epochs: 1
+  convergence_patience: 10
+  convergence_min_delta: 0.0001
+  convergence_warmup_epochs: 5
+  classifier_metric: macro_f1
+  reproducibility:
+    benchmark: false
+    deterministic: true
+    enabled: true
+    seed: 42
+    warn_only: false

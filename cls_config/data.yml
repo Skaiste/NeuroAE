@@ -1,0 +1,22 @@
+data:
+  type: ADNI3
+  batch_size: 32
+  cache_file: data/ADNI2_preprocessed_cache_400.pt
+  cache_mode: none
+  normalize: true
+  transpose: true
+  pad_features: false
+  truncate_features: false
+  flatten: false
+  timepoints_as_samples: false
+  preserve_timepoints: false
+  random_seed: 42
+  parcelations: 400
+  parcellation_type: Schaefer
+  merge_groups: true
+  train_split: 0.7
+  val_split: 0.15
+  feature_cache_dir: data/neurocls_features
+  scale_features: true
+  raw_feature_mode: raw_flat
+  fc_feature_mode: fc_flat
