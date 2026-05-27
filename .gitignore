@@ -212,6 +212,7 @@ models_*/
 !src/neuroae/models/
 !src/neuroae/models/archive/
 !src/neuroae/data/
+!src/neurocls/models/
 checkpoints/
 results/
 results_*/
