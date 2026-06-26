@@ -5,6 +5,7 @@ import itertools
 import json
 import logging
 import pathlib
+import sys
 from copy import deepcopy
 
 import numpy as np
@@ -48,6 +49,7 @@ def _configure_logging(training_config=None):
         logging.basicConfig(
             level=level,
             format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+            stream=sys.stdout,
         )
     root_logger.setLevel(level)
 
