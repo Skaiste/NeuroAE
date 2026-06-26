@@ -60,41 +60,26 @@ def _latest_experiment_id(results_dir):
     return rows[0]["experiment_id"]
 
 
-def _has_evaluation_results(metadata):
-    evaluation = metadata.get("evaluation")
-    if not isinstance(evaluation, dict):
-        return False
-    model_metrics = evaluation.get("model")
-    return isinstance(model_metrics, dict) and len(model_metrics) > 0
-
-
 def load_completed_experiment_signatures(results_dir):
     LOGGER.info("Loading already completed neurocls experiments from %s", results_dir)
     tracker = TrainingResultsManager(results_dir=results_dir)
+    entries = tracker.list_experiments()
+    needs_index_refresh = any(
+        "framework" not in entry or "signature" not in entry or "has_model_evaluation" not in entry
+        for entry in entries
+    )
+    if needs_index_refresh:
+        LOGGER.info("Rebuilding legacy results index to cache neurocls lookup fields")
+        tracker.rebuild_index()
+        entries = tracker.list_experiments()
+
     completed_signatures = set()
-    for entry in tracker.list_experiments():
-        experiment_id = entry.get("experiment_id")
-        if not experiment_id:
+    for entry in entries:
+        if entry.get("framework") != "neurocls" or not entry.get("has_model_evaluation"):
             continue
-        try:
-            metadata = tracker.get_experiment(experiment_id)
-        except FileNotFoundError:
-            continue
-
-        framework = metadata.get("framework")
-        is_neurocls = framework == "neurocls" or (
-            "feature_metadata" in metadata and "label_classes" in metadata
-        )
-        if not is_neurocls or not _has_evaluation_results(metadata):
-            continue
-
-        signature = build_signature(
-            metadata.get("model_type", "unknown"),
-            {"model": metadata.get("model_params", {})},
-            {"training": metadata.get("training_params", {})},
-            metadata.get("data_params", {}),
-        )
-        completed_signatures.add(signature)
+        signature = entry.get("signature")
+        if signature:
+            completed_signatures.add(signature)
     LOGGER.info("Loaded %d completed neurocls experiment signatures", len(completed_signatures))
     return completed_signatures
 
@@ -191,6 +176,7 @@ def _train_and_register(data_dir, data_config, model_config, training_config, de
             "experiment_id": experiment_id,
             "status": "completed",
             "framework": "neurocls",
+            "signature": build_signature(model_name, model_config, training_config, data_config),
             "model_type": model_name,
             "summary": build_experiment_summary(
                 train_metrics,
@@ -459,7 +445,6 @@ def main():
                     continue
                 seen_signatures.add(signature)
                 if not args.dry_run and signature in completed_signatures:
-                    LOGGER.info("Skipping completed experiment: set=%s signature=%s model=%s", set_name, signature, mc["model"]["name"])
                     skipped_completed += 1
                     continue
                 run_queue.append(
@@ -472,9 +457,12 @@ def main():
                     }
                 )
 
+        total_candidates = len(run_queue) + skipped_duplicates + skipped_completed
         LOGGER.info(
-            "Prepared experiment queue: runnable=%d skipped_duplicates=%d skipped_completed=%d",
+            "Prepared experiment queue: total=%d runnable=%d skipped=%d skipped_duplicates=%d skipped_completed=%d",
+            total_candidates,
             len(run_queue),
+            skipped_duplicates + skipped_completed,
             skipped_duplicates,
             skipped_completed,
         )
