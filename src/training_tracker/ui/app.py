@@ -6,6 +6,7 @@ import json
 import math
 import os
 from pathlib import Path
+from urllib.parse import quote, unquote
 
 import altair as alt
 import pandas as pd
@@ -119,6 +120,18 @@ def _first_existing(columns: list[str], candidates: list[str]) -> str | None:
     return None
 
 
+def _series_has_available_values(series: pd.Series) -> bool:
+    return any(_to_float(value) is not None for value in series.tolist())
+
+
+def _column_has_available_values(history_df: pd.DataFrame, column_name: str | None) -> bool:
+    return bool(
+        column_name
+        and column_name in history_df.columns
+        and _series_has_available_values(history_df[column_name])
+    )
+
+
 def _render_pair_plot(
     container,
     history_df: pd.DataFrame,
@@ -133,36 +146,39 @@ def _render_pair_plot(
 
     with container:
         st.markdown(f"**{title}**")
-        if train_col is None and val_col is None:
+        train_available = _column_has_available_values(history_df, train_col)
+        val_available = _column_has_available_values(history_df, val_col)
+        if not train_available and not val_available:
             st.info("Metric not available.")
             return
 
-        plot_cols = ["epoch"]
-        rename_map: dict[str, str] = {}
+        chart_df = pd.DataFrame({"epoch": history_df["epoch"]})
         colors: list[str] = []
-        if train_col is not None:
-            plot_cols.append(train_col)
-            rename_map[train_col] = "train"
+        if train_available and train_col is not None:
+            chart_df["train"] = history_df[train_col].map(_to_float)
             colors.append("#1f77b4")
-        if val_col is not None:
-            plot_cols.append(val_col)
-            rename_map[val_col] = "val"
+        if val_available and val_col is not None:
+            chart_df["val"] = history_df[val_col].map(_to_float)
             colors.append("#ff7f0e")
 
-        chart_df = history_df[plot_cols].rename(columns=rename_map).set_index("epoch")
-        if pca_reference is not None and val_col is not None:
+        chart_df = chart_df.set_index("epoch")
+        if pca_reference is not None and val_available:
             chart_df["PCA MSE"] = float(pca_reference)
             colors.append("#d62728")
         st.line_chart(chart_df, color=colors)
 
 
-def _available_metric_suffixes(columns: list[str]) -> list[str]:
+def _available_metric_suffixes(history_df: pd.DataFrame) -> list[str]:
     suffixes = set()
-    for col in columns:
+    for col in history_df.columns:
         if col.startswith("train_"):
-            suffixes.add(col[len("train_"):])
+            suffix = col[len("train_"):]
+            if _column_has_available_values(history_df, col) or _column_has_available_values(history_df, f"val_{suffix}"):
+                suffixes.add(suffix)
         elif col.startswith("val_"):
-            suffixes.add(col[len("val_"):])
+            suffix = col[len("val_"):]
+            if _column_has_available_values(history_df, col) or _column_has_available_values(history_df, f"train_{suffix}"):
+                suffixes.add(suffix)
     return sorted(suffixes, key=lambda metric: (metric != "loss", metric))
 
 
@@ -321,19 +337,135 @@ def _write_yaml(path: Path, payload: dict) -> None:
         yaml.safe_dump(payload, handle, sort_keys=False, default_flow_style=False)
 
 
+EVALUATION_METRIC_SPECS = [
+    {"source": "accuracy", "row": "test_accuracy", "title": "Accuracy"},
+    {"source": "balanced_accuracy", "row": "test_balanced_accuracy", "title": "Balanced Accuracy"},
+    {"source": "macro_f1", "row": "test_macro_f1", "title": "Macro F1"},
+    {"source": "roc_auc", "row": "test_roc_auc", "title": "ROC AUC"},
+    {"source": "roc_auc_ovr_macro", "row": "test_roc_auc_ovr_macro", "title": "ROC AUC OVR Macro"},
+    {"source": "mse", "row": "test_mse", "title": "MSE"},
+    {"source": "fc_preservation", "row": "test_fc_preservation", "title": "FC Pearson"},
+    {"source": "silhouette", "row": "test_silhouette", "title": "Silhouette"},
+    {"source": "logreg_accuracy", "row": "test_logreg_accuracy", "title": "LogReg Accuracy"},
+    {"source": "swfcd_pearson", "row": "test_swfcd_pearson", "title": "SWFCD Pearson"},
+    {"source": "swfcd_mad", "row": "test_swfcd_mad", "title": "SWFCD MAD"},
+    {"source": "swfcd_rmse", "row": "test_swfcd_rmse", "title": "SWFCD RMSE"},
+]
+
+PER_CLASS_METRIC_TITLES = {
+    "precision": "Precision",
+    "recall": "Recall",
+    "f1": "F1",
+    "support": "Support",
+}
+
+
+def _per_class_metric_row_key(class_label: str, metric_name: str) -> str:
+    return f"test_per_class::{quote(str(class_label), safe='')}::{metric_name}"
+
+
+def _parse_per_class_metric_row_key(metric_key: str) -> tuple[str, str] | None:
+    prefix = "test_per_class::"
+    if not metric_key.startswith(prefix):
+        return None
+    encoded_label, separator, metric_name = metric_key[len(prefix):].partition("::")
+    if not separator or metric_name not in PER_CLASS_METRIC_TITLES:
+        return None
+    return unquote(encoded_label), metric_name
+
+
+def _dynamic_metric_specs_from_keys(metric_keys: set[str]) -> list[tuple[str, str]]:
+    parsed_specs: list[tuple[str, str, str]] = []
+    metric_order = {name: idx for idx, name in enumerate(PER_CLASS_METRIC_TITLES)}
+    for metric_key in metric_keys:
+        parsed = _parse_per_class_metric_row_key(metric_key)
+        if parsed is None:
+            continue
+        class_label, metric_name = parsed
+        parsed_specs.append(
+            (
+                metric_key,
+                f"{class_label} {PER_CLASS_METRIC_TITLES[metric_name]}",
+                f"{class_label.lower()}::{metric_order[metric_name]:02d}",
+            )
+        )
+    parsed_specs.sort(key=lambda item: item[2])
+    return [(metric_key, title) for metric_key, title, _ in parsed_specs]
+
+
+def _extract_per_class_rows(model_metrics: dict | None) -> pd.DataFrame:
+    if not isinstance(model_metrics, dict):
+        return pd.DataFrame()
+    per_class = model_metrics.get("per_class")
+    if not isinstance(per_class, dict):
+        return pd.DataFrame()
+
+    rows: list[dict[str, object]] = []
+    for class_label in sorted(per_class, key=lambda value: str(value)):
+        class_metrics = per_class.get(class_label)
+        if not isinstance(class_metrics, dict):
+            continue
+        rows.append(
+            {
+                "class": str(class_label),
+                "precision": _to_float(class_metrics.get("precision")),
+                "recall": _to_float(class_metrics.get("recall")),
+                "f1": _to_float(class_metrics.get("f1")),
+                "support": _to_float(class_metrics.get("support")),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _metric_specs_for_rows(rows: list[dict], include_fc: bool = True) -> list[tuple[str, str]]:
+    specs: list[tuple[str, str]] = []
+    available_keys = {
+        key
+        for row in rows
+        for key, value in row.items()
+        if isinstance(key, str) and _to_float(value) is not None
+    }
+    for spec in EVALUATION_METRIC_SPECS:
+        if not include_fc and spec["row"] == "test_fc_preservation":
+            continue
+        if spec["row"] in available_keys:
+            specs.append((spec["row"], spec["title"]))
+    specs.extend(_dynamic_metric_specs_from_keys(available_keys))
+    return specs
+
+
+def _metric_specs_for_grouped(
+    grouped: dict[object, dict[str, list[float]]],
+    include_fc: bool = True,
+) -> list[tuple[str, str]]:
+    specs: list[tuple[str, str]] = []
+    available_keys = {
+        metric_key
+        for group_metrics in grouped.values()
+        for metric_key, values in group_metrics.items()
+        if values
+    }
+    for spec in EVALUATION_METRIC_SPECS:
+        if not include_fc and spec["row"] == "test_fc_preservation":
+            continue
+        if spec["row"] in available_keys:
+            specs.append((spec["row"], spec["title"]))
+    specs.extend(_dynamic_metric_specs_from_keys(available_keys))
+    return specs
+
+
+def _metric_specs_for_model_metrics(model_metrics: dict) -> list[dict[str, str]]:
+    specs: list[dict[str, str]] = []
+    for spec in EVALUATION_METRIC_SPECS:
+        if _to_float(model_metrics.get(spec["source"])) is not None:
+            specs.append(spec)
+    return specs
+
+
 def _extract_group_metric_rows(groups_payload: dict | None) -> pd.DataFrame:
     if not isinstance(groups_payload, dict):
         return pd.DataFrame()
 
-    metric_specs = [
-        ("mse", "MSE"),
-        ("fc_preservation", "FC Pearson"),
-        ("silhouette", "Silhouette"),
-        ("logreg_accuracy", "LogReg Accuracy"),
-        ("swfcd_pearson", "SWFCD Pearson"),
-        ("swfcd_mad", "SWFCD MAD"),
-        ("swfcd_rmse", "SWFCD RMSE"),
-    ]
     rows: list[dict[str, object]] = []
     for group_name in sorted(groups_payload):
         group_payload = groups_payload.get(group_name)
@@ -343,8 +475,8 @@ def _extract_group_metric_rows(groups_payload: dict | None) -> pd.DataFrame:
         if not isinstance(model_metrics, dict):
             continue
         row = {"group": group_name}
-        for metric_key, metric_title in metric_specs:
-            row[metric_title] = _to_float(model_metrics.get(metric_key))
+        for spec in _metric_specs_for_model_metrics(model_metrics):
+            row[spec["title"]] = _to_float(model_metrics.get(spec["source"]))
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -355,22 +487,19 @@ def _apply_metric_bundle_to_row(
     pca_eval: dict | None,
     comparison_eval: dict | None,
 ) -> None:
-    if isinstance(model_eval, dict):
-        row["test_mse"] = _to_float(model_eval.get("mse"))
-        row["test_fc_preservation"] = _to_float(model_eval.get("fc_preservation"))
-        row["test_silhouette"] = _to_float(model_eval.get("silhouette"))
-        row["test_logreg_accuracy"] = _to_float(model_eval.get("logreg_accuracy"))
-        row["test_swfcd_pearson"] = _to_float(model_eval.get("swfcd_pearson"))
-        row["test_swfcd_mad"] = _to_float(model_eval.get("swfcd_mad"))
-        row["test_swfcd_rmse"] = _to_float(model_eval.get("swfcd_rmse"))
-    else:
-        row["test_mse"] = None
-        row["test_fc_preservation"] = None
-        row["test_silhouette"] = None
-        row["test_logreg_accuracy"] = None
-        row["test_swfcd_pearson"] = None
-        row["test_swfcd_mad"] = None
-        row["test_swfcd_rmse"] = None
+    for key in [existing_key for existing_key in list(row.keys()) if isinstance(existing_key, str) and existing_key.startswith("test_per_class::")]:
+        del row[key]
+
+    for spec in EVALUATION_METRIC_SPECS:
+        row[spec["row"]] = _to_float(model_eval.get(spec["source"])) if isinstance(model_eval, dict) else None
+
+    per_class = model_eval.get("per_class") if isinstance(model_eval, dict) else None
+    if isinstance(per_class, dict):
+        for class_label, class_metrics in per_class.items():
+            if not isinstance(class_metrics, dict):
+                continue
+            for metric_name in PER_CLASS_METRIC_TITLES:
+                row[_per_class_metric_row_key(str(class_label), metric_name)] = _to_float(class_metrics.get(metric_name))
 
     if isinstance(pca_eval, dict):
         row["pca_mse"] = _to_float(pca_eval.get("mse"))
@@ -444,16 +573,6 @@ def _render_evaluation_tab(
         st.caption(f"Evaluation updated: {updated_at}")
     st.caption(f"Evaluation scope: {evaluation.get('scope', 'combined')}")
 
-    metric_row_key_map = {
-        "mse": "test_mse",
-        "fc_preservation": "test_fc_preservation",
-        "silhouette": "test_silhouette",
-        "logreg_accuracy": "test_logreg_accuracy",
-        "swfcd_pearson": "test_swfcd_pearson",
-        "swfcd_mad": "test_swfcd_mad",
-        "swfcd_rmse": "test_swfcd_rmse",
-    }
-
     selected_id = str(metadata.get("experiment_id", "selected"))
     selected_label = f"selected_{_short_experiment_id(selected_id)}"
     best_fc_logreg_label = (
@@ -461,57 +580,60 @@ def _render_evaluation_tab(
         if best_fc_logreg_row is not None
         else "best_fc_logreg"
     )
-    numeric_metric_keys = []
-    for metric_key in sorted(metric_row_key_map.keys()):
-        selected_value = _to_float(selected_model_metrics.get(metric_key))
+    metric_specs = []
+    for spec in EVALUATION_METRIC_SPECS:
+        selected_value = _to_float(selected_model_metrics.get(spec["source"]))
         best_fc_logreg_value = (
-            _to_float(best_fc_logreg_row.get(metric_row_key_map[metric_key]))
+            _to_float(best_fc_logreg_row.get(spec["row"]))
             if best_fc_logreg_row is not None
             else None
         )
         if selected_value is None and best_fc_logreg_value is None:
             continue
-        numeric_metric_keys.append(metric_key)
+        metric_specs.append(spec)
 
-    if not numeric_metric_keys:
+    if not metric_specs:
         st.info("No comparable numeric metrics found.")
-        return
-
-    for idx in range(0, len(numeric_metric_keys), 4):
-        row_metrics = numeric_metric_keys[idx:idx + 4]
-        row_cols = st.columns(4)
-        for col, metric_name in zip(row_cols, row_metrics):
-            selected_value = _to_float(selected_model_metrics.get(metric_name))
-            best_fc_logreg_value = (
-                _to_float(best_fc_logreg_row.get(metric_row_key_map[metric_name]))
-                if best_fc_logreg_row is not None
-                else None
-            )
-            metric_label = metric_name.replace('_', ' ').title()
-            labels = []
-            values = []
-            if selected_value is not None:
-                labels.append(selected_label)
-                values.append(selected_value)
-            if best_fc_logreg_value is not None:
-                labels.append(best_fc_logreg_label)
-                values.append(best_fc_logreg_value)
-            if not values:
-                continue
-            metric_df = pd.DataFrame(
-                {
-                    "parameter_value": labels,
-                    "avg_metric": values,
-                }
-            )
-            with col:
-                st.bar_chart(
-                    metric_df,
-                    x="parameter_value",
-                    y="avg_metric",
-                    y_label=metric_label,
-                    color="parameter_value"
+    else:
+        for idx in range(0, len(metric_specs), 4):
+            row_metrics = metric_specs[idx:idx + 4]
+            row_cols = st.columns(4)
+            for col, spec in zip(row_cols, row_metrics):
+                selected_value = _to_float(selected_model_metrics.get(spec["source"]))
+                best_fc_logreg_value = (
+                    _to_float(best_fc_logreg_row.get(spec["row"]))
+                    if best_fc_logreg_row is not None
+                    else None
                 )
+                labels = []
+                values = []
+                if selected_value is not None:
+                    labels.append(selected_label)
+                    values.append(selected_value)
+                if best_fc_logreg_value is not None:
+                    labels.append(best_fc_logreg_label)
+                    values.append(best_fc_logreg_value)
+                if not values:
+                    continue
+                metric_df = pd.DataFrame(
+                    {
+                        "parameter_value": labels,
+                        "avg_metric": values,
+                    }
+                )
+                with col:
+                    st.bar_chart(
+                        metric_df,
+                        x="parameter_value",
+                        y="avg_metric",
+                        y_label=spec["title"],
+                        color="parameter_value"
+                    )
+
+    per_class_df = _extract_per_class_rows(selected_model_metrics)
+    if not per_class_df.empty:
+        st.markdown("**Per-class metrics**")
+        st.dataframe(per_class_df, width="stretch", hide_index=True)
 
     group_df = _extract_group_metric_rows(evaluation.get("groups"))
     if not group_df.empty:
@@ -1019,28 +1141,21 @@ def _build_compare_markdown_table(
     include_fc: bool = True,
 ) -> str:
     headers = ["Experiment"]
-    if include_fc:
-        headers.append("FC Pearson")
-    headers.extend(["LogReg Accuracy", "SWFCD Pearson"])
+    metric_specs = _metric_specs_for_rows(selected_rows, include_fc=include_fc)
+    headers.extend(metric_title for _, metric_title in metric_specs)
     lines = [
         "| " + " | ".join(headers) + " |",
         "| " + " | ".join(["---"] * len(headers)) + " |",
     ]
     for row in selected_rows:
         experiment_id = str(row.get("experiment_id", ""))
-        fc_value = _to_float(row.get("test_fc_preservation"))
-        logreg_value = _to_float(row.get("test_logreg_accuracy"))
-        swfcd_value = _to_float(row.get("test_swfcd_pearson"))
+        metric_values = []
+        for metric_key, _metric_title in metric_specs:
+            metric_value = _to_float(row.get(metric_key))
+            metric_values.append("N/A" if metric_value is None else f"{metric_value:.6f}")
         lines.append(
             "| "
-            + " | ".join(
-                [value for value in [
-                    experiment_id,
-                    ("N/A" if fc_value is None else f"{fc_value:.6f}") if include_fc else None,
-                    "N/A" if logreg_value is None else f"{logreg_value:.6f}",
-                    "N/A" if swfcd_value is None else f"{swfcd_value:.6f}",
-                ] if value is not None]
-            )
+            + " | ".join([experiment_id] + metric_values)
             + " |"
         )
     return "\n".join(lines)
@@ -1051,9 +1166,8 @@ def _build_parameter_compare_markdown_table(
     include_fc: bool = True,
 ) -> str:
     headers = ["Parameter value"]
-    if include_fc:
-        headers.append("FC Pearson")
-    headers.extend(["LogReg Accuracy", "SWFCD Pearson"])
+    metric_specs = _metric_specs_for_grouped(grouped, include_fc=include_fc)
+    headers.extend(metric_title for _, metric_title in metric_specs)
     lines = [
         "| " + " | ".join(headers) + " |",
         "| " + " | ".join(["---"] * len(headers)) + " |",
@@ -1061,24 +1175,14 @@ def _build_parameter_compare_markdown_table(
 
     sorted_param_values = sorted(grouped.keys(), key=_value_sort_key)
     for param_value in sorted_param_values:
-        fc_values = grouped[param_value].get("test_fc_preservation", [])
-        logreg_values = grouped[param_value].get("test_logreg_accuracy", [])
-        swfcd_values = grouped[param_value].get("test_swfcd_pearson", [])
-
-        fc_avg = (sum(fc_values) / len(fc_values)) if fc_values else None
-        logreg_avg = (sum(logreg_values) / len(logreg_values)) if logreg_values else None
-        swfcd_avg = (sum(swfcd_values) / len(swfcd_values)) if swfcd_values else None
-
+        metric_avgs = []
+        for metric_key, _metric_title in metric_specs:
+            values = grouped[param_value].get(metric_key, [])
+            metric_avg = (sum(values) / len(values)) if values else None
+            metric_avgs.append("N/A" if metric_avg is None else f"{metric_avg:.6f}")
         lines.append(
             "| "
-            + " | ".join(
-                [value for value in [
-                    _display_group_value(param_value),
-                    ("N/A" if fc_avg is None else f"{fc_avg:.6f}") if include_fc else None,
-                    "N/A" if logreg_avg is None else f"{logreg_avg:.6f}",
-                    "N/A" if swfcd_avg is None else f"{swfcd_avg:.6f}",
-                ] if value is not None]
-            )
+            + " | ".join([_display_group_value(param_value)] + metric_avgs)
             + " |"
         )
     return "\n".join(lines)
@@ -1116,17 +1220,19 @@ def _boxplot_summary(values: list[float]) -> dict[str, object] | None:
     return summary
 
 
+def _average_metric(values: list[float]) -> float | None:
+    cleaned_values = [_to_float(value) for value in values]
+    cleaned_values = [value for value in cleaned_values if value is not None]
+    if not cleaned_values:
+        return None
+    return float(sum(cleaned_values) / len(cleaned_values))
+
+
 def _build_parameter_compare_boxplot_spec(
     grouped: dict[object, dict[str, list[float]]],
     include_fc: bool = True,
 ) -> str:
-    metric_specs = []
-    if include_fc:
-        metric_specs.append(("test_fc_preservation", "FC Pearson"))
-    metric_specs.extend([
-        ("test_logreg_accuracy", "LogReg Accuracy"),
-        ("test_swfcd_pearson", "SWFCD Pearson"),
-    ])
+    metric_specs = _metric_specs_for_grouped(grouped, include_fc=include_fc)
     sorted_param_values = sorted(grouped.keys(), key=_value_sort_key)
 
     lines = [
@@ -1168,11 +1274,7 @@ def _build_parameter_compare_boxplot_spec(
 
 
 def _build_model_compare_boxplot_spec(grouped: dict[str, dict[str, list[float]]]) -> str:
-    metric_specs = [
-        ("test_fc_preservation", "FC Pearson"),
-        ("test_logreg_accuracy", "LogReg Accuracy"),
-        ("test_swfcd_pearson", "SWFCD Pearson"),
-    ]
+    metric_specs = _metric_specs_for_grouped(grouped)
     model_names = list(grouped.keys())
 
     lines = [
@@ -1213,17 +1315,49 @@ def _build_model_compare_boxplot_spec(grouped: dict[str, dict[str, list[float]]]
     return "\n".join(lines)
 
 
+F1_BAR_CHART_TITLES = ["Macro F1", "HC F1", "MCI F1", "AD F1"]
+
+
+def _f1_metric_keys_for_grouped(grouped: dict[object, dict[str, list[float]]]) -> list[str] | None:
+    title_to_key = {
+        metric_title: metric_key
+        for metric_key, metric_title in _metric_specs_for_grouped(grouped)
+    }
+    if not all(title in title_to_key for title in F1_BAR_CHART_TITLES):
+        return None
+    return [title_to_key[title] for title in F1_BAR_CHART_TITLES]
+
+
+def _build_model_compare_f1_bar_chart_spec(grouped: dict[str, dict[str, list[float]]]) -> str:
+    metric_keys = _f1_metric_keys_for_grouped(grouped)
+    if metric_keys is None:
+        raise ValueError("Required F1 metrics are not available.")
+
+    label_list = ", ".join(json.dumps(title) for title in F1_BAR_CHART_TITLES)
+    lines = [
+        "```chart",
+        "type: bar",
+        "labels: [" + label_list + "]",
+        "series:",
+    ]
+
+    for model_name, model_metrics in grouped.items():
+        averaged_values: list[str] = []
+        for metric_key in metric_keys:
+            mean_value = _average_metric(model_metrics.get(metric_key, []))
+            averaged_values.append("null" if mean_value is None else f"{mean_value:.6f}")
+        lines.append(f"    - title: {json.dumps(str(model_name))}")
+        lines.append("      data: [" + ", ".join(averaged_values) + "]")
+
+    lines.append("```")
+    return "\n".join(lines)
+
+
 def _build_raincloud_spec(
     grouped: dict[str, dict[str, list[float]]],
     include_fc: bool = True,
 ) -> dict[str, object]:
-    metric_specs: list[tuple[str, str]] = []
-    if include_fc:
-        metric_specs.append(("test_fc_preservation", "FC Pearson"))
-    metric_specs.extend([
-        ("test_logreg_accuracy", "LogReg Accuracy"),
-        ("test_swfcd_pearson", "SWFCD Pearson"),
-    ])
+    metric_specs = _metric_specs_for_grouped(grouped, include_fc=include_fc)
 
     series = []
     for title, metrics_by_key in grouped.items():
@@ -1320,17 +1454,18 @@ def _style_pvalue_matrix(matrix_df: pd.DataFrame):
 
 def _render_pvalue_matrices(grouped: dict[str, dict[str, list[float]]]) -> None:
     st.markdown("**P-value Matrices**")
-    metric_specs = [
-        ("test_fc_preservation", "FC Pearson"),
-        ("test_logreg_accuracy", "LogReg Accuracy"),
-        ("test_swfcd_pearson", "SWFCD Pearson"),
-    ]
-    row_cols = st.columns(len(metric_specs))
-    for col, (metric_key, metric_title) in zip(row_cols, metric_specs):
-        with col:
-            st.markdown(f"**{metric_title}**")
-            matrix_df = _pairwise_pvalue_matrix(grouped, metric_key)
-            st.dataframe(_style_pvalue_matrix(matrix_df), width="stretch")
+    metric_specs = _metric_specs_for_grouped(grouped)
+    if not metric_specs:
+        st.info("No numeric metrics available for p-value comparison.")
+        return
+    for idx in range(0, len(metric_specs), 3):
+        row_metrics = metric_specs[idx:idx + 3]
+        row_cols = st.columns(len(row_metrics))
+        for col, (metric_key, metric_title) in zip(row_cols, row_metrics):
+            with col:
+                st.markdown(f"**{metric_title}**")
+                matrix_df = _pairwise_pvalue_matrix(grouped, metric_key)
+                st.dataframe(_style_pvalue_matrix(matrix_df), width="stretch")
 
 
 def _extract_selected_row(selection) -> int | None:
@@ -1413,7 +1548,7 @@ def main() -> None:
         str(results_dir),
         str(index_path),
         _results_fingerprint(index_path, results_dir),
-        7,
+        8,
     )
 
     st.caption(f"All experiments: {len(rows)}")
@@ -1432,6 +1567,11 @@ def main() -> None:
         "fc_logreg_score",
         "best_val_loss",
         "test_mse",
+        "test_accuracy",
+        "test_balanced_accuracy",
+        "test_macro_f1",
+        "test_roc_auc",
+        "test_roc_auc_ovr_macro",
         "test_fc_preservation",
         "test_silhouette",
         "test_logreg_accuracy",
@@ -1555,7 +1695,7 @@ def main() -> None:
             if history_df.empty:
                 st.warning("No history metrics available.")
             else:
-                metric_suffixes = _available_metric_suffixes(list(history_df.columns))
+                metric_suffixes = _available_metric_suffixes(history_df)
                 visible_metrics = metric_suffixes if metric_suffixes else []
                 if not visible_metrics:
                     st.warning("No train/val metrics available.")
@@ -1646,15 +1786,11 @@ def main() -> None:
             st.info("Select at least one experiment.")
             return
 
-        metric_specs = [
-            ("test_fc_preservation", "FC Pearson"),
-            ("test_logreg_accuracy", "LogReg Accuracy"),
-            ("test_swfcd_pearson", "SWFCD Pearson"),
-            ("test_mse", "MSE"),
-            ("test_silhouette", "Silhouette"),
-            ("test_swfcd_rmse", "SWFCD RMSE"),
-        ]
         selected_rows = [row_by_id[exp_id] for exp_id in selected_compare_ids]
+        metric_specs = _metric_specs_for_rows(selected_rows)
+        if not metric_specs:
+            st.info("No numeric evaluation metrics available for the selected experiments.")
+            return
         display_labels = [
             _short_experiment_id(str(row.get("experiment_id", "exp")))
             for row in selected_rows
@@ -1776,10 +1912,11 @@ def main() -> None:
                 if _get_param_values_from_row(row, selected_param_path)
             ]
 
+            max_parameter_filters = 10
             extra_filters: list[tuple[str, object]] = []
             current_rows = base_rows
             used_param_keys = {selected_param_key}
-            for filter_idx in range(2, 6):
+            for filter_idx in range(2, max_parameter_filters + 1):
                 filter_options = _parameter_options_for_rows(current_rows, exclude_keys=used_param_keys)
                 if not filter_options:
                     break
@@ -1867,17 +2004,14 @@ def main() -> None:
                 + (f" | filters: {loaded_filter_text}" if loaded_filter_text else "")
             )
 
-            metric_specs = [
-                ("test_mse", "MSE"),
-                ("test_fc_preservation", "FC Pearson"),
-                ("test_swfcd_pearson", "SWFCD Pearson"),
-                ("test_logreg_accuracy", "LogReg Accuracy"),
-            ]
-
             # Aggregate each metric by parameter value.
             grouped: dict[object, dict[str, list[float]]] = {}
             loaded_param_path = tuple(loaded_param_key.split("."))
             comparison_rows = _expand_rows_for_parameter(selected_rows, loaded_param_path)
+            metric_specs = _metric_specs_for_rows(comparison_rows)
+            if not metric_specs:
+                st.info("No numeric evaluation metrics available for the loaded selection.")
+                return
             for row in comparison_rows:
                 param_value = row.get("_comparison_parameter_value")
                 if param_value is None:
@@ -1953,7 +2087,7 @@ def main() -> None:
         if param_compare_grouped is not None and param_compare_display_grouped is not None:
             _render_pvalue_matrices(param_compare_display_grouped)
             st.markdown("---")
-            export_cols = st.columns([1, 1, 1, 1.2])
+            export_cols = st.columns([1, 1, 1.2, 1])
             with export_cols[3]:
                 exclude_fc = st.checkbox(
                     "Exclude FC Pearson",
@@ -2120,16 +2254,13 @@ def main() -> None:
                 + (f" | filters: {loaded_filter_text}" if loaded_filter_text else "")
             )
 
-            metric_specs = [
-                ("test_mse", "MSE"),
-                ("test_fc_preservation", "FC Pearson"),
-                ("test_swfcd_pearson", "SWFCD Pearson"),
-                ("test_logreg_accuracy", "LogReg Accuracy"),
-            ]
-
             grouped: dict[object, dict[str, list[float]]] = {}
             loaded_param_path = tuple(loaded_param_key.split("."))
             comparison_rows = _expand_rows_for_parameter(selected_rows, loaded_param_path)
+            metric_specs = _metric_specs_for_rows(comparison_rows)
+            if not metric_specs:
+                st.info("No numeric evaluation metrics available for the loaded selection.")
+                return
             for row in comparison_rows:
                 param_value = row.get("_comparison_parameter_value")
                 if param_value is None:
@@ -2294,14 +2425,10 @@ def main() -> None:
             st.info("No experiments match the selected data/model filters.")
             return
 
-        metric_specs = [
-            ("test_fc_preservation", "FC Pearson"),
-            ("test_logreg_accuracy", "LogReg Accuracy"),
-            ("test_swfcd_pearson", "SWFCD Pearson"),
-            ("test_mse", "MSE"),
-            ("test_silhouette", "Silhouette"),
-            ("test_swfcd_rmse", "SWFCD RMSE"),
-        ]
+        metric_specs = _metric_specs_for_rows(filtered_model_rows)
+        if not metric_specs:
+            st.info("No numeric evaluation metrics available for the selected runs.")
+            return
         model_order = list(
             dict.fromkeys(str(row.get("model_type", "unknown")) for row in filtered_model_rows)
         )
@@ -2364,7 +2491,8 @@ def main() -> None:
 
         _render_pvalue_matrices(export_grouped)
         st.markdown("---")
-        export_cols = st.columns(2)
+        has_f1_bar_export = _f1_metric_keys_for_grouped(export_grouped) is not None
+        export_cols = st.columns(3 if has_f1_bar_export else 2)
         with export_cols[0]:
             if st.button("Copy boxplot spec", key="model_compare_copy_boxplot_spec"):
                 boxplot_spec = _build_model_compare_boxplot_spec(export_grouped)
@@ -2378,7 +2506,21 @@ def main() -> None:
                 )
                 st.success("Boxplot spec copied to clipboard.")
                 st.code(boxplot_spec, language="yaml")
-        with export_cols[1]:
+        if has_f1_bar_export:
+            with export_cols[1]:
+                if st.button("Export F1 bar chart", key="model_compare_export_f1_bar_chart"):
+                    bar_chart_spec = _build_model_compare_f1_bar_chart_spec(export_grouped)
+                    components.html(
+                        f"""
+                        <script>
+                        navigator.clipboard.writeText({json.dumps(bar_chart_spec)});
+                        </script>
+                        """,
+                        height=0,
+                    )
+                    st.success("F1 bar chart spec copied to clipboard.")
+                    st.code(bar_chart_spec, language="yaml")
+        with export_cols[2 if has_f1_bar_export else 1]:
             if st.button("Save Raincloud plot spec", key="model_compare_save_raincloud"):
                 output_path = _save_raincloud_spec(
                     export_grouped,
@@ -2390,14 +2532,10 @@ def main() -> None:
 
     elif active_view == "Data Comparison":
         st.subheader("Data Comparison")
-        metric_specs = [
-            ("test_fc_preservation", "FC Pearson"),
-            ("test_logreg_accuracy", "LogReg Accuracy"),
-            ("test_swfcd_pearson", "SWFCD Pearson"),
-            ("test_mse", "MSE"),
-            ("test_silhouette", "Silhouette"),
-            ("test_swfcd_rmse", "SWFCD RMSE"),
-        ]
+        metric_specs = _metric_specs_for_rows(rows)
+        if not metric_specs:
+            st.info("No numeric evaluation metrics available.")
+            return
         data_combo_order = list(
             dict.fromkeys(_data_combination_label(row) for row in rows)
         )
