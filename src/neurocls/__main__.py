@@ -500,6 +500,21 @@ def main():
             ),
         )
 
+        if args.dry_run:
+            preview_count = min(len(run_queue), 5)
+            for run_idx, queued in enumerate(run_queue[:preview_count], start=1):
+                LOGGER.info(
+                    "Dry-run queued experiment %d/%d: set=%s model=%s input_mode=%s signature=%s",
+                    run_idx,
+                    len(run_queue),
+                    queued["set_name"],
+                    queued["model_config"]["model"]["name"],
+                    queued["model_config"]["model"].get("input_mode"),
+                    queued["signature"],
+                )
+            LOGGER.info("Dry run enabled: queue prepared only, no training or evaluation will be executed.")
+            return
+
         for run_idx, queued in enumerate(run_queue, start=1):
             LOGGER.info(
                 "Running experiment %d/%d: set=%s model=%s input_mode=%s signature=%s",
