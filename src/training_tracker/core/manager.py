@@ -92,11 +92,7 @@ class TrainingResultsManager:
         return rows
 
     def get_experiment(self, experiment_id: str) -> dict:
-        index_entry = find_index_entry(self.index_path, experiment_id)
-        if index_entry is None:
-            raise FileNotFoundError(f"Experiment not found in index: {experiment_id}")
-
-        metadata_path = self._resolve_from_base(index_entry["metadata_path"])
+        metadata_path = self._get_metadata_path(experiment_id)
         return read_json(metadata_path)
 
     def get_history(self, experiment_id: str) -> dict:
@@ -111,11 +107,7 @@ class TrainingResultsManager:
         if not isinstance(updates, dict):
             raise TypeError("updates must be a dict.")
 
-        index_entry = find_index_entry(self.index_path, experiment_id)
-        if index_entry is None:
-            raise FileNotFoundError(f"Experiment not found in index: {experiment_id}")
-
-        metadata_path = self._resolve_from_base(index_entry["metadata_path"])
+        metadata_path = self._get_metadata_path(experiment_id)
         metadata = read_json(metadata_path)
         metadata.update(deepcopy(updates))
         metadata["signature"] = get_or_build_signature(metadata)
@@ -130,11 +122,7 @@ class TrainingResultsManager:
         evaluation: Optional[dict] = None,
     ) -> None:
         """Store evaluation metrics on an existing experiment metadata record."""
-        index_entry = find_index_entry(self.index_path, experiment_id)
-        if index_entry is None:
-            raise FileNotFoundError(f"Experiment not found in index: {experiment_id}")
-
-        metadata_path = self._resolve_from_base(index_entry["metadata_path"])
+        metadata_path = self._get_metadata_path(experiment_id)
         metadata = read_json(metadata_path)
 
         if isinstance(evaluation, dict):
@@ -176,6 +164,20 @@ class TrainingResultsManager:
             self.index_path,
             build_index_entry(metadata, metadata_path, self.base_dir),
         )
+
+    def _get_metadata_path(self, experiment_id: str) -> Path:
+        index_entry = find_index_entry(self.index_path, experiment_id)
+        if index_entry is not None:
+            return self._resolve_from_base(index_entry["metadata_path"])
+
+        metadata_path = self.experiments_dir / experiment_id / "metadata.json"
+        if not metadata_path.exists():
+            raise FileNotFoundError(f"Experiment not found in index or experiments dir: {experiment_id}")
+
+        metadata = read_json(metadata_path)
+        metadata["signature"] = get_or_build_signature(metadata)
+        self._replace_index_entry(metadata_path, metadata)
+        return metadata_path
 
     def build_experiment_id(
         self,
