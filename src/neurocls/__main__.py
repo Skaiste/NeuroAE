@@ -330,6 +330,23 @@ def _collect_vars(node, name=""):
     return {name: node}
 
 
+def _validate_shard_args(shard_index, num_shards):
+    if (shard_index is None) != (num_shards is None):
+        raise ValueError("--shard-index and --num-shards must be provided together.")
+    if shard_index is None:
+        return
+    if num_shards < 1:
+        raise ValueError("--num-shards must be at least 1.")
+    if shard_index < 1 or shard_index > num_shards:
+        raise ValueError("--shard-index must be between 1 and --num-shards inclusive.")
+
+
+def _is_signature_in_shard(signature, shard_index, num_shards):
+    if shard_index is None or num_shards is None:
+        return True
+    return (int(signature, 16) % num_shards) + 1 == shard_index
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train classification models on ADNI3 data.")
     parser.add_argument("-m", "--mode", type=str, default="train", choices=["train", "eval", "load", "exp"])
@@ -344,8 +361,11 @@ def main():
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--results-dir-name", type=str, default="results")
     parser.add_argument("--max-experiment-combinations", type=int, default=100000)
+    parser.add_argument("--shard-index", type=int)
+    parser.add_argument("--num-shards", type=int)
     parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=False)
     args = parser.parse_args()
+    _validate_shard_args(args.shard_index, args.num_shards)
 
     results_dir = resolve_results_dir(project_path, args.results_dir_name)
 
@@ -406,6 +426,7 @@ def main():
         run_queue = []
         skipped_duplicates = 0
         skipped_completed = 0
+        skipped_shard = 0
 
         for set_name, config_set in exp_config.items():
             if set_name == "default":
@@ -446,6 +467,9 @@ def main():
                     skipped_duplicates += 1
                     continue
                 seen_signatures.add(signature)
+                if not _is_signature_in_shard(signature, args.shard_index, args.num_shards):
+                    skipped_shard += 1
+                    continue
                 if not args.dry_run and signature in completed_signatures:
                     skipped_completed += 1
                     continue
@@ -460,13 +484,20 @@ def main():
                 )
 
         total_candidates = len(run_queue) + skipped_duplicates + skipped_completed
+        total_candidates += skipped_shard
         LOGGER.info(
-            "Prepared experiment queue: total=%d runnable=%d skipped=%d skipped_duplicates=%d skipped_completed=%d",
+            "Prepared experiment queue: total=%d runnable=%d skipped=%d skipped_duplicates=%d skipped_completed=%d skipped_shard=%d%s",
             total_candidates,
             len(run_queue),
-            skipped_duplicates + skipped_completed,
+            skipped_duplicates + skipped_completed + skipped_shard,
             skipped_duplicates,
             skipped_completed,
+            skipped_shard,
+            (
+                f" shard={args.shard_index}/{args.num_shards}"
+                if args.shard_index is not None and args.num_shards is not None
+                else ""
+            ),
         )
 
         for run_idx, queued in enumerate(run_queue, start=1):

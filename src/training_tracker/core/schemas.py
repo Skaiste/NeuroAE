@@ -15,6 +15,10 @@ class IndexEntry(TypedDict, total=False):
     created_at: str
     status: str
     model_type: str
+    framework: str
+    signature: str
+    has_evaluation: bool
+    has_model_evaluation: bool
     best_val_loss: float
     num_epochs: int
     learning_rate: float

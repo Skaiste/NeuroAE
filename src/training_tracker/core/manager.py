@@ -10,7 +10,15 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .filters import apply_filters
-from .index import append_index_entry, build_index_entry, find_index_entry, read_index, write_index
+from .index import (
+    append_index_entry,
+    build_index_entry,
+    find_index_entry,
+    get_or_build_signature,
+    read_index,
+    replace_index_entry,
+    write_index,
+)
 from .storage import read_json, write_json_atomic
 
 
@@ -37,6 +45,7 @@ class TrainingResultsManager:
         payload["created_at"] = created_at
         payload["status"] = payload.get("status", "completed")
         payload["model_type"] = payload.get("model_type", "unknown")
+        payload["signature"] = get_or_build_signature(payload)
 
         summary = payload.get("summary", {})
         derived_summary = self._derive_summary_from_history(history)
@@ -109,7 +118,9 @@ class TrainingResultsManager:
         metadata_path = self._resolve_from_base(index_entry["metadata_path"])
         metadata = read_json(metadata_path)
         metadata.update(deepcopy(updates))
+        metadata["signature"] = get_or_build_signature(metadata)
         write_json_atomic(metadata_path, metadata)
+        self._replace_index_entry(metadata_path, metadata)
 
     def set_evaluation_metrics(
         self,
@@ -135,8 +146,10 @@ class TrainingResultsManager:
             }
         evaluation_payload["updated_at"] = self._now_iso()
         metadata["evaluation"] = evaluation_payload
+        metadata["signature"] = get_or_build_signature(metadata)
 
         write_json_atomic(metadata_path, metadata)
+        self._replace_index_entry(metadata_path, metadata)
 
     def get_evaluation_metrics(self, experiment_id: str) -> dict:
         """Return stored evaluation metrics for an experiment, if present."""
@@ -150,8 +163,19 @@ class TrainingResultsManager:
         entries: list[dict[str, Any]] = []
         for metadata_path in sorted(self.experiments_dir.glob("*/metadata.json")):
             metadata = read_json(metadata_path)
+            signature = get_or_build_signature(metadata)
+            if metadata.get("signature") != signature:
+                metadata["signature"] = signature
+                write_json_atomic(metadata_path, metadata)
             entries.append(build_index_entry(metadata, metadata_path, self.base_dir))
         write_index(self.index_path, entries)
+
+    def _replace_index_entry(self, metadata_path: Path, metadata: dict) -> None:
+        metadata["signature"] = get_or_build_signature(metadata)
+        replace_index_entry(
+            self.index_path,
+            build_index_entry(metadata, metadata_path, self.base_dir),
+        )
 
     def build_experiment_id(
         self,
