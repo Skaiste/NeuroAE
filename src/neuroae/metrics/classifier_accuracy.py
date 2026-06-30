@@ -59,7 +59,80 @@ def _to_matrix(latents):
     return array.astype(np.float32, copy=False)
 
 
+def _as_timeseries(sample):
+    array = np.asarray(sample, dtype=np.float32)
+    if array.ndim != 2:
+        raise ValueError(f"Expected latent timeseries with ndim=2, got shape {array.shape}.")
+    return array
+
+
+def _bandpower(x, freqs, low, high):
+    mask = (freqs >= low) & (freqs <= high)
+    if not np.any(mask):
+        return np.zeros(x.shape[1], dtype=np.float32)
+    return np.sum(np.abs(x[mask]) ** 2, axis=0).astype(np.float32)
+
+
+def _subject_latent_node_features(sample):
+    ts = _as_timeseries(sample)
+    n_timepoints = ts.shape[0]
+    centered = ts - np.mean(ts, axis=0, keepdims=True)
+    std = np.std(centered, axis=0)
+    mean = np.mean(ts, axis=0)
+    minimum = np.min(ts, axis=0)
+    maximum = np.max(ts, axis=0)
+    energy = np.mean(centered**2, axis=0)
+
+    fft = np.fft.rfft(centered, axis=0)
+    freqs = np.fft.rfftfreq(n_timepoints, d=1.0)
+    low_band = _bandpower(fft, freqs, 0.01, 0.08)
+    full_band = _bandpower(fft, freqs, 0.0, 0.25)
+    alff = np.sqrt(low_band + 1e-8).astype(np.float32)
+    falff = (low_band / np.maximum(full_band, 1e-8)).astype(np.float32)
+
+    fc = np.corrcoef(ts, rowvar=False)
+    fc = np.nan_to_num(fc, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32, copy=False)
+    stats = np.stack([mean, std, minimum, maximum, energy, alff, falff], axis=1)
+    return np.concatenate([stats, fc], axis=1).astype(np.float32, copy=False), fc
+
+
+def _latent_graph_split_from_timeseries(latents, labels):
+    latent_ts = np.asarray(latents, dtype=np.float32)
+    labels = list(labels)
+    if latent_ts.ndim != 3:
+        raise ValueError(f"Expected latent timeseries with shape (samples, timepoints, latent_dim), got {latent_ts.shape}.")
+    if latent_ts.shape[0] != len(labels):
+        raise ValueError(
+            f"Latent sample count {latent_ts.shape[0]} does not match label count {len(labels)}."
+        )
+    _emit_classifier_progress(
+        f"Building neurocls-style graph split: samples={latent_ts.shape[0]} "
+        f"timepoints={latent_ts.shape[1]} latent_dim={latent_ts.shape[2]}"
+    )
+    node_features = []
+    adjacency = []
+    for sample in latent_ts:
+        nodes, fc = _subject_latent_node_features(sample)
+        node_features.append(nodes)
+        adjacency.append(fc)
+    node_features = np.asarray(node_features, dtype=np.float32)
+    adjacency = np.asarray(adjacency, dtype=np.float32)
+    adjacency_mb = adjacency.nbytes / (1024 * 1024)
+    _emit_classifier_progress(
+        f"Built neurocls-style adjacency tensor: shape={adjacency.shape} estimated_memory={adjacency_mb:.1f}MB"
+    )
+    return {
+        "node_features": node_features,
+        "adjacency": adjacency,
+        "labels": labels,
+    }
+
+
 def _latent_graph_split(latents, labels):
+    latent_array = np.asarray(latents, dtype=np.float32)
+    if latent_array.ndim == 3:
+        return _latent_graph_split_from_timeseries(latent_array, labels)
+
     latent_matrix = _to_matrix(latents)
     labels = list(labels)
     if latent_matrix.shape[0] != len(labels):

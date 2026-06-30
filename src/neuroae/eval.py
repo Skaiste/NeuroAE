@@ -185,11 +185,22 @@ def _collect_split_outputs(model, data_loader, device, use_pred_heads=False, inc
     }
 
 
-def _pool_classifier_latents(model, latents):
+def _prepare_classifier_latents(model, latents, split_name="unknown"):
     if latents is None:
         return None
-    if not torch.is_tensor(latents) or latents.ndim != 2:
+    if not torch.is_tensor(latents):
         return latents
+    if latents.ndim == 3:
+        print(
+            f"Evaluation: classifier latents for {split_name} already 3D with shape={tuple(latents.shape)}",
+            flush=True,
+        )
+        return latents
+    if latents.ndim != 2:
+        raise ValueError(
+            f"Classifier latents for {split_name} must be 3D latent timeseries or reshapeable 2D latents; "
+            f"got shape={tuple(latents.shape)}"
+        )
 
     timepoint_dim = getattr(model, "timepoint_dim", None)
     latent_per_timepoint = getattr(model, "latent_per_timepoint", None)
@@ -200,15 +211,18 @@ def _pool_classifier_latents(model, latents):
         or latent_flat_dim is None
         or latents.shape[1] != int(latent_flat_dim)
     ):
-        return latents
+        raise ValueError(
+            f"Classifier latents for {split_name} must be 3D. Received flattened shape={tuple(latents.shape)} "
+            "but the model does not expose compatible timepoint/latent metadata for reshaping."
+        )
 
-    pooled = latents.reshape(latents.shape[0], int(timepoint_dim), int(latent_per_timepoint)).mean(dim=1)
+    reshaped = latents.reshape(latents.shape[0], int(timepoint_dim), int(latent_per_timepoint))
     print(
-        "Evaluation: pooled classifier latents "
-        f"from shape={tuple(latents.shape)} to shape={tuple(pooled.shape)}",
+        f"Evaluation: reshaped classifier latents for {split_name} "
+        f"from shape={tuple(latents.shape)} to shape={tuple(reshaped.shape)}",
         flush=True,
     )
-    return pooled
+    return reshaped
 
 
 
@@ -407,9 +421,9 @@ def eval_vae(
     if scope not in {"combined", "per_group"}:
         raise ValueError(f"Unsupported evaluation_scope: {evaluation_scope}")
 
-    train_classifier_latents = _pool_classifier_latents(model, train_outputs["latents"])
-    val_classifier_latents = _pool_classifier_latents(model, val_outputs["latents"])
-    eval_classifier_latents = _pool_classifier_latents(model, eval_outputs["latents"])
+    train_classifier_latents = _prepare_classifier_latents(model, train_outputs["latents"], split_name="train")
+    val_classifier_latents = _prepare_classifier_latents(model, val_outputs["latents"], split_name="val")
+    eval_classifier_latents = _prepare_classifier_latents(model, eval_outputs["latents"], split_name="test")
 
     print("Evaluation: training latent classifier for model latents", flush=True)
     classifier_result = run_latent_braingnn_classifier(
