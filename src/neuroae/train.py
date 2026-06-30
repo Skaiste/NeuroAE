@@ -3,9 +3,8 @@ import torch.optim as optim
 import torch.nn.functional as F
 import numpy as np
 
-from .metrics.logreg_accuracy import logreg_accuracy_cv
+from .metrics.classifier_accuracy import run_latent_braingnn_classifier
 from .metrics.swfcd_torch import SwFCD
-from .utils.np_utils import to_numpy
 
 
 def _dataset_valid_last_dim(dataset):
@@ -154,41 +153,43 @@ def _joint_metric_score(swfcd, logreg, swfcd_weight=0.5, logreg_weight=0.5):
 
 def select_best_checkpoint(
     history,
-    selection_metric="swfcd_logreg_joint",
+    selection_metric="swfcd_classifier_joint",
     min_delta=0.0,
     swfcd_weight=0.5,
-    logreg_weight=0.5,
+    classifier_weight=0.5,
 ):
     val_losses = _metric_values(history, "val", "loss")
     val_swfcd = _metric_values(history, "val", "swfcd_pearson")
-    val_logreg = _metric_values(history, "val", "logreg_accuracy")
-    num_epochs = max(len(val_losses), len(val_swfcd), len(val_logreg))
+    val_classifier = _metric_values(history, "val", "classifier_accuracy")
+    if not val_classifier:
+        val_classifier = _metric_values(history, "val", "logreg_accuracy")
+    num_epochs = max(len(val_losses), len(val_swfcd), len(val_classifier))
     if num_epochs == 0:
         return None
 
     def _epoch_metrics(idx):
         loss = float(val_losses[idx]) if idx < len(val_losses) else float("nan")
         swfcd = float(val_swfcd[idx]) if idx < len(val_swfcd) else float("nan")
-        logreg = float(val_logreg[idx]) if idx < len(val_logreg) else float("nan")
+        classifier = float(val_classifier[idx]) if idx < len(val_classifier) else float("nan")
         joint_score = _joint_metric_score(
             swfcd,
-            logreg,
+            classifier,
             swfcd_weight=swfcd_weight,
-            logreg_weight=logreg_weight,
+            logreg_weight=classifier_weight,
         )
-        return loss, swfcd, logreg, joint_score
+        return loss, swfcd, classifier, joint_score
 
     best_idx = 0
-    best_loss, best_swfcd, best_logreg, best_joint_score = _epoch_metrics(0)
+    best_loss, best_swfcd, best_classifier, best_joint_score = _epoch_metrics(0)
 
     for idx in range(1, num_epochs):
-        loss, swfcd, logreg, joint_score = _epoch_metrics(idx)
+        loss, swfcd, classifier, joint_score = _epoch_metrics(idx)
 
-        if selection_metric == "swfcd_logreg_joint":
+        if selection_metric in {"swfcd_classifier_joint", "swfcd_logreg_joint"}:
             comparisons = (
                 _compare_higher(joint_score, best_joint_score, min_delta=min_delta),
                 _compare_higher(swfcd, best_swfcd),
-                _compare_higher(logreg, best_logreg),
+                _compare_higher(classifier, best_classifier),
                 _compare_lower(loss, best_loss),
             )
             is_better = next((comparison > 0 for comparison in comparisons if comparison != 0), False)
@@ -197,14 +198,14 @@ def select_best_checkpoint(
 
         if is_better:
             best_idx = idx
-            best_loss, best_swfcd, best_logreg, best_joint_score = loss, swfcd, logreg, joint_score
+            best_loss, best_swfcd, best_classifier, best_joint_score = loss, swfcd, classifier, joint_score
 
     return {
         "best_index": best_idx,
         "best_epoch": best_idx + 1,
         "loss": best_loss,
         "swfcd_pearson": best_swfcd,
-        "logreg_accuracy": best_logreg,
+        "classifier_accuracy": best_classifier,
         "joint_score": best_joint_score,
         "selection_metric": selection_metric,
     }
@@ -217,6 +218,37 @@ def loss_params2str(train_params, train_batches, val_params, val_batches):
     train_pstr = _format_loss_dict(train_params, "Train", train_batches)
     val_pstr = _format_loss_dict(val_params, "Val", val_batches)
     return f"{train_pstr} | {val_pstr}"
+
+
+def _batch_labels_to_list(batch_labels):
+    if isinstance(batch_labels, torch.Tensor):
+        return batch_labels.detach().cpu().tolist()
+    if isinstance(batch_labels, np.ndarray):
+        return batch_labels.tolist()
+    if isinstance(batch_labels, (list, tuple)):
+        return list(batch_labels)
+    return [batch_labels]
+
+
+def _collect_latents_and_labels(model, data_loader, device, use_pred_heads, valid_last_dim):
+    latents = []
+    labels = []
+    model.eval()
+    with torch.no_grad():
+        for data, batch_labels in data_loader:
+            x = data.to(device)
+            valid_mask = _build_valid_mask(x, valid_last_dim)
+            output = model(x)
+            output = _apply_recon_mask(x, output, valid_mask)
+            _, latent = _extract_model_outputs(output)
+            if latent is None:
+                continue
+            latents.append(latent.detach().cpu())
+            raw_labels = batch_labels[0] if use_pred_heads else batch_labels
+            labels.extend(_batch_labels_to_list(raw_labels))
+    if not latents:
+        return None, []
+    return torch.cat(latents, dim=0).numpy(), labels
 
 def train_vae(
     model,
@@ -234,7 +266,7 @@ def train_vae(
     convergence_patience=None,
     convergence_min_delta=0.0,
     convergence_warmup_epochs=0,
-    checkpoint_selection_metric="swfcd_logreg_joint",
+    checkpoint_selection_metric="swfcd_classifier_joint",
     save_checkpoint=True,
     vectorize_val_reference=False,
 ):
@@ -367,14 +399,42 @@ def train_vae(
             else " | Val swfcd_pearson: nan"
         )
 
-        logreg_accuracy = float("nan")
+        classifier_accuracy = float("nan")
         if val_latents:
-            logreg_accuracy = logreg_accuracy_cv(to_numpy(torch.cat(val_latents, dim=0)), np.asarray(val_labels))
-        _append_history_metric(history, 'val', 'logreg_accuracy', logreg_accuracy)
+            train_latents_np, train_latent_labels = _collect_latents_and_labels(
+                model,
+                train_loader,
+                device,
+                use_pred_heads,
+                train_valid_last_dim,
+            )
+            val_latents_np = torch.cat(val_latents, dim=0).numpy()
+            classifier_result = run_latent_braingnn_classifier(
+                train_latents_np,
+                train_latent_labels,
+                val_latents_np,
+                val_labels,
+                device=device,
+            )
+            val_classifier_metrics = classifier_result.get("val_metrics") or {}
+            classifier_accuracy = float(val_classifier_metrics.get("accuracy", float("nan")))
+            _append_history_metric(
+                history,
+                'val',
+                'classifier_macro_f1',
+                float(val_classifier_metrics.get("macro_f1", float("nan"))),
+            )
+            _append_history_metric(
+                history,
+                'val',
+                'classifier_balanced_accuracy',
+                float(val_classifier_metrics.get("balanced_accuracy", float("nan"))),
+            )
+        _append_history_metric(history, 'val', 'classifier_accuracy', classifier_accuracy)
         val_metric_str += (
-            f" | Val logreg_accuracy: {logreg_accuracy:.4f}"
-            if np.isfinite(logreg_accuracy)
-            else " | Val logreg_accuracy: nan"
+            f" | Val classifier_accuracy: {classifier_accuracy:.4f}"
+            if np.isfinite(classifier_accuracy)
+            else " | Val classifier_accuracy: nan"
         )
 
         print(
@@ -388,7 +448,7 @@ def train_vae(
             "val": {p: val_loss_params[p] / num_val_batches for p in val_loss_params},
         }
         current_metrics["val"]["swfcd_pearson"] = history["val"]["swfcd_pearson"][-1]
-        current_metrics["val"]["logreg_accuracy"] = history["val"]["logreg_accuracy"][-1]
+        current_metrics["val"]["classifier_accuracy"] = history["val"]["classifier_accuracy"][-1]
 
         if best_model_losses is None:
             improved = True
@@ -403,9 +463,9 @@ def train_vae(
                         best_model_losses["val"].get("swfcd_pearson", float("nan")),
                         current_metrics["val"].get("swfcd_pearson", float("nan")),
                     ],
-                    "logreg_accuracy": [
-                        best_model_losses["val"].get("logreg_accuracy", float("nan")),
-                        current_metrics["val"].get("logreg_accuracy", float("nan")),
+                    "classifier_accuracy": [
+                        best_model_losses["val"].get("classifier_accuracy", float("nan")),
+                        current_metrics["val"].get("classifier_accuracy", float("nan")),
                     ],
                 }
             }

@@ -1,26 +1,32 @@
 default:
   data:
     data:
-      type: ADNI2
+      type: ADNI3
+      parcelations: 400
       batch_size: 32
-      random_seed: 42
       cache_file: data/ADNI_preprocessed_cache_400.pt
       cache_mode: load
-      normalize: true
-      transpose: true
-      pad_features: false
-      truncate_features: false
-      flatten: false
-      timepoints_as_samples: false
       fc_input: false
+      flatten: false
+      normalize: true
+      pad_features: false
       preserve_timepoints: false
+      random_seed: 42
+      timepoints_as_samples: false
+      transpose: true
+      truncate_features: false
+      train_split: 0.7
+      val_split: 0.15
+      heldout_subject_target: test
+      heldout_subject_overflow: val
+      heldout_subject_ids: [009_S_0751, 011_S_4278, 012_S_6073, 018_S_4400, 019_S_6668, 027_S_6001, 027_S_6034, 027_S_6327, 027_S_6640, 027_S_6788, 035_S_4114, 035_S_4785, 041_S_4513, 041_S_5253, 099_S_4076, 099_S_6632, 126_S_6724, 127_S_6173, 127_S_6330, 129_S_6852, 135_S_6411, 141_S_6061]
   model:
-    name: LAE
+    freeze_encoder: false
+    reset_decoder: false
   training:
     num_epochs: 1000
     save_dir: ./models
     evaluation_scope: combined
-    pipeline: group_transfer_matrix
     vectorize_val_reference: false
     learning_rate: 1e-3
     weight_decay: 1e-4
@@ -45,8 +51,9 @@ LAE:
   static_params:
     model:
       name: LAE
-      latent_dim: 32
   exp_params:
+    model:
+      latent_dim: [32, 16, 8]
     training:
       reproducibility:
         seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
@@ -56,13 +63,13 @@ VAE:
   static_params:
     model:
       name: VAE
-      latent_dim: 32
-      hidden_dims: [32]
+  exp_params:
+    model:
+      latent_dim: [32, 16, 8]
+      hidden_dims: [[32, 16], [32], [16]]
     training:
       loss_params:
-        beta: 0
-  exp_params:
-    training:
+        beta: [1.0, 0.5, 0]
       reproducibility:
         seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
 
@@ -71,13 +78,14 @@ ConvAE:
   static_params:
     model:
       name: ConvAE
-      kernel_size: 5
-      latent_dim: 32
-      hidden_dims: [32, 16]
     training:
       reproducibility:
         deterministic: false
   exp_params:
+    model:
+      latent_dim: [32, 16, 8]
+      hidden_dims: [[32, 16], [32], [16]]
+      kernel_size: [3, 5]
     training:
       reproducibility:
         seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
@@ -87,15 +95,16 @@ ConvVAE:
   static_params:
     model:
       name: ConvVAE
-      kernel_size: 5
-      latent_dim: 32
-      hidden_dims: [32, 16]
     training:
       reproducibility:
         deterministic: false
-      loss_params:
-        beta: 0.5
   exp_params:
+    model:
+      latent_dim: [32, 16, 8]
+      hidden_dims: [[32, 16], [32], [16]]
+      kernel_size: [3, 5]
     training:
       reproducibility:
         seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
+      loss_params:
+        beta: [1.0, 0.5]

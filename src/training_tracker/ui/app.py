@@ -47,17 +47,25 @@ def _default_index_path(results_dir: Path) -> Path:
     return results_dir / "index.jsonl"
 
 
+def _default_parameter_index_path(results_dir: Path) -> Path:
+    env_value = os.environ.get("TRAINING_TRACKER_PARAMETER_INDEX_FILE")
+    if env_value:
+        return Path(env_value)
+    return results_dir / "parameter_index.jsonl"
+
+
 def _results_fingerprint(index_path: Path, results_dir: Path) -> int:
     """Return a lightweight cache key that changes when tracker files change."""
-    candidates = [index_path]
-    candidates.extend(results_dir.glob("experiments/*/metadata.json"))
-    candidates.extend(results_dir.glob("experiments/*/history.json"))
+    del results_dir
+    if not index_path.exists():
+        return 0
+    return index_path.stat().st_mtime_ns
 
-    latest_mtime_ns = 0
-    for file_path in candidates:
-        if file_path.exists():
-            latest_mtime_ns = max(latest_mtime_ns, file_path.stat().st_mtime_ns)
-    return latest_mtime_ns
+
+def _parameter_index_fingerprint(parameter_index_path: Path) -> int:
+    if not parameter_index_path.exists():
+        return 0
+    return parameter_index_path.stat().st_mtime_ns
 
 
 @st.cache_data(show_spinner=False)
@@ -83,6 +91,29 @@ def _load_rows_cached(
         row["pca_class"] = _classification_label(category)
     _add_scores(rows)
     return rows
+
+
+@st.cache_data(show_spinner=False)
+def _load_parameter_index_cached(
+    parameter_index_path_str: str,
+    fingerprint: int,
+) -> dict[str, dict]:
+    _ = fingerprint
+    path = Path(parameter_index_path_str)
+    if not path.exists():
+        return {}
+
+    output: dict[str, dict] = {}
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            row = json.loads(stripped)
+            experiment_id = str(row.get("experiment_id", ""))
+            if experiment_id:
+                output[experiment_id] = row
+    return output
 
 
 def _history_to_frame(history: dict) -> pd.DataFrame:
@@ -393,6 +424,20 @@ def _dynamic_metric_specs_from_keys(metric_keys: set[str]) -> list[tuple[str, st
     return [(metric_key, title) for metric_key, title, _ in parsed_specs]
 
 
+def _per_class_f1_specs_from_keys(metric_keys: set[str]) -> list[tuple[str, str]]:
+    specs: list[tuple[str, str, str]] = []
+    for metric_key in metric_keys:
+        parsed = _parse_per_class_metric_row_key(metric_key)
+        if parsed is None:
+            continue
+        class_label, metric_name = parsed
+        if metric_name != "f1":
+            continue
+        specs.append((metric_key, f"{class_label} F1", class_label.lower()))
+    specs.sort(key=lambda item: item[2])
+    return [(metric_key, title) for metric_key, title, _ in specs]
+
+
 def _extract_per_class_rows(model_metrics: dict | None) -> pd.DataFrame:
     if not isinstance(model_metrics, dict):
         return pd.DataFrame()
@@ -460,6 +505,77 @@ def _metric_specs_for_model_metrics(model_metrics: dict) -> list[dict[str, str]]
         if _to_float(model_metrics.get(spec["source"])) is not None:
             specs.append(spec)
     return specs
+
+
+def _attach_parameter_index_per_class_f1(rows: list[dict], parameter_index_cache: dict[str, dict]) -> list[dict]:
+    output: list[dict] = []
+    for row in rows:
+        row_copy = dict(row)
+        experiment_id = str(row_copy.get("experiment_id", ""))
+        parameter_row = parameter_index_cache.get(experiment_id, {})
+        evaluation = parameter_row.get("evaluation", {}) if isinstance(parameter_row, dict) else {}
+        model_eval = evaluation.get("model", {}) if isinstance(evaluation, dict) else {}
+        per_class = model_eval.get("per_class", {}) if isinstance(model_eval, dict) else {}
+        if isinstance(per_class, dict):
+            for class_label, class_metrics in per_class.items():
+                if not isinstance(class_metrics, dict):
+                    continue
+                row_copy[_per_class_metric_row_key(str(class_label), "f1")] = _to_float(class_metrics.get("f1"))
+        output.append(row_copy)
+    return output
+
+
+def _has_displayable_values(series: pd.Series, numeric: bool = False) -> bool:
+    if numeric:
+        return any(_to_float(value) is not None for value in series.tolist())
+    return any(value is not None and not (isinstance(value, float) and pd.isna(value)) for value in series.tolist())
+
+
+def _all_experiments_table_specs(table_df: pd.DataFrame) -> tuple[list[str], dict[str, str]]:
+    base_specs = [
+        ("experiment_id", "experiment_id", False),
+        ("created_at", "created_at", False),
+        ("model_type", "model_type", False),
+        ("latent_dim", "latent_dim", True),
+        ("score", "score", True),
+        ("swfcd_logreg_score", "SWFCD+LogReg score", True),
+        ("fc_logreg_score", "FC+LogReg score", True),
+        ("best_val_loss", "best_val_loss", True),
+        ("test_mse", "test_mse", True),
+        ("test_accuracy", "test_accuracy", True),
+        ("test_balanced_accuracy", "test_balanced_accuracy", True),
+        ("test_macro_f1", "test_macro_f1", True),
+        ("test_roc_auc", "test_roc_auc", True),
+        ("test_roc_auc_ovr_macro", "test_roc_auc_ovr_macro", True),
+        ("test_fc_preservation", "test_fc_preservation", True),
+        ("test_silhouette", "test_silhouette", True),
+        ("test_logreg_accuracy", "test_logreg_accuracy", True),
+        ("test_swfcd_pearson", "test_swfcd_pearson", True),
+        ("test_swfcd_mad", "test_swfcd_mad", True),
+        ("test_swfcd_rmse", "test_swfcd_rmse", True),
+    ]
+
+    present_cols: list[str] = []
+    column_config: dict[str, str] = {}
+    for column_name, title, numeric in base_specs:
+        if column_name not in table_df.columns:
+            continue
+        if not _has_displayable_values(table_df[column_name], numeric=numeric):
+            continue
+        present_cols.append(column_name)
+        if title != column_name:
+            column_config[column_name] = title
+
+    per_class_specs = _per_class_f1_specs_from_keys(set(table_df.columns))
+    for metric_key, title in per_class_specs:
+        if metric_key not in table_df.columns:
+            continue
+        if not _has_displayable_values(table_df[metric_key], numeric=True):
+            continue
+        present_cols.append(metric_key)
+        column_config[metric_key] = title
+
+    return present_cols, column_config
 
 
 def _extract_group_metric_rows(groups_payload: dict | None) -> pd.DataFrame:
@@ -649,68 +765,232 @@ def _attach_significance(
     output: list[dict] = []
     for row in rows:
         row_copy = dict(row)
+        row_copy["_model_params"] = {}
+        row_copy["_training_params"] = {}
+        row_copy["_data_params"] = {}
+        row_copy["_experiment_params"] = {
+            "target_group": row_copy.get("target_group")
+        } if row_copy.get("target_group") is not None else {}
+        row_copy["significance"] = _to_float(row_copy.get("significance"))
+        row_copy["evaluation_scope"] = str(row_copy.get("evaluation_scope", "combined"))
+        row_copy["_evaluation_groups"] = {}
+        row_copy["evaluation_group_names"] = []
+
+        needs_metadata = any(
+            key not in row_copy
+            for key in (
+                "test_mse",
+                "pca_mse",
+                "delta_mse",
+                "target_group",
+                "model_hidden_dim",
+                "training_beta",
+                "data_flatten",
+                "data_transpose",
+                "data_timepoints_as_samples",
+                "data_fc_input",
+                "significance",
+            )
+        )
+        if needs_metadata:
+            experiment_id = str(row_copy.get("experiment_id", ""))
+            metadata = (metadata_cache or {}).get(experiment_id)
+            if not isinstance(metadata, dict):
+                try:
+                    loaded = manager.get_experiment(experiment_id)
+                    metadata = loaded if isinstance(loaded, dict) else {}
+                except Exception:
+                    metadata = {}
+
+            model_params = metadata.get("model_params", {}) if isinstance(metadata, dict) else {}
+            training_params = metadata.get("training_params", {}) if isinstance(metadata, dict) else {}
+            data_params = metadata.get("data_params", {}) if isinstance(metadata, dict) else {}
+            experiment_params = {}
+            if isinstance(metadata, dict) and metadata.get("target_group") is not None:
+                experiment_params["target_group"] = metadata.get("target_group")
+            row_copy["_model_params"] = model_params if isinstance(model_params, dict) else {}
+            row_copy["_training_params"] = training_params if isinstance(training_params, dict) else {}
+            row_copy["_data_params"] = data_params if isinstance(data_params, dict) else {}
+            row_copy["_experiment_params"] = experiment_params
+            row_copy["target_group"] = experiment_params.get("target_group")
+            row_copy["significance"] = _to_float(metadata.get("summary", {}).get("significance"))
+
+            evaluation = metadata.get("evaluation", {}) if isinstance(metadata, dict) else {}
+            if not isinstance(evaluation, dict):
+                evaluation = {}
+            row_copy["evaluation_scope"] = str(evaluation.get("scope", "combined"))
+            groups_payload = evaluation.get("groups", {})
+            row_copy["_evaluation_groups"] = groups_payload if isinstance(groups_payload, dict) else {}
+            row_copy["evaluation_group_names"] = sorted(row_copy["_evaluation_groups"].keys())
+            _apply_metric_bundle_to_row(
+                row_copy,
+                evaluation.get("model", {}),
+                evaluation.get("pca", {}),
+                evaluation.get("comparison", {}),
+            )
+
+            if isinstance(model_params, dict):
+                if row_copy.get("latent_dim") is None:
+                    row_copy["latent_dim"] = model_params.get("latent_dim")
+                if row_copy.get("latent_dim") is None:
+                    row_copy["latent_dim"] = model_params.get("latent_channels")
+                row_copy["model_hidden_dim"] = model_params.get("hidden_dim")
+                if row_copy["model_hidden_dim"] is None:
+                    row_copy["model_hidden_dim"] = model_params.get("channels")
+            else:
+                row_copy["model_hidden_dim"] = None
+
+            data_cfg = data_params.get("data", {}) if isinstance(data_params, dict) else {}
+            if not isinstance(data_cfg, dict):
+                data_cfg = {}
+            row_copy["data_flatten"] = bool(data_cfg.get("flatten", False))
+            row_copy["data_transpose"] = bool(data_cfg.get("transpose", False))
+            row_copy["data_timepoints_as_samples"] = bool(data_cfg.get("timepoints_as_samples", False))
+            row_copy["data_fc_input"] = bool(data_cfg.get("fc_input", False))
+
+            loss_params = training_params.get("loss_params", {}) if isinstance(training_params, dict) else {}
+            if not isinstance(loss_params, dict):
+                loss_params = {}
+            row_copy["training_beta"] = _to_float(loss_params.get("beta"))
+        else:
+            row_copy["target_group"] = row_copy.get("target_group")
+            row_copy["model_hidden_dim"] = row_copy.get("model_hidden_dim")
+            row_copy["training_beta"] = _to_float(row_copy.get("training_beta"))
+            row_copy["data_flatten"] = bool(row_copy.get("data_flatten", False))
+            row_copy["data_transpose"] = bool(row_copy.get("data_transpose", False))
+            row_copy["data_timepoints_as_samples"] = bool(row_copy.get("data_timepoints_as_samples", False))
+            row_copy["data_fc_input"] = bool(row_copy.get("data_fc_input", False))
+            for metric_key in (
+                "test_accuracy",
+                "test_balanced_accuracy",
+                "test_macro_f1",
+                "test_roc_auc",
+                "test_roc_auc_ovr_macro",
+                "test_mse",
+                "test_fc_preservation",
+                "test_silhouette",
+                "test_logreg_accuracy",
+                "test_swfcd_pearson",
+                "test_swfcd_mad",
+                "test_swfcd_rmse",
+                "pca_mse",
+                "pca_fc_preservation",
+                "pca_silhouette",
+                "pca_logreg_accuracy",
+                "pca_swfcd_pearson",
+                "pca_swfcd_rmse",
+                "delta_mse",
+                "delta_fc_preservation",
+                "delta_silhouette",
+                "delta_logreg_accuracy",
+            ):
+                row_copy[metric_key] = _to_float(row_copy.get(metric_key))
+        output.append(row_copy)
+    return output
+
+
+def _hydrate_rows_with_metadata(
+    rows: list[dict],
+    manager: TrainingResultsManager,
+    progress_label: str | None = None,
+) -> list[dict]:
+    """Populate full parameter/evaluation payloads for rows that need deep inspection."""
+    cache = st.session_state.setdefault("_tracker_metadata_cache", {})
+    parameter_index_cache = st.session_state.get("_tracker_parameter_index_cache", {})
+    hydrated_rows: list[dict] = []
+    missing_ids: list[str] = []
+
+    for row in rows:
+        experiment_id = str(row.get("experiment_id", ""))
+        has_model_params = isinstance(row.get("_model_params"), dict) and bool(row.get("_model_params"))
+        has_training_params = isinstance(row.get("_training_params"), dict) and bool(row.get("_training_params"))
+        has_data_params = isinstance(row.get("_data_params"), dict) and bool(row.get("_data_params"))
+        has_groups = isinstance(row.get("_evaluation_groups"), dict) and bool(row.get("_evaluation_groups"))
+        if has_model_params and has_training_params and has_data_params and has_groups:
+            continue
+        parameter_row = parameter_index_cache.get(experiment_id)
+        if isinstance(parameter_row, dict):
+            continue
+        if experiment_id and experiment_id not in cache:
+            missing_ids.append(experiment_id)
+
+    status = None
+    progress = None
+    total_missing = len(missing_ids)
+    if progress_label and total_missing:
+        status = st.empty()
+        progress = st.progress(0, text=f"{progress_label}: 0/{total_missing} metadata files loaded")
+
+    loaded_missing = 0
+    for idx, row in enumerate(rows, start=1):
+        row_copy = dict(row)
         experiment_id = str(row_copy.get("experiment_id", ""))
-        metadata = (metadata_cache or {}).get(experiment_id)
+        has_model_params = isinstance(row_copy.get("_model_params"), dict) and bool(row_copy.get("_model_params"))
+        has_training_params = isinstance(row_copy.get("_training_params"), dict) and bool(row_copy.get("_training_params"))
+        has_data_params = isinstance(row_copy.get("_data_params"), dict) and bool(row_copy.get("_data_params"))
+        has_groups = isinstance(row_copy.get("_evaluation_groups"), dict) and bool(row_copy.get("_evaluation_groups"))
+        if has_model_params and has_training_params and has_data_params and has_groups:
+            hydrated_rows.append(row_copy)
+            continue
+
+        parameter_row = parameter_index_cache.get(experiment_id)
+        if isinstance(parameter_row, dict):
+            row_copy["_model_params"] = parameter_row.get("model_params", {}) if isinstance(parameter_row.get("model_params"), dict) else {}
+            row_copy["_training_params"] = parameter_row.get("training_params", {}) if isinstance(parameter_row.get("training_params"), dict) else {}
+            row_copy["_data_params"] = parameter_row.get("data_params", {}) if isinstance(parameter_row.get("data_params"), dict) else {}
+            row_copy["_experiment_params"] = parameter_row.get("experiment_params", {}) if isinstance(parameter_row.get("experiment_params"), dict) else {}
+            row_copy["evaluation_scope"] = str(parameter_row.get("evaluation_scope", row_copy.get("evaluation_scope", "combined")))
+            groups_payload = parameter_row.get("evaluation_groups", {})
+            row_copy["_evaluation_groups"] = groups_payload if isinstance(groups_payload, dict) else {}
+            group_names = parameter_row.get("evaluation_group_names", [])
+            row_copy["evaluation_group_names"] = sorted(group_names) if isinstance(group_names, list) else []
+            hydrated_rows.append(row_copy)
+            continue
+
+        metadata = cache.get(experiment_id)
         if not isinstance(metadata, dict):
             try:
                 loaded = manager.get_experiment(experiment_id)
                 metadata = loaded if isinstance(loaded, dict) else {}
             except Exception:
                 metadata = {}
+            cache[experiment_id] = metadata
+            loaded_missing += 1
+            if progress is not None and (loaded_missing == total_missing or loaded_missing == 1 or loaded_missing % 25 == 0):
+                progress.progress(
+                    loaded_missing / total_missing,
+                    text=f"{progress_label}: {loaded_missing}/{total_missing} metadata files loaded",
+                )
+
         model_params = metadata.get("model_params", {}) if isinstance(metadata, dict) else {}
         training_params = metadata.get("training_params", {}) if isinstance(metadata, dict) else {}
         data_params = metadata.get("data_params", {}) if isinstance(metadata, dict) else {}
+        evaluation = metadata.get("evaluation", {}) if isinstance(metadata, dict) else {}
+        if not isinstance(evaluation, dict):
+            evaluation = {}
+
         experiment_params = {}
-        if isinstance(metadata, dict):
-            if metadata.get("target_group") is not None:
-                experiment_params["target_group"] = metadata.get("target_group")
+        if isinstance(metadata, dict) and metadata.get("target_group") is not None:
+            experiment_params["target_group"] = metadata.get("target_group")
+
         row_copy["_model_params"] = model_params if isinstance(model_params, dict) else {}
         row_copy["_training_params"] = training_params if isinstance(training_params, dict) else {}
         row_copy["_data_params"] = data_params if isinstance(data_params, dict) else {}
         row_copy["_experiment_params"] = experiment_params
-        row_copy["target_group"] = experiment_params.get("target_group")
-        significance = _to_float(metadata.get("summary", {}).get("significance"))
-        row_copy["significance"] = significance
-        evaluation = metadata.get("evaluation", {}) if isinstance(metadata, dict) else {}
-        if not isinstance(evaluation, dict):
-            evaluation = {}
-        model_eval = evaluation.get("model", {})
-        pca_eval = evaluation.get("pca", {})
-        comparison_eval = evaluation.get("comparison", {})
-        row_copy["evaluation_scope"] = str(evaluation.get("scope", "combined"))
+
         groups_payload = evaluation.get("groups", {})
         row_copy["_evaluation_groups"] = groups_payload if isinstance(groups_payload, dict) else {}
         row_copy["evaluation_group_names"] = sorted(row_copy["_evaluation_groups"].keys())
-        _apply_metric_bundle_to_row(row_copy, model_eval, pca_eval, comparison_eval)
-        if isinstance(model_params, dict):
-            # Standard models expose latent_dim/hidden_dim.
-            if row_copy.get("latent_dim") is None:
-                row_copy["latent_dim"] = model_params.get("latent_dim")
-            if row_copy.get("latent_dim") is None:
-                # AutoencoderKL-style naming.
-                row_copy["latent_dim"] = model_params.get("latent_channels")
+        hydrated_rows.append(row_copy)
 
-            row_copy["model_hidden_dim"] = model_params.get("hidden_dim")
-            if row_copy["model_hidden_dim"] is None:
-                # AutoencoderKL-style naming.
-                row_copy["model_hidden_dim"] = model_params.get("channels")
-        else:
-            row_copy["model_hidden_dim"] = None
+    if status is not None:
+        status.caption(
+            f"{progress_label}: loaded metadata for {total_missing}/{total_missing} experiments"
+        )
+    if progress is not None:
+        progress.empty()
 
-        data_cfg = data_params.get("data", {}) if isinstance(data_params, dict) else {}
-        if not isinstance(data_cfg, dict):
-            data_cfg = {}
-        row_copy["data_flatten"] = bool(data_cfg.get("flatten", False))
-        row_copy["data_transpose"] = bool(data_cfg.get("transpose", False))
-        row_copy["data_timepoints_as_samples"] = bool(data_cfg.get("timepoints_as_samples", False))
-        row_copy["data_fc_input"] = bool(data_cfg.get("fc_input", False))
-
-        loss_params = training_params.get("loss_params", {}) if isinstance(training_params, dict) else {}
-        if not isinstance(loss_params, dict):
-            loss_params = {}
-        row_copy["training_beta"] = _to_float(loss_params.get("beta"))
-        output.append(row_copy)
-    return output
+    return hydrated_rows
 
 
 def _metric_outcome(model_value: float | None, pca_value: float | None, lower_is_better: bool) -> int | None:
@@ -1542,7 +1822,14 @@ def main() -> None:
     results_dir = _default_results_dir()
     manager = TrainingResultsManager(results_dir=results_dir)
     index_path = _default_index_path(results_dir)
+    parameter_index_path = _default_parameter_index_path(results_dir)
     manager.index_path = index_path
+    manager.parameter_index_path = parameter_index_path
+    st.session_state["_tracker_parameter_index_cache"] = _load_parameter_index_cached(
+        str(parameter_index_path),
+        _parameter_index_fingerprint(parameter_index_path),
+    )
+    parameter_index_cache = st.session_state["_tracker_parameter_index_cache"]
 
     rows = _load_rows_cached(
         str(results_dir),
@@ -1550,6 +1837,7 @@ def main() -> None:
         _results_fingerprint(index_path, results_dir),
         8,
     )
+    rows = _attach_parameter_index_per_class_f1(rows, parameter_index_cache)
 
     st.caption(f"All experiments: {len(rows)}")
     if not rows:
@@ -1557,29 +1845,6 @@ def main() -> None:
         return
 
     table_df = pd.DataFrame(rows)
-    visible_cols = [
-        "experiment_id",
-        "created_at",
-        "model_type",
-        "latent_dim",
-        "score",
-        "swfcd_logreg_score",
-        "fc_logreg_score",
-        "best_val_loss",
-        "test_mse",
-        "test_accuracy",
-        "test_balanced_accuracy",
-        "test_macro_f1",
-        "test_roc_auc",
-        "test_roc_auc_ovr_macro",
-        "test_fc_preservation",
-        "test_silhouette",
-        "test_logreg_accuracy",
-        "test_swfcd_pearson",
-        "test_swfcd_mad",
-        "test_swfcd_rmse",
-    ]
-    present_cols = [col for col in visible_cols if col in table_df.columns]
     view_options = [
         "All Experiments",
         "Experiment Details",
@@ -1641,18 +1906,12 @@ def main() -> None:
             st.info("No experiments match the selected data filters.")
             return
 
+        present_cols, column_config = _all_experiments_table_specs(filtered_table_df)
         table_state = st.dataframe(
             filtered_table_df[present_cols],
             width="stretch",
             hide_index=True,
-            column_config={
-                "score": "score",
-                "swfcd_logreg_score": "SWFCD+LogReg score",
-                "fc_logreg_score": "FC+LogReg score",
-                "test_swfcd_pearson": "test_swfcd_pearson",
-                "test_swfcd_mad": "test_swfcd_mad",
-                "test_swfcd_rmse": "test_swfcd_rmse",
-            },
+            column_config=column_config,
             on_select="rerun",
             selection_mode="single-cell",
             key="all_experiments_table",
@@ -1889,7 +2148,12 @@ def main() -> None:
                 row for row in rows
                 if str(row.get("model_type", "unknown")) == selected_model_type
             ]
-            parameter_options = _parameter_options_for_model_type(selected_model_type, rows)
+            model_rows = _hydrate_rows_with_metadata(
+                model_rows,
+                manager,
+                progress_label=f"Loading metadata for {selected_model_type}",
+            )
+            parameter_options = _parameter_options_for_model_type(selected_model_type, model_rows)
             if not parameter_options:
                 st.info("No varying parameters found for this model type.")
                 return
@@ -1984,7 +2248,7 @@ def main() -> None:
                 return
 
             selected_rows = [
-                row for row in rows
+                row for row in model_rows
                 if str(row.get("model_type", "unknown")) == loaded_model_type
                 and _get_param_values_from_row(row, tuple(loaded_param_key.split(".")))
             ]
@@ -1993,7 +2257,7 @@ def main() -> None:
                 st.info("No runs available for loaded model/parameter selection.")
                 return
 
-            loaded_parameter_options = _parameter_options_for_model_type(loaded_model_type, rows)
+            loaded_parameter_options = _parameter_options_for_model_type(loaded_model_type, model_rows)
             loaded_filter_text = ", ".join(
                 f"{loaded_parameter_options.get(param_key, param_key)}={_display_group_value(param_value)}"
                 for param_key, param_value in loaded_extra_filters
@@ -2141,10 +2405,15 @@ def main() -> None:
         filter_col, charts_col = st.columns([1, 3], gap="large")
         allparam_compare_grouped = None
         allparam_compare_display_grouped = None
+        hydrated_rows = _hydrate_rows_with_metadata(
+            rows,
+            manager,
+            progress_label="Loading metadata for parameter comparison",
+        )
 
         with filter_col:
             st.markdown("**Filters**")
-            parameter_options = _parameter_options_for_rows(rows)
+            parameter_options = _parameter_options_for_rows(hydrated_rows)
             if not parameter_options:
                 st.info("No varying parameters found across experiments.")
                 return
@@ -2163,7 +2432,7 @@ def main() -> None:
             selected_param_path = tuple(selected_param_key.split("."))
 
             base_rows = [
-                row for row in rows
+                row for row in hydrated_rows
                 if _get_param_values_from_row(row, selected_param_path)
             ]
 
@@ -2236,7 +2505,7 @@ def main() -> None:
                 return
 
             selected_rows = [
-                row for row in rows
+                row for row in hydrated_rows
                 if _get_param_values_from_row(row, tuple(loaded_param_key.split(".")))
             ]
             selected_rows = _rows_matching_param_filters(selected_rows, loaded_extra_filters)
@@ -2244,7 +2513,7 @@ def main() -> None:
                 st.info("No runs available for loaded parameter selection.")
                 return
 
-            loaded_parameter_options = _parameter_options_for_rows(rows)
+            loaded_parameter_options = _parameter_options_for_rows(hydrated_rows)
             loaded_filter_text = ", ".join(
                 f"{loaded_parameter_options.get(param_key, param_key)}={_display_group_value(param_value)}"
                 for param_key, param_value in loaded_extra_filters

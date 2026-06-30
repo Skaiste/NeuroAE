@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader
 
@@ -110,6 +111,9 @@ def build_cache_signature(
     use_bio_levels,
     normaliser,
     filter,
+    heldout_subject_ids=None,
+    heldout_subject_target=None,
+    heldout_subject_overflow=None,
 ):
     return {
         "data_type": data_type,
@@ -127,6 +131,9 @@ def build_cache_signature(
         "fc_input": bool(fc_input),
         "preserve_timepoints": bool(preserve_timepoints),
         "use_bio_levels": list(use_bio_levels),
+        "heldout_subject_ids": sorted(str(subject_id) for subject_id in (heldout_subject_ids or [])),
+        "heldout_subject_target": heldout_subject_target,
+        "heldout_subject_overflow": heldout_subject_overflow,
         "normalizer": (
             {
                 "type": type(normaliser).__name__,
@@ -280,6 +287,87 @@ def build_data_loader_result(
     return result
 
 
+def _stratified_split_indices(indices, labels, split_sizes, random_seed):
+    indices = np.asarray(indices, dtype=int)
+    labels = np.asarray(labels, dtype=object)
+    if indices.size != labels.size:
+        raise ValueError(f"indices and labels must match in size, got {indices.size} and {labels.size}.")
+
+    split_sizes = {key: int(value) for key, value in split_sizes.items()}
+    total_requested = sum(split_sizes.values())
+    if total_requested != int(indices.size):
+        raise ValueError(
+            f"Requested split sizes {split_sizes} do not sum to number of indices {indices.size}."
+        )
+
+    if indices.size == 0:
+        return {key: np.asarray([], dtype=int) for key in split_sizes}
+
+    if split_sizes["val"] == 0 and split_sizes["test"] == 0:
+        return {
+            "train": indices.copy(),
+            "val": np.asarray([], dtype=int),
+            "test": np.asarray([], dtype=int),
+        }
+
+    rng = np.random.default_rng(random_seed)
+    shuffled_order = rng.permutation(indices.size)
+    indices = indices[shuffled_order]
+    labels = labels[shuffled_order]
+
+    def _stratify_or_none(y):
+        if y.size == 0:
+            return None
+        _, counts = np.unique(y, return_counts=True)
+        return y if counts.min() >= 2 else None
+
+    train_target = split_sizes["train"]
+    val_target = split_sizes["val"]
+    test_target = split_sizes["test"]
+
+    if train_target == 0:
+        train_idx = np.asarray([], dtype=int)
+        rem_idx = indices
+        rem_labels = labels
+    elif val_target == 0 and test_target == 0:
+        train_idx = indices
+        rem_idx = np.asarray([], dtype=int)
+        rem_labels = np.asarray([], dtype=object)
+    else:
+        stratify = _stratify_or_none(labels)
+        train_idx, rem_idx, train_labels, rem_labels = train_test_split(
+            indices,
+            labels,
+            train_size=train_target,
+            random_state=int(random_seed),
+            stratify=stratify,
+        )
+
+    if rem_idx.size == 0:
+        val_idx = np.asarray([], dtype=int)
+        test_idx = np.asarray([], dtype=int)
+    elif val_target == 0:
+        val_idx = np.asarray([], dtype=int)
+        test_idx = rem_idx
+    elif test_target == 0:
+        val_idx = rem_idx
+        test_idx = np.asarray([], dtype=int)
+    else:
+        stratify = _stratify_or_none(rem_labels)
+        val_idx, test_idx = train_test_split(
+            rem_idx,
+            train_size=val_target,
+            random_state=int(random_seed) + 1,
+            stratify=stratify,
+        )
+
+    return {
+        "train": np.asarray(train_idx, dtype=int),
+        "val": np.asarray(val_idx, dtype=int),
+        "test": np.asarray(test_idx, dtype=int),
+    }
+
+
 def prepare_data_loaders(
     data_loader,
     train_groups=None,
@@ -304,6 +392,9 @@ def prepare_data_loaders(
     normaliser=None,
     use_bio_levels=None,
     data_type=None,
+    heldout_subject_ids=None,
+    heldout_subject_target="test",
+    heldout_subject_overflow="val",
 ):
     use_bio_levels = use_bio_levels or []
     cache_mode = (cache_mode or "none").lower()
@@ -333,6 +424,9 @@ def prepare_data_loaders(
         use_bio_levels=use_bio_levels,
         normaliser=normaliser,
         filter=filter,
+        heldout_subject_ids=heldout_subject_ids,
+        heldout_subject_target=heldout_subject_target,
+        heldout_subject_overflow=heldout_subject_overflow,
     )
 
     if cache_mode == "load":
@@ -366,14 +460,115 @@ def prepare_data_loaders(
         val_bio_levels = {bl: [] for bl in use_bio_levels}
         test_bio_levels = {bl: [] for bl in use_bio_levels}
         split_rng = np.random.default_rng(random_seed)
-        indices = split_rng.permutation(len(all_timeseries))
 
-        n_train = int(len(all_timeseries) * train_split)
-        n_val = int(len(all_timeseries) * val_split)
+        total_count = len(all_timeseries)
+        n_train = int(total_count * train_split)
+        n_val = int(total_count * val_split)
+        n_test = total_count - n_train - n_val
 
-        train_indices = indices[:n_train]
-        val_indices = indices[n_train : n_train + n_val]
-        test_indices = indices[n_train + n_val :]
+        heldout_subject_ids = [str(subject_id) for subject_id in (heldout_subject_ids or [])]
+        heldout_subject_set = set(heldout_subject_ids)
+        heldout_target = str(heldout_subject_target or "test").lower()
+        heldout_overflow = str(heldout_subject_overflow or "val").lower()
+        valid_targets = {"val", "test"}
+        if heldout_target not in valid_targets:
+            raise ValueError(
+                f"heldout_subject_target must be one of {sorted(valid_targets)}, got {heldout_subject_target!r}."
+            )
+        if heldout_overflow not in valid_targets:
+            raise ValueError(
+                f"heldout_subject_overflow must be one of {sorted(valid_targets)}, got {heldout_subject_overflow!r}."
+            )
+
+        all_indices = np.arange(total_count)
+        if heldout_subject_set:
+            forced_mask = np.array(
+                [str(subject_id) in heldout_subject_set for subject_id in all_subject_ids],
+                dtype=bool,
+            )
+            forced_indices = all_indices[forced_mask]
+            remaining_indices = all_indices[~forced_mask]
+            missing_ids = sorted(heldout_subject_set.difference({str(subject_id) for subject_id in all_subject_ids}))
+            if missing_ids:
+                print(
+                    "Warning: requested held-out subject IDs were not found in the selected dataset: "
+                    + ", ".join(missing_ids)
+                )
+        else:
+            forced_indices = np.asarray([], dtype=int)
+            remaining_indices = all_indices
+
+        forced_indices = split_rng.permutation(forced_indices)
+        remaining_indices = split_rng.permutation(remaining_indices)
+
+        split_indices = {"train": [], "val": [], "test": []}
+        nominal_counts = {"train": n_train, "val": n_val, "test": n_test}
+
+        if forced_indices.size > 0:
+            preferred = heldout_target
+            overflow = heldout_overflow
+            preferred_take = min(len(forced_indices), nominal_counts[preferred])
+            split_indices[preferred].extend(forced_indices[:preferred_take].tolist())
+
+            cursor = preferred_take
+            overflow_take = min(len(forced_indices) - cursor, nominal_counts[overflow])
+            split_indices[overflow].extend(forced_indices[cursor : cursor + overflow_take].tolist())
+            cursor += overflow_take
+
+            if cursor < len(forced_indices):
+                # Keep all requested subjects out of training even if this makes val/test exceed nominal size.
+                split_indices[overflow].extend(forced_indices[cursor:].tolist())
+
+            print(
+                "Applied held-out subject split override: "
+                f"held_out={len(forced_indices)}, target={preferred}, overflow={overflow}, "
+                f"assigned_val={len(split_indices['val'])}, assigned_test={len(split_indices['test'])}"
+            )
+
+        remaining_target_sizes = {
+            "val": max(0, nominal_counts["val"] - len(split_indices["val"])),
+            "test": max(0, nominal_counts["test"] - len(split_indices["test"])),
+        }
+        remaining_target_sizes["train"] = len(remaining_indices) - remaining_target_sizes["val"] - remaining_target_sizes["test"]
+        if remaining_target_sizes["train"] < 0:
+            raise ValueError(
+                "Held-out subject assignment exceeded remaining split capacity in a way that made train negative. "
+                f"Computed remaining target sizes: {remaining_target_sizes}"
+            )
+
+        remaining_labels = [all_labels[i] for i in remaining_indices]
+        try:
+            stratified_remaining = _stratified_split_indices(
+                remaining_indices,
+                remaining_labels,
+                remaining_target_sizes,
+                random_seed=random_seed,
+            )
+            for split_name in ("train", "val", "test"):
+                split_indices[split_name].extend(stratified_remaining[split_name].tolist())
+            print(
+                "Distributed remaining subjects with stratified class balancing: "
+                f"train={len(stratified_remaining['train'])}, "
+                f"val={len(stratified_remaining['val'])}, "
+                f"test={len(stratified_remaining['test'])}"
+            )
+        except ValueError as exc:
+            remaining_cursor = 0
+            for split_name in ("val", "test"):
+                deficit = remaining_target_sizes[split_name]
+                if deficit > 0:
+                    next_cursor = remaining_cursor + deficit
+                    split_indices[split_name].extend(remaining_indices[remaining_cursor:next_cursor].tolist())
+                    remaining_cursor = next_cursor
+            split_indices["train"].extend(remaining_indices[remaining_cursor:].tolist())
+            print(
+                "Warning: stratified remaining split was not possible; fell back to random assignment. "
+                f"Reason: {exc}"
+            )
+
+        train_indices = np.asarray(split_indices["train"], dtype=int)
+        val_indices = np.asarray(split_indices["val"], dtype=int)
+        test_indices = np.asarray(split_indices["test"], dtype=int)
 
         train_data = [all_timeseries[i] for i in train_indices]
         train_ids = [all_subject_ids[i] for i in train_indices]
@@ -393,6 +588,11 @@ def prepare_data_loaders(
         for bl in use_bio_levels:
             test_bio_levels[bl] = [all_bio_levels[bl][i] for i in test_indices]
     else:
+        if heldout_subject_ids:
+            print(
+                "Warning: heldout_subject_ids is only applied when using random train/val/test ratios. "
+                "Explicit val_groups/test_groups were provided, so no subject-ID reassignment was performed."
+            )
         if cache_mode == "create":
             print("Creating cache from explicitly provided train/val/test groups.")
 

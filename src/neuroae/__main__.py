@@ -13,6 +13,7 @@ import os
 import pathlib
 import random
 import re
+from collections import Counter
 import numpy as np
 import torch
 import yaml
@@ -328,13 +329,34 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
         normaliser=normaliser,
         use_bio_levels=data_config['data'].get('use_bio_levels', []),
         data_type=data_type,
+        heldout_subject_ids=data_config["data"].get("heldout_subject_ids", []),
+        heldout_subject_target=data_config["data"].get("heldout_subject_target", "test"),
+        heldout_subject_overflow=data_config["data"].get("heldout_subject_overflow", "val"),
     )
+
+    def _format_split_counts(dataset):
+        labels = getattr(dataset, "labels", [])
+        if not labels:
+            return ""
+        counts = Counter(str(label) for label in labels if label is not None)
+        if not counts:
+            return ""
+        ordered_counts = ", ".join(f"{label}={counts[label]}" for label in sorted(counts))
+        return f" ({ordered_counts})"
 
     print(f"\nDataLoader information:")
     print(f"  Input dimension: {loaders['input_dim']}")
     print(f"  Number of samples:")
+    split_to_loader_key = {
+        "train": "train_loader",
+        "val": "val_loader",
+        "test": "test_loader",
+    }
     for split, num in loaders['num_samples'].items():
-        print(f"    {split}: {num}")
+        loader_key = split_to_loader_key.get(split)
+        dataset = getattr(loaders.get(loader_key), "dataset", None) if loader_key else None
+        counts_suffix = _format_split_counts(dataset) if dataset is not None else ""
+        print(f"    {split}: {num}{counts_suffix}")
 
     loaders["group_names"] = list(data_config["data"].get("groups", group_defaults))
 
@@ -461,12 +483,14 @@ def _build_training_summary(history, mse_pca, checkpoint_selection_metric="val_l
 
     val_losses = _metric_values("val", "loss")
     val_swfcd = _metric_values("val", "swfcd_pearson")
-    val_logreg = _metric_values("val", "logreg_accuracy")
+    val_classifier = _metric_values("val", "classifier_accuracy")
+    if not val_classifier:
+        val_classifier = _metric_values("val", "logreg_accuracy")
     train_losses = _metric_values("train", "loss")
     selected_epoch = None
     selected_val_loss = None
     selected_swfcd_pearson = None
-    selected_logreg_accuracy = None
+    selected_classifier_accuracy = None
     selected_joint_score = None
     best_val = None
     significance = None
@@ -476,7 +500,7 @@ def _build_training_summary(history, mse_pca, checkpoint_selection_metric="val_l
         selected_epoch = selection["best_epoch"]
         selected_val_loss = selection["loss"]
         selected_swfcd_pearson = selection["swfcd_pearson"]
-        selected_logreg_accuracy = selection["logreg_accuracy"]
+        selected_classifier_accuracy = selection.get("classifier_accuracy")
         selected_joint_score = selection.get("joint_score")
 
     if val_losses:
@@ -494,13 +518,13 @@ def _build_training_summary(history, mse_pca, checkpoint_selection_metric="val_l
         'best_epoch': selected_epoch,
         'selected_val_loss': selected_val_loss,
         'selected_swfcd_pearson': selected_swfcd_pearson,
-        'selected_logreg_accuracy': selected_logreg_accuracy,
+        'selected_classifier_accuracy': selected_classifier_accuracy,
         'selected_joint_score': selected_joint_score,
         'checkpoint_selection_metric': checkpoint_selection_metric,
         'val_pca_mse': mse_pca,
         'best_val_loss': best_val,
         'best_val_swfcd_pearson': _best_finite(val_swfcd, maximize=True),
-        'best_val_logreg_accuracy': _best_finite(val_logreg, maximize=True),
+        'best_val_classifier_accuracy': _best_finite(val_classifier, maximize=True),
         'significance': significance,
         'final_train_loss': float(train_losses[-1]) if train_losses else None,
         'final_val_loss': float(val_losses[-1]) if val_losses else None,
@@ -823,14 +847,14 @@ def run_training(
         convergence_patience=training_config['training'].get('convergence_patience'),
         convergence_min_delta=training_config['training'].get('convergence_min_delta', 0.0),
         convergence_warmup_epochs=training_config['training'].get('convergence_warmup_epochs', 0),
-        checkpoint_selection_metric=training_config['training'].get('checkpoint_selection_metric', 'val_loss'),
+        checkpoint_selection_metric=training_config['training'].get('checkpoint_selection_metric', 'swfcd_classifier_joint'),
         save_checkpoint=not dry_run,
         vectorize_val_reference=training_config['training'].get('vectorize_val_reference', False),
     )
     if dry_run:
         print(
             "Dry run training summary: "
-            f"{json.dumps(_build_training_summary(history, mse_pca, checkpoint_selection_metric=training_config['training'].get('checkpoint_selection_metric', 'val_loss')), sort_keys=True, default=str)}"
+            f"{json.dumps(_build_training_summary(history, mse_pca, checkpoint_selection_metric=training_config['training'].get('checkpoint_selection_metric', 'swfcd_classifier_joint')), sort_keys=True, default=str)}"
         )
         return None
 
@@ -842,7 +866,7 @@ def run_training(
         'summary': _build_training_summary(
             history,
             mse_pca,
-            checkpoint_selection_metric=training_config['training'].get('checkpoint_selection_metric', 'val_loss'),
+            checkpoint_selection_metric=training_config['training'].get('checkpoint_selection_metric', 'swfcd_classifier_joint'),
         ),
         'model_params': deepcopy(model_config.get('model', {})),
         'training_params': deepcopy(training_config.get('training', {})),
@@ -904,6 +928,8 @@ def run_evaluation(
 
     eval_metrics = eval_vae(
         model,
+        loaders['train_loader'],
+        loaders['val_loader'],
         loaders['test_loader'],
         pca=pca,
         evaluation_scope=evaluation_scope_override or training_config["training"].get("evaluation_scope", "combined"),

@@ -19,6 +19,14 @@ from .index import (
     replace_index_entry,
     write_index,
 )
+from .parameter_index import (
+    append_parameter_index_entry,
+    build_parameter_index_entry,
+    compute_varying_parameter_paths,
+    find_parameter_index_entry,
+    replace_parameter_index_entry,
+    write_parameter_index,
+)
 from .storage import read_json, write_json_atomic
 
 
@@ -30,6 +38,7 @@ class TrainingResultsManager:
         self.base_dir = self.results_dir.parent
         self.experiments_dir = self.results_dir / "experiments"
         self.index_path = self.results_dir / "index.jsonl"
+        self.parameter_index_path = self.results_dir / "parameter_index.jsonl"
 
         self.results_dir.mkdir(parents=True, exist_ok=True)
         self.experiments_dir.mkdir(parents=True, exist_ok=True)
@@ -69,6 +78,10 @@ class TrainingResultsManager:
 
         index_entry = build_index_entry(payload, metadata_path, self.base_dir)
         append_index_entry(self.index_path, index_entry)
+        append_parameter_index_entry(
+            self.parameter_index_path,
+            build_parameter_index_entry(payload),
+        )
 
         return experiment_id
 
@@ -113,6 +126,7 @@ class TrainingResultsManager:
         metadata["signature"] = get_or_build_signature(metadata)
         write_json_atomic(metadata_path, metadata)
         self._replace_index_entry(metadata_path, metadata)
+        self._replace_parameter_index_entry(metadata)
 
     def set_evaluation_metrics(
         self,
@@ -138,6 +152,7 @@ class TrainingResultsManager:
 
         write_json_atomic(metadata_path, metadata)
         self._replace_index_entry(metadata_path, metadata)
+        self._replace_parameter_index_entry(metadata)
 
     def get_evaluation_metrics(self, experiment_id: str) -> dict:
         """Return stored evaluation metrics for an experiment, if present."""
@@ -149,14 +164,34 @@ class TrainingResultsManager:
 
     def rebuild_index(self) -> None:
         entries: list[dict[str, Any]] = []
+        parameter_entries: list[dict[str, Any]] = []
+        metadata_records: list[tuple[Path, dict[str, Any]]] = []
         for metadata_path in sorted(self.experiments_dir.glob("*/metadata.json")):
             metadata = read_json(metadata_path)
             signature = get_or_build_signature(metadata)
             if metadata.get("signature") != signature:
                 metadata["signature"] = signature
                 write_json_atomic(metadata_path, metadata)
+            metadata_records.append((metadata_path, metadata))
+        varying_paths = compute_varying_parameter_paths([metadata for _, metadata in metadata_records])
+        for metadata_path, metadata in metadata_records:
             entries.append(build_index_entry(metadata, metadata_path, self.base_dir))
+            parameter_entries.append(build_parameter_index_entry(metadata, varying_paths))
         write_index(self.index_path, entries)
+        write_parameter_index(self.parameter_index_path, parameter_entries)
+
+    def rebuild_parameter_index(self) -> None:
+        metadata_records: list[dict[str, Any]] = []
+        metadata_by_path: list[tuple[Path, dict[str, Any]]] = []
+        for metadata_path in sorted(self.experiments_dir.glob("*/metadata.json")):
+            metadata = read_json(metadata_path)
+            metadata_records.append(metadata)
+            metadata_by_path.append((metadata_path, metadata))
+        varying_paths = compute_varying_parameter_paths(metadata_records)
+        parameter_entries: list[dict[str, Any]] = []
+        for _, metadata in metadata_by_path:
+            parameter_entries.append(build_parameter_index_entry(metadata, varying_paths))
+        write_parameter_index(self.parameter_index_path, parameter_entries)
 
     def _replace_index_entry(self, metadata_path: Path, metadata: dict) -> None:
         metadata["signature"] = get_or_build_signature(metadata)
@@ -164,6 +199,15 @@ class TrainingResultsManager:
             self.index_path,
             build_index_entry(metadata, metadata_path, self.base_dir),
         )
+
+    def _replace_parameter_index_entry(self, metadata: dict) -> None:
+        replace_parameter_index_entry(
+            self.parameter_index_path,
+            build_parameter_index_entry(metadata),
+        )
+
+    def get_parameter_index_entry(self, experiment_id: str) -> Optional[dict]:
+        return find_parameter_index_entry(self.parameter_index_path, experiment_id)
 
     def _get_metadata_path(self, experiment_id: str) -> Path:
         index_entry = find_index_entry(self.index_path, experiment_id)

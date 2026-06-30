@@ -25,3 +25,17 @@ class IndexEntry(TypedDict, total=False):
     latent_dim: int
     tags: List[str]
     metadata_path: str
+
+
+class ParameterIndexEntry(TypedDict, total=False):
+    schema_version: int
+    experiment_id: str
+    model_type: str
+    model_params: JSONDict
+    training_params: JSONDict
+    data_params: JSONDict
+    experiment_params: JSONDict
+    evaluation: JSONDict
+    evaluation_scope: str
+    evaluation_group_names: List[str]
+    evaluation_groups: JSONDict

@@ -4,10 +4,12 @@ import torch
 import torch.nn.functional as F
 
 
+from neurocls.eval import compute_classification_metrics
+
+from .metrics.classifier_accuracy import run_latent_braingnn_classifier
 from .utils.np_utils import to_numpy
 from .metrics.fc_preservation import fc_preservation_score
 from .metrics.silhouette import silhouette
-from .metrics.logreg_accuracy import logreg_accuracy_cv
 from .metrics.swfcd_torch import SwFCD
 
 
@@ -138,8 +140,67 @@ def _extract_model_outputs(model_out):
     return recon_x, latent
 
 
+def _batch_labels_to_list(batch_labels):
+    if isinstance(batch_labels, torch.Tensor):
+        return batch_labels.detach().cpu().tolist()
+    if isinstance(batch_labels, np.ndarray):
+        return batch_labels.tolist()
+    if isinstance(batch_labels, (list, tuple)):
+        return list(batch_labels)
+    return [batch_labels]
 
-def _compute_pca_metrics(pca, swfcd, inputs, latents, labels, dataset, valid_mask=None):
+
+def _collect_split_outputs(model, data_loader, device, use_pred_heads=False, include_recons=True):
+    inputs = []
+    recons = [] if include_recons else None
+    latents = []
+    labels = []
+    masks = []
+
+    model.eval()
+    with torch.no_grad():
+        for data, batch_labels in data_loader:
+            x = data.to(device)
+            valid_mask = _build_valid_mask(x, data_loader.dataset)
+            model_out = model(x)
+            model_out = _apply_recon_mask(x, model_out, valid_mask)
+            recon_x, latent = _extract_model_outputs(model_out)
+
+            inputs.append(x.detach().cpu())
+            if recons is not None:
+                recons.append(recon_x.detach().cpu())
+            latents.append(latent.detach().cpu())
+            if valid_mask is not None:
+                masks.append(valid_mask.detach().cpu())
+
+            raw_labels = batch_labels[0] if use_pred_heads else batch_labels
+            labels.extend(_batch_labels_to_list(raw_labels))
+
+    return {
+        "inputs": torch.cat(inputs, dim=0) if inputs else None,
+        "recons": torch.cat(recons, dim=0) if recons else None,
+        "latents": torch.cat(latents, dim=0) if latents else None,
+        "labels": np.asarray(labels, dtype=object),
+        "valid_mask": torch.cat(masks, dim=0) if masks else None,
+    }
+
+
+
+def _classifier_metric_bundle(metrics):
+    if not isinstance(metrics, dict):
+        return {
+            "classifier_accuracy": np.nan,
+            "classifier_balanced_accuracy": np.nan,
+            "classifier_macro_f1": np.nan,
+        }
+    return {
+        "classifier_accuracy": float(metrics.get("accuracy", np.nan)),
+        "classifier_balanced_accuracy": float(metrics.get("balanced_accuracy", np.nan)),
+        "classifier_macro_f1": float(metrics.get("macro_f1", np.nan)),
+    }
+
+
+def _compute_pca_metrics(pca, swfcd, inputs, latents, labels, dataset, classifier_metrics=None, valid_mask=None):
     mse = np.nan
     fc = np.nan
     swfcd_results = {'pearson': np.nan, 'mad': np.nan, 'rmse': np.nan}
@@ -157,19 +218,19 @@ def _compute_pca_metrics(pca, swfcd, inputs, latents, labels, dataset, valid_mas
     swfcd_rmse = _to_scalar_metric(swfcd_results['rmse']) if swfcd_results else np.nan
 
     sil = silhouette(latents, labels)
-    logreg_acc = logreg_accuracy_cv(latents, labels)
-    return {
+    metrics = {
         "mse": mse,
         "fc_preservation": fc,
         "silhouette": sil,
-        "logreg_accuracy": logreg_acc,
         "swfcd_pearson": swfcd_pearson,
         "swfcd_mad": swfcd_mad,
         "swfcd_rmse": swfcd_rmse,
     }
+    metrics.update(_classifier_metric_bundle(classifier_metrics))
+    return metrics
 
 
-def _compute_model_metrics(sw_fcd, inputs, recons, latents, labels, dataset, valid_mask=None):
+def _compute_model_metrics(sw_fcd, inputs, recons, latents, labels, dataset, classifier_metrics=None, valid_mask=None):
     mse = _masked_mse_torch(recons, inputs, valid_mask)
     fc_preservation = fc_preservation_score(inputs, recons, dataset)
 
@@ -181,17 +242,16 @@ def _compute_model_metrics(sw_fcd, inputs, recons, latents, labels, dataset, val
     z_np = to_numpy(latents)
     label_array = np.asarray(labels)
     sil = silhouette(z_np, label_array)
-    logreg_acc = logreg_accuracy_cv(z_np, label_array)
-
-    return {
+    metrics = {
         "mse": mse,
         "fc_preservation": fc_preservation,
         "silhouette": sil,
-        "logreg_accuracy": logreg_acc,
         "swfcd_pearson": swfcd_pearson,
         "swfcd_mad": swfcd_mad,
         "swfcd_rmse": swfcd_rmse,
     }
+    metrics.update(_classifier_metric_bundle(classifier_metrics))
+    return metrics
 
 
 def _comparison_deltas(model_metrics, pca_metrics):
@@ -201,7 +261,9 @@ def _comparison_deltas(model_metrics, pca_metrics):
         "mse_delta_model_minus_pca": model_metrics["mse"] - pca_metrics["mse"],
         "fc_delta_model_minus_pca": model_metrics["fc_preservation"] - pca_metrics["fc_preservation"],
         "silhouette_delta_model_minus_pca": model_metrics["silhouette"] - pca_metrics["silhouette"],
-        "logreg_delta_model_minus_pca": model_metrics["logreg_accuracy"] - pca_metrics["logreg_accuracy"],
+        "classifier_accuracy_delta_model_minus_pca": model_metrics["classifier_accuracy"] - pca_metrics["classifier_accuracy"],
+        "classifier_balanced_accuracy_delta_model_minus_pca": model_metrics["classifier_balanced_accuracy"] - pca_metrics["classifier_balanced_accuracy"],
+        "classifier_macro_f1_delta_model_minus_pca": model_metrics["classifier_macro_f1"] - pca_metrics["classifier_macro_f1"],
         "swfcd_pearson_delta_model_minus_pca": model_metrics["swfcd_pearson"] - pca_metrics["swfcd_pearson"],
         "swfcd_mad_delta_model_minus_pca": model_metrics["swfcd_mad"] - pca_metrics["swfcd_mad"],
         "swfcd_rmse_delta_model_minus_pca": model_metrics["swfcd_rmse"] - pca_metrics["swfcd_rmse"],
@@ -231,9 +293,19 @@ def _print_metric_summary(title, metrics):
     )
     print(f"  Silhouette: {metrics['silhouette']:.6f}" if np.isfinite(metrics["silhouette"]) else "  Silhouette: nan")
     print(
-        f"  Logistic regression accuracy (CV): {metrics['logreg_accuracy']:.6f}"
-        if np.isfinite(metrics["logreg_accuracy"])
-        else "  Logistic regression accuracy (CV): nan"
+        f"  Classifier accuracy: {metrics['classifier_accuracy']:.6f}"
+        if np.isfinite(metrics["classifier_accuracy"])
+        else "  Classifier accuracy: nan"
+    )
+    print(
+        f"  Classifier balanced accuracy: {metrics['classifier_balanced_accuracy']:.6f}"
+        if np.isfinite(metrics["classifier_balanced_accuracy"])
+        else "  Classifier balanced accuracy: nan"
+    )
+    print(
+        f"  Classifier macro F1: {metrics['classifier_macro_f1']:.6f}"
+        if np.isfinite(metrics["classifier_macro_f1"])
+        else "  Classifier macro F1: nan"
     )
     print(
         f"  SwFCD Pearson: {metrics['swfcd_pearson']:.6f}"
@@ -254,6 +326,8 @@ def _print_metric_summary(title, metrics):
 
 def eval_vae(
     model,
+    train_loader,
+    val_loader,
     data_loader,
     pca=None,
     use_pred_heads=False,
@@ -267,44 +341,37 @@ def eval_vae(
     - MSE
     - FC preservation
     - Latent silhouette score
-    - Latent logistic-regression accuracy (cross-validated)
+    - Latent classifier accuracy via BrainGNN trained on AE latents from train and validated on val
     - PCA baseline comparison (if PCA object is provided)
     """
     device = torch.device(device)
     model = model.to(device)
     model.eval()
 
-    all_inputs = []
-    all_recons = []
-    all_latents = []
-    all_masks = []
-
     swfcd = SwFCD(data_loader.dataset, 30, 3)
+    train_outputs = _collect_split_outputs(model, train_loader, device, use_pred_heads=use_pred_heads, include_recons=False)
+    val_outputs = _collect_split_outputs(model, val_loader, device, use_pred_heads=use_pred_heads, include_recons=False)
+    eval_outputs = _collect_split_outputs(model, data_loader, device, use_pred_heads=use_pred_heads, include_recons=True)
 
-    with torch.no_grad():
-        for data, _ in data_loader:
-            x = data.to(device)
-            valid_mask = _build_valid_mask(x, data_loader.dataset)
-            model_out = model(x)
-            model_out = _apply_recon_mask(x, model_out, valid_mask)
-
-            recon_x, latent = _extract_model_outputs(model_out)
-
-            all_inputs.append(x.detach().cpu())
-            all_recons.append(recon_x.detach().cpu())
-            all_latents.append(latent.detach().cpu())
-            if valid_mask is not None:
-                all_masks.append(valid_mask.detach().cpu())
-
-    x_all = torch.cat(all_inputs, dim=0)
-    x_hat_all = torch.cat(all_recons, dim=0)
-    z_all = torch.cat(all_latents, dim=0)
-    valid_mask_all = torch.cat(all_masks, dim=0) if all_masks else None
-
-    labels = np.asarray(getattr(data_loader.dataset, "labels", []), dtype=object)
+    x_all = eval_outputs["inputs"]
+    x_hat_all = eval_outputs["recons"]
+    z_all = eval_outputs["latents"]
+    valid_mask_all = eval_outputs["valid_mask"]
+    labels = eval_outputs["labels"]
     scope = str(evaluation_scope or "combined")
     if scope not in {"combined", "per_group"}:
         raise ValueError(f"Unsupported evaluation_scope: {evaluation_scope}")
+
+    classifier_result = run_latent_braingnn_classifier(
+        to_numpy(train_outputs["latents"]),
+        train_outputs["labels"].tolist(),
+        to_numpy(val_outputs["latents"]),
+        val_outputs["labels"].tolist(),
+        test_latents=to_numpy(eval_outputs["latents"]),
+        test_labels=labels.tolist(),
+        device=device,
+    )
+    classifier_metrics = classifier_result.get("test_metrics")
 
     model_metrics = _compute_model_metrics(
         sw_fcd=swfcd,
@@ -313,6 +380,7 @@ def eval_vae(
         latents=z_all,
         labels=labels,
         dataset=data_loader.dataset,
+        classifier_metrics=classifier_metrics,
         valid_mask=valid_mask_all,
     )
     metrics = {
@@ -327,6 +395,17 @@ def eval_vae(
         x_all_np = x_all.detach().cpu().numpy()
         valid_mask_np = to_numpy(valid_mask_all) if valid_mask_all is not None else None
         z_pca = pca.transform(x_all_np)
+        train_latents_pca = pca.transform(train_outputs["inputs"].detach().cpu().numpy())
+        val_latents_pca = pca.transform(val_outputs["inputs"].detach().cpu().numpy())
+        pca_classifier_result = run_latent_braingnn_classifier(
+            train_latents_pca,
+            train_outputs["labels"].tolist(),
+            val_latents_pca,
+            val_outputs["labels"].tolist(),
+            test_latents=z_pca,
+            test_labels=labels.tolist(),
+            device=device,
+        )
 
         pca_metrics = _compute_pca_metrics(
             pca=pca,
@@ -335,6 +414,7 @@ def eval_vae(
             latents=z_pca,
             labels=labels,
             dataset=data_loader.dataset,
+            classifier_metrics=pca_classifier_result.get("test_metrics"),
             valid_mask=valid_mask_np,
         )
 
@@ -415,6 +495,17 @@ def eval_vae(
             group_latents = _subset_tensor(z_all, group_idx_tensor)
             group_valid_mask = _subset_tensor(valid_mask_all, group_idx_tensor) if valid_mask_all is not None else None
             group_labels = labels[group_indices]
+            group_classifier_metrics = None
+            if classifier_result.get("test_predictions") is not None:
+                encoded_true = classifier_result["label_payload"]["test"][group_indices]
+                encoded_pred = classifier_result["test_predictions"][group_indices]
+                encoded_proba = classifier_result["test_probabilities"][group_indices]
+                group_classifier_metrics = compute_classification_metrics(
+                    encoded_true,
+                    encoded_pred,
+                    classifier_result["label_payload"]["classes"],
+                    y_proba=encoded_proba,
+                )
 
             group_model_metrics = _compute_model_metrics(
                 sw_fcd=swfcd,
@@ -423,6 +514,7 @@ def eval_vae(
                 latents=group_latents,
                 labels=group_labels,
                 dataset=data_loader.dataset,
+                classifier_metrics=group_classifier_metrics,
                 valid_mask=group_valid_mask,
             )
             group_metrics = {"model": group_model_metrics}
@@ -431,6 +523,17 @@ def eval_vae(
                 group_inputs_np = to_numpy(group_inputs)
                 group_valid_mask_np = to_numpy(group_valid_mask) if group_valid_mask is not None else None
                 group_latents_pca = pca.transform(group_inputs_np)
+                group_pca_classifier_metrics = None
+                if pca_classifier_result.get("test_predictions") is not None:
+                    encoded_true = pca_classifier_result["label_payload"]["test"][group_indices]
+                    encoded_pred = pca_classifier_result["test_predictions"][group_indices]
+                    encoded_proba = pca_classifier_result["test_probabilities"][group_indices]
+                    group_pca_classifier_metrics = compute_classification_metrics(
+                        encoded_true,
+                        encoded_pred,
+                        pca_classifier_result["label_payload"]["classes"],
+                        y_proba=encoded_proba,
+                    )
                 group_pca_metrics = _compute_pca_metrics(
                     pca=pca,
                     swfcd=swfcd,
@@ -438,6 +541,7 @@ def eval_vae(
                     latents=group_latents_pca,
                     labels=group_labels,
                     dataset=data_loader.dataset,
+                    classifier_metrics=group_pca_classifier_metrics,
                     valid_mask=group_valid_mask_np,
                 )
                 group_metrics["pca"] = group_pca_metrics
