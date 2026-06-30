@@ -185,6 +185,32 @@ def _collect_split_outputs(model, data_loader, device, use_pred_heads=False, inc
     }
 
 
+def _pool_classifier_latents(model, latents):
+    if latents is None:
+        return None
+    if not torch.is_tensor(latents) or latents.ndim != 2:
+        return latents
+
+    timepoint_dim = getattr(model, "timepoint_dim", None)
+    latent_per_timepoint = getattr(model, "latent_per_timepoint", None)
+    latent_flat_dim = getattr(model, "latent_flat_dim", None)
+    if (
+        timepoint_dim is None
+        or latent_per_timepoint is None
+        or latent_flat_dim is None
+        or latents.shape[1] != int(latent_flat_dim)
+    ):
+        return latents
+
+    pooled = latents.reshape(latents.shape[0], int(timepoint_dim), int(latent_per_timepoint)).mean(dim=1)
+    print(
+        "Evaluation: pooled classifier latents "
+        f"from shape={tuple(latents.shape)} to shape={tuple(pooled.shape)}",
+        flush=True,
+    )
+    return pooled
+
+
 
 def _classifier_metric_bundle(metrics):
     if not isinstance(metrics, dict):
@@ -192,11 +218,19 @@ def _classifier_metric_bundle(metrics):
             "classifier_accuracy": np.nan,
             "classifier_balanced_accuracy": np.nan,
             "classifier_macro_f1": np.nan,
+            "classifier_per_class_f1": {},
         }
+    per_class = metrics.get("per_class", {})
+    per_class_f1 = {}
+    if isinstance(per_class, dict):
+        for class_label, class_metrics in per_class.items():
+            if isinstance(class_metrics, dict):
+                per_class_f1[str(class_label)] = float(class_metrics.get("f1", np.nan))
     return {
         "classifier_accuracy": float(metrics.get("accuracy", np.nan)),
         "classifier_balanced_accuracy": float(metrics.get("balanced_accuracy", np.nan)),
         "classifier_macro_f1": float(metrics.get("macro_f1", np.nan)),
+        "classifier_per_class_f1": per_class_f1,
     }
 
 
@@ -307,6 +341,14 @@ def _print_metric_summary(title, metrics):
         if np.isfinite(metrics["classifier_macro_f1"])
         else "  Classifier macro F1: nan"
     )
+    per_class_f1 = metrics.get("classifier_per_class_f1", {})
+    if isinstance(per_class_f1, dict) and per_class_f1:
+        per_class_parts = []
+        for class_label, f1_value in per_class_f1.items():
+            per_class_parts.append(
+                f"{class_label}={f1_value:.6f}" if np.isfinite(f1_value) else f"{class_label}=nan"
+            )
+        print("  Classifier per-class F1: " + ", ".join(per_class_parts))
     print(
         f"  SwFCD Pearson: {metrics['swfcd_pearson']:.6f}"
         if np.isfinite(metrics["swfcd_pearson"])
@@ -348,9 +390,12 @@ def eval_vae(
     model = model.to(device)
     model.eval()
 
+    print("Evaluation: collecting train split latents", flush=True)
     swfcd = SwFCD(data_loader.dataset, 30, 3)
     train_outputs = _collect_split_outputs(model, train_loader, device, use_pred_heads=use_pred_heads, include_recons=False)
+    print("Evaluation: collecting validation split latents", flush=True)
     val_outputs = _collect_split_outputs(model, val_loader, device, use_pred_heads=use_pred_heads, include_recons=False)
+    print("Evaluation: collecting evaluation split reconstructions and latents", flush=True)
     eval_outputs = _collect_split_outputs(model, data_loader, device, use_pred_heads=use_pred_heads, include_recons=True)
 
     x_all = eval_outputs["inputs"]
@@ -362,17 +407,24 @@ def eval_vae(
     if scope not in {"combined", "per_group"}:
         raise ValueError(f"Unsupported evaluation_scope: {evaluation_scope}")
 
+    train_classifier_latents = _pool_classifier_latents(model, train_outputs["latents"])
+    val_classifier_latents = _pool_classifier_latents(model, val_outputs["latents"])
+    eval_classifier_latents = _pool_classifier_latents(model, eval_outputs["latents"])
+
+    print("Evaluation: training latent classifier for model latents", flush=True)
     classifier_result = run_latent_braingnn_classifier(
-        to_numpy(train_outputs["latents"]),
+        to_numpy(train_classifier_latents),
         train_outputs["labels"].tolist(),
-        to_numpy(val_outputs["latents"]),
+        to_numpy(val_classifier_latents),
         val_outputs["labels"].tolist(),
-        test_latents=to_numpy(eval_outputs["latents"]),
+        test_latents=to_numpy(eval_classifier_latents),
         test_labels=labels.tolist(),
         device=device,
     )
+    print("Evaluation: latent classifier finished for model latents", flush=True)
     classifier_metrics = classifier_result.get("test_metrics")
 
+    print("Evaluation: computing model metrics", flush=True)
     model_metrics = _compute_model_metrics(
         sw_fcd=swfcd,
         inputs=x_all,
@@ -392,11 +444,13 @@ def eval_vae(
 
     x_all_np = None
     if pca is not None:
+        print("Evaluation: preparing PCA baseline latents", flush=True)
         x_all_np = x_all.detach().cpu().numpy()
         valid_mask_np = to_numpy(valid_mask_all) if valid_mask_all is not None else None
         z_pca = pca.transform(x_all_np)
         train_latents_pca = pca.transform(train_outputs["inputs"].detach().cpu().numpy())
         val_latents_pca = pca.transform(val_outputs["inputs"].detach().cpu().numpy())
+        print("Evaluation: training latent classifier for PCA latents", flush=True)
         pca_classifier_result = run_latent_braingnn_classifier(
             train_latents_pca,
             train_outputs["labels"].tolist(),
@@ -406,7 +460,9 @@ def eval_vae(
             test_labels=labels.tolist(),
             device=device,
         )
+        print("Evaluation: latent classifier finished for PCA latents", flush=True)
 
+        print("Evaluation: computing PCA metrics", flush=True)
         pca_metrics = _compute_pca_metrics(
             pca=pca,
             swfcd=swfcd,

@@ -14,6 +14,11 @@ from .eval import compute_classification_metrics
 LOGGER = logging.getLogger("neurocls")
 
 
+def _emit_progress(message):
+    LOGGER.info(message)
+    print(message, flush=True)
+
+
 class VectorDataset(Dataset):
     def __init__(self, X, y):
         self.X = torch.as_tensor(X, dtype=torch.float32)
@@ -65,6 +70,10 @@ def train_sklearn_model(model, feature_payload, label_payload):
         train_X.shape[1],
         len(label_payload["classes"]),
     )
+    _emit_progress(
+        f"[neurocls] Starting sklearn training: samples={train_X.shape[0]} "
+        f"features={train_X.shape[1]} classes={len(label_payload['classes'])}"
+    )
     estimator = clone(model)
     estimator.fit(train_X, train_y)
     train_pred = estimator.predict(train_X)
@@ -92,6 +101,16 @@ def train_sklearn_model(model, feature_payload, label_payload):
             if val_metrics
             else ""
         ),
+    )
+    _emit_progress(
+        "[neurocls] Finished sklearn training: "
+        f"train_accuracy={train_metrics['accuracy']:.4f} "
+        f"train_macro_f1={train_metrics['macro_f1']:.4f}"
+        + (
+            f" val_accuracy={val_metrics['accuracy']:.4f} val_macro_f1={val_metrics['macro_f1']:.4f}"
+            if val_metrics
+            else ""
+        )
     )
     history = {
         "train": {"accuracy": [train_metrics["accuracy"]], "macro_f1": [train_metrics["macro_f1"]]},
@@ -194,6 +213,10 @@ def train_torch_model(model, family, feature_payload, label_payload, training_co
         metric_name,
         device,
     )
+    _emit_progress(
+        f"[neurocls] Starting torch training: family={family} samples={len(train_dataset)} "
+        f"batch_size={batch_size} epochs={num_epochs} metric={metric_name} device={device}"
+    )
     history = {"train": {"loss": [], "accuracy": [], "macro_f1": []}, "val": {"loss": [], "accuracy": [], "macro_f1": []}}
     best_state = deepcopy(model.state_dict())
     best_score = float("-inf")
@@ -236,6 +259,13 @@ def train_torch_model(model, family, feature_payload, label_payload, training_co
                     metric_name,
                     score,
                 )
+                _emit_progress(
+                    f"[neurocls] Epoch {epoch_idx + 1}/{num_epochs}: "
+                    f"train_loss={train_loss:.4f} train_accuracy={train_metrics['accuracy']:.4f} "
+                    f"train_macro_f1={train_metrics['macro_f1']:.4f} "
+                    f"val_loss={val_loss:.4f} val_accuracy={val_metrics['accuracy']:.4f} "
+                    f"val_macro_f1={val_metrics['macro_f1']:.4f} {metric_name}={score:.4f}"
+                )
             if score > (best_score + min_delta):
                 best_score = score
                 best_state = deepcopy(model.state_dict())
@@ -272,6 +302,11 @@ def train_torch_model(model, family, feature_payload, label_payload, training_co
                     train_metrics["accuracy"],
                     train_metrics["macro_f1"],
                 )
+                _emit_progress(
+                    f"[neurocls] Epoch {epoch_idx + 1}/{num_epochs}: "
+                    f"train_loss={train_loss:.4f} train_accuracy={train_metrics['accuracy']:.4f} "
+                    f"train_macro_f1={train_metrics['macro_f1']:.4f}"
+                )
 
     model.load_state_dict(best_state)
     train_eval_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
@@ -288,5 +323,16 @@ def train_torch_model(model, family, feature_payload, label_payload, training_co
             if best_val_metrics
             else ""
         ),
+    )
+    _emit_progress(
+        "[neurocls] Finished torch training: "
+        f"train_accuracy={train_metrics['accuracy']:.4f} "
+        f"train_macro_f1={train_metrics['macro_f1']:.4f}"
+        + (
+            f" best_val_accuracy={best_val_metrics['accuracy']:.4f} "
+            f"best_val_macro_f1={best_val_metrics['macro_f1']:.4f}"
+            if best_val_metrics
+            else ""
+        )
     )
     return model, history, train_metrics, best_val_metrics

@@ -37,6 +37,10 @@ LATENT_BRAINGNN_TRAINING_CONFIG = {
 }
 
 
+def _emit_classifier_progress(message):
+    print(f"[latent-clf] {message}", flush=True)
+
+
 def _set_seed(seed):
     seed = int(seed)
     random.seed(seed)
@@ -62,12 +66,19 @@ def _latent_graph_split(latents, labels):
         raise ValueError(
             f"Latent sample count {latent_matrix.shape[0]} does not match label count {len(labels)}."
         )
+    _emit_classifier_progress(
+        f"Building graph split: samples={latent_matrix.shape[0]} latent_dim={latent_matrix.shape[1]}"
+    )
     node_features = latent_matrix[:, :, None]
     norms = np.linalg.norm(latent_matrix, axis=1, keepdims=True)
     normalized = latent_matrix / np.maximum(norms, 1e-8)
     adjacency = np.abs(normalized[:, :, None] * normalized[:, None, :]).astype(np.float32, copy=False)
     diag = np.arange(adjacency.shape[1])
     adjacency[:, diag, diag] = 1.0
+    adjacency_mb = adjacency.nbytes / (1024 * 1024)
+    _emit_classifier_progress(
+        f"Built adjacency tensor: shape={adjacency.shape} estimated_memory={adjacency_mb:.1f}MB"
+    )
     return {
         "node_features": node_features.astype(np.float32, copy=False),
         "adjacency": adjacency,
@@ -139,9 +150,15 @@ def run_latent_braingnn_classifier(
     test_labels=None,
     device="cuda" if torch.cuda.is_available() else "cpu",
 ):
+    _emit_classifier_progress(
+        f"Starting latent BrainGNN classifier: train={len(train_labels)} val={len(val_labels)} "
+        f"test={len(test_labels) if test_labels is not None else 0} device={device}"
+    )
     label_payload = _encode_labels(train_labels, val_labels=val_labels, test_labels=test_labels)
+    _emit_classifier_progress(f"Encoded labels: classes={label_payload['classes']}")
     if len(label_payload["classes"]) < 2 or len(train_labels) == 0:
         nan_metrics = _nan_metrics(label_payload["classes"])
+        _emit_classifier_progress("Skipping classifier: insufficient classes or empty training labels")
         return {
             "model": None,
             "history": {"train": {}, "val": {}},
@@ -153,10 +170,16 @@ def run_latent_braingnn_classifier(
             "label_payload": label_payload,
         }
 
+    _emit_classifier_progress("Preparing train graph payload")
     train_split = _latent_graph_split(train_latents, train_labels)
+    _emit_classifier_progress("Preparing validation graph payload")
     val_split = _latent_graph_split(val_latents, val_labels)
-    test_split = _latent_graph_split(test_latents, test_labels) if test_latents is not None and test_labels is not None else None
+    test_split = None
+    if test_latents is not None and test_labels is not None:
+        _emit_classifier_progress("Preparing test graph payload")
+        test_split = _latent_graph_split(test_latents, test_labels)
 
+    _emit_classifier_progress("Scaling node features")
     train_nodes, val_nodes, test_nodes = _fit_graph_scaler(
         train_split["node_features"],
         val_split["node_features"],
@@ -175,13 +198,19 @@ def run_latent_braingnn_classifier(
         "scaler": None,
     }
     feature_metadata = {"input_shape": tuple(train_split["node_features"].shape[1:])}
+    _emit_classifier_progress(f"Feature metadata prepared: input_shape={feature_metadata['input_shape']}")
 
     model_config = deepcopy(LATENT_BRAINGNN_MODEL_CONFIG)
     training_config = deepcopy(LATENT_BRAINGNN_TRAINING_CONFIG)
     seed = int(training_config["training"]["reproducibility"]["seed"])
     _set_seed(seed)
 
+    _emit_classifier_progress("Creating BrainGNN classifier runtime")
     runtime = create_model(model_config, feature_metadata["input_shape"], len(label_payload["classes"]))
+    _emit_classifier_progress(
+        f"Created runtime: family={runtime['family']} classes={len(label_payload['classes'])}"
+    )
+    _emit_classifier_progress("Starting classifier optimization")
     model, history, train_metrics, val_metrics = train_torch_model(
         runtime["model"],
         runtime["family"],
@@ -195,6 +224,7 @@ def run_latent_braingnn_classifier(
     test_predictions = None
     test_probabilities = None
     if test_split is not None and label_payload["test"] is not None and len(label_payload["test"]) > 0:
+        _emit_classifier_progress("Running classifier predictions on test split")
         test_predictions, test_probabilities = _predict_graph_model(model, test_split, torch.device(device))
         test_metrics = compute_classification_metrics(
             label_payload["test"],
@@ -202,6 +232,7 @@ def run_latent_braingnn_classifier(
             label_payload["classes"],
             y_proba=test_probabilities,
         )
+    _emit_classifier_progress("Latent BrainGNN classifier finished")
 
     return {
         "model": model,
