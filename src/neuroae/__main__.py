@@ -6,6 +6,7 @@ This script loads ADNI-B data and can be used for training models or running inf
 
 import argparse
 import concurrent.futures
+import faulthandler
 import hashlib
 import json
 import math
@@ -13,6 +14,7 @@ import os
 import pathlib
 import random
 import re
+import sys
 from collections import Counter
 import numpy as np
 import torch
@@ -970,12 +972,14 @@ def run_standard_experiment_pipeline(
     results_dir=None,
     loaders=None,
 ):
+    print("  Stage: configure reproducibility", flush=True)
     if dry_run:
         training_config = deepcopy(training_config)
         training_config.setdefault("training", {})
         training_config["training"]["dry_run"] = True
     configure_reproducibility(data_config=data_config, training_config=training_config)
     if loaders is None:
+        print("  Stage: load data", flush=True)
         loaders = load_data_from_config(
             data_dir=data_dir,
             data_config=data_config,
@@ -983,6 +987,7 @@ def run_standard_experiment_pipeline(
         )
     input_dim = loaders['input_dim']
     timepoint_dim = loaders['timepoint_dim']
+    print("  Stage: build model", flush=True)
     model, model_name, latent_dim = load_model_from_config(
         model_config=model_config,
         data_config=data_config,
@@ -991,6 +996,7 @@ def run_standard_experiment_pipeline(
         device=device,
         preserve_timepoints=loaders.get('preserve_timepoints', False)
     )
+    print("  Stage: train model", flush=True)
     exp_id = run_training(
         model,
         model_name,
@@ -1002,6 +1008,7 @@ def run_standard_experiment_pipeline(
         device=device,
         results_dir=results_dir,
     )
+    print("  Stage: evaluate model", flush=True)
     run_evaluation(
         model,
         latent_dim,
@@ -1035,8 +1042,10 @@ def run_group_transfer_matrix_pipeline(
         training_config["training"]["dry_run"] = True
 
     _validate_group_transfer_matrix_config(model_config)
+    print("  Stage: configure reproducibility", flush=True)
     configure_reproducibility(data_config=data_config, training_config=training_config)
 
+    print("  Stage: load data", flush=True)
     loaders = load_data_from_config(
         data_dir=data_dir,
         data_config=data_config,
@@ -1048,6 +1057,7 @@ def run_group_transfer_matrix_pipeline(
 
     input_dim = loaders["input_dim"]
     timepoint_dim = loaders["timepoint_dim"]
+    print("  Stage: build model", flush=True)
     general_model, model_name, latent_dim = load_model_from_config(
         model_config=model_config,
         data_config=data_config,
@@ -1066,6 +1076,7 @@ def run_group_transfer_matrix_pipeline(
         "group_finetune_ids": {},
         "pipeline_complete": False,
     }
+    print("  Stage: train general model", flush=True)
     general_experiment_id = run_training(
         general_model,
         model_name,
@@ -1078,6 +1089,7 @@ def run_group_transfer_matrix_pipeline(
         results_dir=results_dir,
         extra_metadata=general_metadata,
     )
+    print("  Stage: evaluate general model", flush=True)
     general_eval_metrics = run_evaluation(
         general_model,
         latent_dim,
@@ -1212,6 +1224,12 @@ def run_experiment_pipeline(
 
 def main():
     """Main function for training and inference."""
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True, write_through=True)
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(line_buffering=True, write_through=True)
+    faulthandler.enable()
+
     parser = argparse.ArgumentParser(description='Train VAE models or run inference on ADNI-B data')
     parser.add_argument(
         '-m', '--mode',
