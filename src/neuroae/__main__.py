@@ -849,14 +849,15 @@ def run_training(
         convergence_patience=training_config['training'].get('convergence_patience'),
         convergence_min_delta=training_config['training'].get('convergence_min_delta', 0.0),
         convergence_warmup_epochs=training_config['training'].get('convergence_warmup_epochs', 0),
-        checkpoint_selection_metric=training_config['training'].get('checkpoint_selection_metric', 'swfcd_classifier_joint'),
+        checkpoint_selection_metric=training_config['training'].get('checkpoint_selection_metric', 'swfcd_loss_joint'),
         save_checkpoint=not dry_run,
         vectorize_val_reference=training_config['training'].get('vectorize_val_reference', False),
+        compute_swfcd_during_training=training_config['training'].get('compute_swfcd_during_training'),
     )
     if dry_run:
         print(
             "Dry run training summary: "
-            f"{json.dumps(_build_training_summary(history, mse_pca, checkpoint_selection_metric=training_config['training'].get('checkpoint_selection_metric', 'swfcd_classifier_joint')), sort_keys=True, default=str)}"
+            f"{json.dumps(_build_training_summary(history, mse_pca, checkpoint_selection_metric=training_config['training'].get('checkpoint_selection_metric', 'swfcd_loss_joint')), sort_keys=True, default=str)}"
         )
         return None
 
@@ -868,7 +869,7 @@ def run_training(
         'summary': _build_training_summary(
             history,
             mse_pca,
-            checkpoint_selection_metric=training_config['training'].get('checkpoint_selection_metric', 'swfcd_classifier_joint'),
+            checkpoint_selection_metric=training_config['training'].get('checkpoint_selection_metric', 'swfcd_loss_joint'),
         ),
         'model_params': deepcopy(model_config.get('model', {})),
         'training_params': deepcopy(training_config.get('training', {})),

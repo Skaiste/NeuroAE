@@ -153,7 +153,7 @@ def _joint_metric_score(swfcd, logreg, swfcd_weight=0.5, logreg_weight=0.5):
 
 def select_best_checkpoint(
     history,
-    selection_metric="swfcd_classifier_joint",
+    selection_metric="swfcd_loss_joint",
     min_delta=0.0,
     swfcd_weight=0.5,
     classifier_weight=0.5,
@@ -193,6 +193,14 @@ def select_best_checkpoint(
                 _compare_lower(loss, best_loss),
             )
             is_better = next((comparison > 0 for comparison in comparisons if comparison != 0), False)
+        elif selection_metric in {"swfcd_loss_joint", "swfcd_joint"}:
+            comparisons = (
+                _compare_higher(swfcd, best_swfcd, min_delta=min_delta),
+                _compare_lower(loss, best_loss),
+            )
+            is_better = next((comparison > 0 for comparison in comparisons if comparison != 0), False)
+        elif selection_metric in {"swfcd", "swfcd_pearson"}:
+            is_better = _compare_higher(swfcd, best_swfcd, min_delta=min_delta) > 0
         else:
             is_better = _compare_lower(loss, best_loss, min_delta=min_delta) > 0
 
@@ -266,9 +274,10 @@ def train_vae(
     convergence_patience=None,
     convergence_min_delta=0.0,
     convergence_warmup_epochs=0,
-    checkpoint_selection_metric="swfcd_classifier_joint",
+    checkpoint_selection_metric="swfcd_loss_joint",
     save_checkpoint=True,
     vectorize_val_reference=False,
+    compute_swfcd_during_training=None,
 ):
     device = torch.device(device)
     model = model.to(device)
@@ -285,9 +294,25 @@ def train_vae(
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     train_valid_last_dim = _dataset_valid_last_dim(train_loader.dataset)
     val_valid_last_dim = _dataset_valid_last_dim(val_loader.dataset)
-    val_swfcd = SwFCD(val_loader.dataset, 30, 3)
+    selection_metric = str(checkpoint_selection_metric or "val_loss")
+    selection_requires_joint_metrics = selection_metric in {"swfcd_classifier_joint", "swfcd_logreg_joint"}
+    if selection_requires_joint_metrics:
+        raise ValueError(
+            "Training-time checkpoint_selection_metric values "
+            "'swfcd_classifier_joint' and 'swfcd_logreg_joint' are no longer supported "
+            "because classifier metrics are evaluation-only. Use 'swfcd_loss_joint', "
+            "'swfcd', or 'val_loss' instead."
+        )
+    if compute_swfcd_during_training is None:
+        compute_swfcd_during_training = selection_metric in {"swfcd_loss_joint", "swfcd_joint", "swfcd", "swfcd_pearson"}
+
+    val_swfcd = SwFCD(val_loader.dataset, 30, 3) if compute_swfcd_during_training else None
     val_reference_vec = None
-    if vectorize_val_reference and not getattr(val_loader.dataset, "fc_input", False):
+    if (
+        compute_swfcd_during_training
+        and vectorize_val_reference
+        and not getattr(val_loader.dataset, "fc_input", False)
+    ):
         val_reference = torch.as_tensor(val_loader.dataset.data, dtype=torch.float32, device=device)
         val_reference_vec = val_swfcd.vectorize(val_reference, track_grad=False)
     for epoch in range(num_epochs):
@@ -361,7 +386,7 @@ def train_vae(
                 recon_x_detached = recon_x.detach()
                 if val_recons is not None:
                     val_recons.append(recon_x_detached)
-                elif not getattr(val_loader.dataset, "fc_input", False):
+                elif compute_swfcd_during_training and not getattr(val_loader.dataset, "fc_input", False):
                     swfcd_results = val_swfcd.apply(x.detach(), recon_x_detached)
                     if swfcd_results is not None:
                         swfcd_pearson_sum += float(swfcd_results["pearson"].detach().cpu().item()) * data.shape[0]
@@ -398,44 +423,7 @@ def train_vae(
             if np.isfinite(swfcd_pearson)
             else " | Val swfcd_pearson: nan"
         )
-
-        classifier_accuracy = float("nan")
-        if val_latents:
-            train_latents_np, train_latent_labels = _collect_latents_and_labels(
-                model,
-                train_loader,
-                device,
-                use_pred_heads,
-                train_valid_last_dim,
-            )
-            val_latents_np = torch.cat(val_latents, dim=0).numpy()
-            classifier_result = run_latent_braingnn_classifier(
-                train_latents_np,
-                train_latent_labels,
-                val_latents_np,
-                val_labels,
-                device=device,
-            )
-            val_classifier_metrics = classifier_result.get("val_metrics") or {}
-            classifier_accuracy = float(val_classifier_metrics.get("accuracy", float("nan")))
-            _append_history_metric(
-                history,
-                'val',
-                'classifier_macro_f1',
-                float(val_classifier_metrics.get("macro_f1", float("nan"))),
-            )
-            _append_history_metric(
-                history,
-                'val',
-                'classifier_balanced_accuracy',
-                float(val_classifier_metrics.get("balanced_accuracy", float("nan"))),
-            )
-        _append_history_metric(history, 'val', 'classifier_accuracy', classifier_accuracy)
-        val_metric_str += (
-            f" | Val classifier_accuracy: {classifier_accuracy:.4f}"
-            if np.isfinite(classifier_accuracy)
-            else " | Val classifier_accuracy: nan"
-        )
+        _append_history_metric(history, 'val', 'classifier_accuracy', float("nan"))
 
         print(
             f"Epoch {epoch}/{num_epochs} | "
