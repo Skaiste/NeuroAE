@@ -485,14 +485,10 @@ def _build_training_summary(history, mse_pca, checkpoint_selection_metric="val_l
 
     val_losses = _metric_values("val", "loss")
     val_swfcd = _metric_values("val", "swfcd_pearson")
-    val_classifier = _metric_values("val", "classifier_accuracy")
-    if not val_classifier:
-        val_classifier = _metric_values("val", "logreg_accuracy")
     train_losses = _metric_values("train", "loss")
     selected_epoch = None
     selected_val_loss = None
     selected_swfcd_pearson = None
-    selected_classifier_accuracy = None
     selected_joint_score = None
     best_val = None
     significance = None
@@ -502,7 +498,6 @@ def _build_training_summary(history, mse_pca, checkpoint_selection_metric="val_l
         selected_epoch = selection["best_epoch"]
         selected_val_loss = selection["loss"]
         selected_swfcd_pearson = selection["swfcd_pearson"]
-        selected_classifier_accuracy = selection.get("classifier_accuracy")
         selected_joint_score = selection.get("joint_score")
 
     if val_losses:
@@ -520,13 +515,11 @@ def _build_training_summary(history, mse_pca, checkpoint_selection_metric="val_l
         'best_epoch': selected_epoch,
         'selected_val_loss': selected_val_loss,
         'selected_swfcd_pearson': selected_swfcd_pearson,
-        'selected_classifier_accuracy': selected_classifier_accuracy,
         'selected_joint_score': selected_joint_score,
         'checkpoint_selection_metric': checkpoint_selection_metric,
         'val_pca_mse': mse_pca,
         'best_val_loss': best_val,
         'best_val_swfcd_pearson': _best_finite(val_swfcd, maximize=True),
-        'best_val_classifier_accuracy': _best_finite(val_classifier, maximize=True),
         'significance': significance,
         'final_train_loss': float(train_losses[-1]) if train_losses else None,
         'final_val_loss': float(val_losses[-1]) if val_losses else None,
@@ -716,12 +709,29 @@ def get_most_recent_experiment_id(index_path):
     return latest_entry["experiment_id"]
 
 
-def build_experiment_signature(model_type, model_params, training_params, data_params):
+def _experiment_identity_fields(training_params=None, extra_metadata=None):
+    training_section = training_params if isinstance(training_params, dict) else {}
+    output = {}
+    pipeline = training_section.get("pipeline", "standard")
+    output["pipeline"] = str(pipeline)
+    if isinstance(extra_metadata, dict):
+        for key in ("transfer_stage", "target_group", "source_experiment_id"):
+            value = extra_metadata.get(key)
+            if value is not None:
+                output[key] = value
+        transfer_groups = extra_metadata.get("transfer_groups")
+        if isinstance(transfer_groups, list):
+            output["transfer_groups"] = list(transfer_groups)
+    return output
+
+
+def build_experiment_signature(model_type, model_params, training_params, data_params, extra_metadata=None):
     canonical = {
         "model_type": model_type,
         "model_params": model_params,
         "training_params": training_params,
         "data_params": data_params,
+        "identity": _experiment_identity_fields(training_params=training_params, extra_metadata=extra_metadata),
     }
     payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:8]
@@ -776,6 +786,7 @@ def load_completed_experiment_signatures(results_dir):
             model_params=metadata.get("model_params", {}),
             training_params=metadata.get("training_params", {}),
             data_params=metadata.get("data_params", {}),
+            extra_metadata=metadata,
         )
         completed_signatures.add(signature)
     return completed_signatures
@@ -810,11 +821,16 @@ def run_training(
     experiment_id = None
     if not dry_run:
         tracker = TrainingResultsManager(results_dir=results_dir)
+        identity = _experiment_identity_fields(
+            training_params=training_config.get("training", {}),
+            extra_metadata=extra_metadata,
+        )
         experiment_id = tracker.build_experiment_id(
             model_type=model_name,
             model_params=model_config.get('model', {}),
             training_params=training_config.get('training', {}),
             data_params=data_config,
+            identity=identity,
         )
         print(f"Experiment ID: {experiment_id}")
     else:
@@ -1546,6 +1562,7 @@ def main():
                     model_params=mc.get("model", {}),
                     training_params=tc.get("training", {}),
                     data_params=dc,
+                    extra_metadata={"pipeline": _get_training_pipeline(tc)},
                 )
                 if signature in completed_signatures:
                     skipped_completed += 1

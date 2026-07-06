@@ -160,36 +160,26 @@ def select_best_checkpoint(
 ):
     val_losses = _metric_values(history, "val", "loss")
     val_swfcd = _metric_values(history, "val", "swfcd_pearson")
-    val_classifier = _metric_values(history, "val", "classifier_accuracy")
-    if not val_classifier:
-        val_classifier = _metric_values(history, "val", "logreg_accuracy")
-    num_epochs = max(len(val_losses), len(val_swfcd), len(val_classifier))
+    num_epochs = max(len(val_losses), len(val_swfcd))
     if num_epochs == 0:
         return None
 
     def _epoch_metrics(idx):
         loss = float(val_losses[idx]) if idx < len(val_losses) else float("nan")
         swfcd = float(val_swfcd[idx]) if idx < len(val_swfcd) else float("nan")
-        classifier = float(val_classifier[idx]) if idx < len(val_classifier) else float("nan")
-        joint_score = _joint_metric_score(
-            swfcd,
-            classifier,
-            swfcd_weight=swfcd_weight,
-            logreg_weight=classifier_weight,
-        )
-        return loss, swfcd, classifier, joint_score
+        joint_score = _joint_metric_score(swfcd, float("nan"), swfcd_weight=swfcd_weight, logreg_weight=classifier_weight)
+        return loss, swfcd, joint_score
 
     best_idx = 0
-    best_loss, best_swfcd, best_classifier, best_joint_score = _epoch_metrics(0)
+    best_loss, best_swfcd, best_joint_score = _epoch_metrics(0)
 
     for idx in range(1, num_epochs):
-        loss, swfcd, classifier, joint_score = _epoch_metrics(idx)
+        loss, swfcd, joint_score = _epoch_metrics(idx)
 
         if selection_metric in {"swfcd_classifier_joint", "swfcd_logreg_joint"}:
             comparisons = (
                 _compare_higher(joint_score, best_joint_score, min_delta=min_delta),
                 _compare_higher(swfcd, best_swfcd),
-                _compare_higher(classifier, best_classifier),
                 _compare_lower(loss, best_loss),
             )
             is_better = next((comparison > 0 for comparison in comparisons if comparison != 0), False)
@@ -206,14 +196,13 @@ def select_best_checkpoint(
 
         if is_better:
             best_idx = idx
-            best_loss, best_swfcd, best_classifier, best_joint_score = loss, swfcd, classifier, joint_score
+            best_loss, best_swfcd, best_joint_score = loss, swfcd, joint_score
 
     return {
         "best_index": best_idx,
         "best_epoch": best_idx + 1,
         "loss": best_loss,
         "swfcd_pearson": best_swfcd,
-        "classifier_accuracy": best_classifier,
         "joint_score": best_joint_score,
         "selection_metric": selection_metric,
     }
@@ -423,7 +412,6 @@ def train_vae(
             if np.isfinite(swfcd_pearson)
             else " | Val swfcd_pearson: nan"
         )
-        _append_history_metric(history, 'val', 'classifier_accuracy', float("nan"))
 
         print(
             f"Epoch {epoch}/{num_epochs} | "
@@ -436,7 +424,6 @@ def train_vae(
             "val": {p: val_loss_params[p] / num_val_batches for p in val_loss_params},
         }
         current_metrics["val"]["swfcd_pearson"] = history["val"]["swfcd_pearson"][-1]
-        current_metrics["val"]["classifier_accuracy"] = history["val"]["classifier_accuracy"][-1]
 
         if best_model_losses is None:
             improved = True
@@ -450,10 +437,6 @@ def train_vae(
                     "swfcd_pearson": [
                         best_model_losses["val"].get("swfcd_pearson", float("nan")),
                         current_metrics["val"].get("swfcd_pearson", float("nan")),
-                    ],
-                    "classifier_accuracy": [
-                        best_model_losses["val"].get("classifier_accuracy", float("nan")),
-                        current_metrics["val"].get("classifier_accuracy", float("nan")),
                     ],
                 }
             }

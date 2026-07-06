@@ -229,6 +229,7 @@ class TrainingResultsManager:
         model_params: dict,
         training_params: dict,
         data_params: dict,
+        identity: Optional[dict] = None,
     ) -> str:
         """Build an experiment id from params plus timestamp."""
         canonical = {
@@ -236,6 +237,7 @@ class TrainingResultsManager:
             "model_params": model_params,
             "training_params": training_params,
             "data_params": data_params,
+            "identity": identity or {},
         }
         payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:8]

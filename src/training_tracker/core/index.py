@@ -112,7 +112,26 @@ def build_index_entry(metadata: dict, metadata_path: Path, base_dir: Path) -> In
         "delta_logreg_accuracy": delta_classifier_accuracy if delta_classifier_accuracy is not None else (_to_float(comparison_eval.get("logreg_delta_model_minus_pca")) if isinstance(comparison_eval, dict) else None),
         "tags": list(metadata.get("tags", [])),
         "metadata_path": os.path.relpath(metadata_path, base_dir),
-    }
+}
+
+
+def _identity_fields(metadata: dict) -> dict:
+    stable_keys = (
+        "framework",
+        "pipeline",
+        "transfer_stage",
+        "target_group",
+        "source_experiment_id",
+    )
+    output = {}
+    for key in stable_keys:
+        value = metadata.get(key)
+        if value is not None:
+            output[key] = value
+    transfer_groups = metadata.get("transfer_groups")
+    if isinstance(transfer_groups, list):
+        output["transfer_groups"] = list(transfer_groups)
+    return output
 
 
 def _to_float(value: object) -> Optional[float]:
@@ -147,6 +166,7 @@ def get_or_build_signature(metadata: dict) -> Optional[str]:
         "model_params": model_params,
         "training_params": training_params,
         "data_params": data_params,
+        "identity": _identity_fields(metadata),
     }
     payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:8]
