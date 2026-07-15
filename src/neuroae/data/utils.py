@@ -368,6 +368,114 @@ def _stratified_split_indices(indices, labels, split_sizes, random_seed):
     }
 
 
+def _allocate_test_targets_with_forced(all_labels, forced_test_labels, nominal_test_count):
+    total_labels = [str(label) for label in all_labels]
+    forced_labels = [str(label) for label in forced_test_labels]
+    total_counts = {label: total_labels.count(label) for label in sorted(set(total_labels))}
+    forced_counts = {label: forced_labels.count(label) for label in total_counts}
+
+    effective_test_count = max(int(nominal_test_count), sum(forced_counts.values()))
+    if not total_labels:
+        return {}, effective_test_count
+
+    test_fraction = effective_test_count / len(total_labels)
+    target_counts = {
+        label: max(int(round(total_counts[label] * test_fraction)), forced_counts[label])
+        for label in total_counts
+    }
+
+    current_total = sum(target_counts.values())
+    if current_total < effective_test_count:
+        deficit = effective_test_count - current_total
+        grow_order = sorted(
+            total_counts,
+            key=lambda label: (total_counts[label], label),
+            reverse=True,
+        )
+        while deficit > 0:
+            progressed = False
+            for label in grow_order:
+                if target_counts[label] >= total_counts[label]:
+                    continue
+                target_counts[label] += 1
+                deficit -= 1
+                progressed = True
+                if deficit == 0:
+                    break
+            if not progressed:
+                break
+    elif current_total > effective_test_count:
+        surplus = current_total - effective_test_count
+        shrink_order = sorted(
+            total_counts,
+            key=lambda label: (target_counts[label], total_counts[label], label),
+            reverse=True,
+        )
+        while surplus > 0:
+            progressed = False
+            for label in shrink_order:
+                if target_counts[label] <= forced_counts[label]:
+                    continue
+                target_counts[label] -= 1
+                surplus -= 1
+                progressed = True
+                if surplus == 0:
+                    break
+            if not progressed:
+                break
+
+    return target_counts, effective_test_count
+
+
+def _train_test_split_with_forced_class_balance(
+    all_indices,
+    all_labels,
+    forced_test_indices,
+    nominal_test_count,
+    random_seed,
+):
+    label_by_index = {int(idx): str(label) for idx, label in zip(all_indices, all_labels)}
+    forced_test_indices = np.asarray(forced_test_indices, dtype=int)
+    remaining_indices = np.asarray([idx for idx in all_indices if idx not in set(forced_test_indices.tolist())], dtype=int)
+    forced_test_labels = [label_by_index[int(idx)] for idx in forced_test_indices.tolist()]
+
+    target_counts, effective_test_count = _allocate_test_targets_with_forced(
+        all_labels=all_labels,
+        forced_test_labels=forced_test_labels,
+        nominal_test_count=nominal_test_count,
+    )
+    forced_counts = {label: forced_test_labels.count(label) for label in target_counts}
+
+    rng = np.random.default_rng(random_seed)
+    per_label_remaining = {}
+    for idx in remaining_indices.tolist():
+        label = label_by_index[int(idx)]
+        per_label_remaining.setdefault(label, []).append(int(idx))
+    for label in per_label_remaining:
+        rng.shuffle(per_label_remaining[label])
+
+    selected_test = list(forced_test_indices.tolist())
+    for label, target_count in target_counts.items():
+        needed = max(0, int(target_count) - int(forced_counts.get(label, 0)))
+        if needed <= 0:
+            continue
+        chosen = per_label_remaining.get(label, [])[:needed]
+        selected_test.extend(chosen)
+        per_label_remaining[label] = per_label_remaining.get(label, [])[needed:]
+
+    selected_test_set = set(selected_test)
+    train_indices = np.asarray([idx for idx in all_indices if int(idx) not in selected_test_set], dtype=int)
+    test_indices = np.asarray(selected_test, dtype=int)
+
+    return {
+        "train": train_indices,
+        "val": np.asarray([], dtype=int),
+        "test": test_indices,
+        "target_counts": target_counts,
+        "effective_test_count": effective_test_count,
+    }
+
+
 def prepare_data_loaders(
     data_loader,
     train_groups=None,
@@ -488,6 +596,8 @@ def prepare_data_loaders(
             )
             forced_indices = all_indices[forced_mask]
             remaining_indices = all_indices[~forced_mask]
+            forced_labels = [str(all_labels[idx]) for idx in forced_indices.tolist()]
+            forced_counts = {label: forced_labels.count(label) for label in sorted(set(forced_labels))}
             missing_ids = sorted(heldout_subject_set.difference({str(subject_id) for subject_id in all_subject_ids}))
             if missing_ids:
                 print(
@@ -507,6 +617,8 @@ def prepare_data_loaders(
         if forced_indices.size > 0:
             preferred = heldout_target
             overflow = heldout_overflow
+            if nominal_counts.get(overflow, 0) == 0 and nominal_counts.get(preferred, 0) > 0:
+                overflow = preferred
             preferred_take = min(len(forced_indices), nominal_counts[preferred])
             split_indices[preferred].extend(forced_indices[:preferred_take].tolist())
 
@@ -522,49 +634,67 @@ def prepare_data_loaders(
             print(
                 "Applied held-out subject split override: "
                 f"held_out={len(forced_indices)}, target={preferred}, overflow={overflow}, "
-                f"assigned_val={len(split_indices['val'])}, assigned_test={len(split_indices['test'])}"
+                f"assigned_val={len(split_indices['val'])}, assigned_test={len(split_indices['test'])}, "
+                f"class_counts={forced_counts}"
             )
 
-        remaining_target_sizes = {
-            "val": max(0, nominal_counts["val"] - len(split_indices["val"])),
-            "test": max(0, nominal_counts["test"] - len(split_indices["test"])),
-        }
-        remaining_target_sizes["train"] = len(remaining_indices) - remaining_target_sizes["val"] - remaining_target_sizes["test"]
-        if remaining_target_sizes["train"] < 0:
-            raise ValueError(
-                "Held-out subject assignment exceeded remaining split capacity in a way that made train negative. "
-                f"Computed remaining target sizes: {remaining_target_sizes}"
-            )
-
-        remaining_labels = [all_labels[i] for i in remaining_indices]
-        try:
-            stratified_remaining = _stratified_split_indices(
-                remaining_indices,
-                remaining_labels,
-                remaining_target_sizes,
+        if nominal_counts["val"] == 0:
+            balanced_split = _train_test_split_with_forced_class_balance(
+                all_indices=all_indices,
+                all_labels=all_labels,
+                forced_test_indices=np.asarray(split_indices["test"], dtype=int),
+                nominal_test_count=nominal_counts["test"],
                 random_seed=random_seed,
             )
-            for split_name in ("train", "val", "test"):
-                split_indices[split_name].extend(stratified_remaining[split_name].tolist())
+            split_indices["train"] = balanced_split["train"].tolist()
+            split_indices["val"] = []
+            split_indices["test"] = balanced_split["test"].tolist()
             print(
-                "Distributed remaining subjects with stratified class balancing: "
-                f"train={len(stratified_remaining['train'])}, "
-                f"val={len(stratified_remaining['val'])}, "
-                f"test={len(stratified_remaining['test'])}"
+                "Distributed train/test subjects with class-aware held-out balancing: "
+                f"train={len(split_indices['train'])}, test={len(split_indices['test'])}, "
+                f"targets={balanced_split['target_counts']}"
             )
-        except ValueError as exc:
-            remaining_cursor = 0
-            for split_name in ("val", "test"):
-                deficit = remaining_target_sizes[split_name]
-                if deficit > 0:
-                    next_cursor = remaining_cursor + deficit
-                    split_indices[split_name].extend(remaining_indices[remaining_cursor:next_cursor].tolist())
-                    remaining_cursor = next_cursor
-            split_indices["train"].extend(remaining_indices[remaining_cursor:].tolist())
-            print(
-                "Warning: stratified remaining split was not possible; fell back to random assignment. "
-                f"Reason: {exc}"
-            )
+        else:
+            remaining_target_sizes = {
+                "val": max(0, nominal_counts["val"] - len(split_indices["val"])),
+                "test": max(0, nominal_counts["test"] - len(split_indices["test"])),
+            }
+            remaining_target_sizes["train"] = len(remaining_indices) - remaining_target_sizes["val"] - remaining_target_sizes["test"]
+            if remaining_target_sizes["train"] < 0:
+                raise ValueError(
+                    "Held-out subject assignment exceeded remaining split capacity in a way that made train negative. "
+                    f"Computed remaining target sizes: {remaining_target_sizes}"
+                )
+
+            remaining_labels = [all_labels[i] for i in remaining_indices]
+            try:
+                stratified_remaining = _stratified_split_indices(
+                    remaining_indices,
+                    remaining_labels,
+                    remaining_target_sizes,
+                    random_seed=random_seed,
+                )
+                for split_name in ("train", "val", "test"):
+                    split_indices[split_name].extend(stratified_remaining[split_name].tolist())
+                print(
+                    "Distributed remaining subjects with stratified class balancing: "
+                    f"train={len(stratified_remaining['train'])}, "
+                    f"val={len(stratified_remaining['val'])}, "
+                    f"test={len(stratified_remaining['test'])}"
+                )
+            except ValueError as exc:
+                remaining_cursor = 0
+                for split_name in ("val", "test"):
+                    deficit = remaining_target_sizes[split_name]
+                    if deficit > 0:
+                        next_cursor = remaining_cursor + deficit
+                        split_indices[split_name].extend(remaining_indices[remaining_cursor:next_cursor].tolist())
+                        remaining_cursor = next_cursor
+                split_indices["train"].extend(remaining_indices[remaining_cursor:].tolist())
+                print(
+                    "Warning: stratified remaining split was not possible; fell back to random assignment. "
+                    f"Reason: {exc}"
+                )
 
         train_indices = np.asarray(split_indices["train"], dtype=int)
         val_indices = np.asarray(split_indices["val"], dtype=int)

@@ -335,6 +335,13 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
         heldout_subject_target=data_config["data"].get("heldout_subject_target", "test"),
         heldout_subject_overflow=data_config["data"].get("heldout_subject_overflow", "val"),
     )
+    requested_val_split = float(data_config["data"].get("val_split", 0.15))
+    if "val_loader" not in loaders and "test_loader" in loaders and requested_val_split <= 0.0:
+        loaders["val_loader"] = loaders["test_loader"]
+        loaders["val_is_test"] = True
+        print("Validation split disabled: aliasing val_loader to test_loader for training/evaluation.", flush=True)
+    else:
+        loaders["val_is_test"] = False
 
     def _format_split_counts(dataset):
         labels = getattr(dataset, "labels", [])
@@ -416,6 +423,11 @@ def _resolve_transfer_groups(data_config, loaders):
 def _build_group_transfer_loaders(loaders, group_name, training_config):
     if "val_loader" not in loaders or "test_loader" not in loaders:
         raise ValueError("group_transfer_matrix requires train, val, and test splits.")
+    if loaders.get("val_is_test", False):
+        raise ValueError(
+            "group_transfer_matrix requires a distinct validation split. "
+            "Train/test-only mode with val_loader aliased to test_loader is not supported."
+        )
 
     filtered_train = filter_dataset_by_labels(loaders["train_loader"].dataset, [group_name])
     filtered_val = filter_dataset_by_labels(loaders["val_loader"].dataset, [group_name])
