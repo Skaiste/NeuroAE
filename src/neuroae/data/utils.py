@@ -83,6 +83,33 @@ def filter_dataset_by_labels(dataset, allowed_labels):
     )
 
 
+def subset_dataset(dataset, indices):
+    indices = np.asarray(indices, dtype=int)
+    filtered_bio_data = {
+        key: np.asarray(values)[indices]
+        for key, values in getattr(dataset, "bio_data", {}).items()
+    }
+    original_shape = getattr(dataset, "original_shape", None)
+    if original_shape is not None:
+        original_shape = tuple(original_shape)
+
+    return CachedDataset(
+        data=np.asarray(dataset.data)[indices],
+        labels=[dataset.labels[idx] for idx in indices],
+        subject_ids=[dataset.subject_ids[idx] for idx in indices],
+        bio_data=filtered_bio_data,
+        flatten=bool(getattr(dataset, "flatten", False)),
+        fc_input=bool(getattr(dataset, "fc_input", False)),
+        preserve_timepoints=bool(getattr(dataset, "preserve_timepoints", False)),
+        timepoint_dim=getattr(dataset, "timepoint_dim", None),
+        timepoints_as_samples=bool(getattr(dataset, "timepoints_as_samples", False)),
+        transpose=bool(getattr(dataset, "transpose", False)),
+        pad_features=bool(getattr(dataset, "pad_features", False)),
+        truncate_features=bool(getattr(dataset, "truncate_features", False)),
+        original_shape=original_shape,
+    )
+
+
 def resolve_split_path(split_path):
     if split_path is None:
         return None

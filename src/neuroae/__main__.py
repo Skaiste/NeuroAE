@@ -22,6 +22,7 @@ import yaml
 import itertools
 from copy import deepcopy
 from neuronumba.tools.filters import BandPassFilter
+from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
 from .utils import *
@@ -34,6 +35,7 @@ from .data import (
     load_ebrains,
     load_hcp,
     prepare_data_loaders,
+    subset_dataset,
 )
 from .data.utils import build_data_loader_result
 from .models.old.pca import PCA, PCA_multi
@@ -335,13 +337,7 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
         heldout_subject_target=data_config["data"].get("heldout_subject_target", "test"),
         heldout_subject_overflow=data_config["data"].get("heldout_subject_overflow", "val"),
     )
-    requested_val_split = float(data_config["data"].get("val_split", 0.15))
-    if "val_loader" not in loaders and "test_loader" in loaders and requested_val_split <= 0.0:
-        loaders["val_loader"] = loaders["test_loader"]
-        loaders["val_is_test"] = True
-        print("Validation split disabled: aliasing val_loader to test_loader for training/evaluation.", flush=True)
-    else:
-        loaders["val_is_test"] = False
+    loaders["val_is_test"] = False
 
     def _format_split_counts(dataset):
         labels = getattr(dataset, "labels", [])
@@ -536,6 +532,157 @@ def _build_training_summary(history, mse_pca, checkpoint_selection_metric="val_l
         'final_train_loss': float(train_losses[-1]) if train_losses else None,
         'final_val_loss': float(val_losses[-1]) if val_losses else None,
     }
+
+
+def _seed_everything(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def _should_use_cross_validation_epoch_search(data_config, training_config, loaders):
+    training_section = training_config.get("training", {})
+    requested_val_split = float(data_config.get("data", {}).get("val_split", 0.15))
+    enabled = training_section.get("cross_validation_enabled")
+    if enabled is None:
+        return requested_val_split <= 0.0 and "test_loader" in loaders and "val_loader" not in loaders
+    return bool(enabled)
+
+
+def _make_cross_validation_splits(dataset, n_splits, random_seed):
+    labels = np.asarray(getattr(dataset, "labels", []), dtype=object)
+    if len(dataset) < n_splits:
+        raise ValueError(
+            f"cross_validation_folds={n_splits} exceeds available training samples {len(dataset)}."
+        )
+
+    unique_labels, counts = np.unique(labels.astype(str), return_counts=True)
+    can_stratify = len(unique_labels) > 1 and counts.min() >= n_splits
+    splitter = (
+        StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_seed)
+        if can_stratify
+        else KFold(n_splits=n_splits, shuffle=True, random_state=random_seed)
+    )
+    split_iter = splitter.split(np.arange(len(dataset)), labels.astype(str) if can_stratify else None)
+    return split_iter, can_stratify
+
+
+def _build_fold_loaders(base_loaders, train_indices, val_indices, training_config):
+    train_dataset = subset_dataset(base_loaders["train_loader"].dataset, train_indices)
+    val_dataset = subset_dataset(base_loaders["train_loader"].dataset, val_indices)
+    return build_data_loader_result(
+        datasets={"train": train_dataset, "val": val_dataset},
+        batch_size=training_config["training"].get("batch_size", base_loaders["train_loader"].batch_size),
+        shuffle_train=True,
+        num_workers=training_config["training"].get("num_workers", base_loaders["train_loader"].num_workers),
+        random_seed=training_config["training"].get("reproducibility", {}).get("seed", 42),
+        preserve_timepoints=base_loaders.get("preserve_timepoints", False),
+    )
+
+
+def _configure_model_training_state(model, training_config, loaders):
+    model.set_loss_fn_params(training_config["training"].get("loss_params", None))
+    if training_config["training"]["loss_params"].get("swfcd_beta", 0.0) > 0:
+        from .metrics.swfcd_torch import SwFCD
+        window = training_config["training"]["loss_params"].get("swfcd_window", 30)
+        step = training_config["training"]["loss_params"].get("swfcd_step", 3)
+        swfcd = SwFCD(loaders["train_loader"].dataset, window, step)
+        model.set_swfcd(swfcd)
+
+
+def _run_cross_validation_epoch_search(loaders, data_config, model_config, training_config, device):
+    from .train import select_best_checkpoint, train_vae
+
+    n_splits = int(training_config["training"].get("cross_validation_folds", 5))
+    base_seed = int(training_config["training"].get("reproducibility", {}).get("seed", 42))
+    split_iter, stratified = _make_cross_validation_splits(loaders["train_loader"].dataset, n_splits, base_seed)
+    use_pred_heads = len(data_config["data"].get("use_bio_levels", [])) > 0
+    input_dim = loaders["input_dim"]
+    timepoint_dim = loaders["timepoint_dim"]
+    max_epochs = int(training_config["training"].get("num_epochs", 50))
+    fold_summaries = []
+
+    print(
+        f"Running {n_splits}-fold cross-validation on the training split to select the final epoch count "
+        f"({'stratified' if stratified else 'non-stratified'} folds).",
+        flush=True,
+    )
+
+    for fold_idx, (train_indices, val_indices) in enumerate(split_iter, start=1):
+        fold_seed = base_seed + fold_idx
+        _seed_everything(fold_seed)
+        fold_loaders = _build_fold_loaders(loaders, train_indices, val_indices, training_config)
+        model, model_name, _ = load_model_from_config(
+            model_config=model_config,
+            data_config=data_config,
+            input_dim=input_dim,
+            timepoint_dim=timepoint_dim,
+            device=device,
+            preserve_timepoints=fold_loaders.get("preserve_timepoints", False),
+        )
+        _configure_model_training_state(model, training_config, fold_loaders)
+        print(f"Cross-validation fold {fold_idx}/{n_splits}", flush=True)
+        history, _ = train_vae(
+            model,
+            fold_loaders["train_loader"],
+            fold_loaders["val_loader"],
+            num_epochs=max_epochs,
+            learning_rate=training_config["training"].get("learning_rate", 1e-3),
+            weight_decay=training_config["training"].get("weight_decay", 1e-4),
+            device=device,
+            save_dir=training_config["training"].get("save_dir", "./models"),
+            name=f"cv_fold_{fold_idx}",
+            pca=None,
+            noise=training_config["training"].get("noise", None),
+            use_pred_heads=use_pred_heads,
+            convergence_patience=training_config["training"].get("convergence_patience"),
+            convergence_min_delta=training_config["training"].get("convergence_min_delta", 0.0),
+            convergence_warmup_epochs=training_config["training"].get("convergence_warmup_epochs", 0),
+            checkpoint_selection_metric=training_config["training"].get("checkpoint_selection_metric", "swfcd_loss_joint"),
+            save_checkpoint=False,
+            vectorize_val_reference=training_config["training"].get("vectorize_val_reference", False),
+            compute_swfcd_during_training=training_config["training"].get("compute_swfcd_during_training"),
+        )
+        selection = select_best_checkpoint(
+            history,
+            selection_metric=training_config["training"].get("checkpoint_selection_metric", "swfcd_loss_joint"),
+            min_delta=training_config["training"].get("convergence_min_delta", 0.0),
+        )
+        best_epoch = selection["best_epoch"] if selection is not None else max(len(history.get("train", {}).get("loss", [])), 1)
+        fold_summary = {
+            "fold": fold_idx,
+            "train_samples": int(len(train_indices)),
+            "val_samples": int(len(val_indices)),
+            "best_epoch": int(best_epoch),
+            "selected_val_loss": selection["loss"] if selection is not None else None,
+            "selected_val_swfcd_pearson": selection["swfcd_pearson"] if selection is not None else None,
+        }
+        fold_summaries.append(fold_summary)
+        print(
+            f"Cross-validation fold {fold_idx} selected epoch {best_epoch} "
+            f"(val_loss={fold_summary['selected_val_loss']}, "
+            f"val_swfcd_pearson={fold_summary['selected_val_swfcd_pearson']})",
+            flush=True,
+        )
+
+    best_epochs = [fold["best_epoch"] for fold in fold_summaries]
+    selected_num_epochs = max(1, int(round(float(np.median(best_epochs)))))
+    summary = {
+        "enabled": True,
+        "num_folds": n_splits,
+        "selection_metric": training_config["training"].get("checkpoint_selection_metric", "swfcd_loss_joint"),
+        "folds": fold_summaries,
+        "fold_best_epochs": best_epochs,
+        "selected_num_epochs": selected_num_epochs,
+        "aggregation": "median",
+    }
+    print(
+        f"Cross-validation selected {selected_num_epochs} training epochs from fold best epochs {best_epochs}.",
+        flush=True,
+    )
+    return summary
 
 
 def load_model_from_config(model_config, data_config, input_dim, timepoint_dim, device, preserve_timepoints=False):
@@ -821,12 +968,7 @@ def run_training(
     use_pred_heads = len(data_config['data'].get('use_bio_levels', [])) > 0
 
     model.set_loss_fn_params(training_config['training'].get('loss_params', None))
-    if training_config['training']['loss_params'].get("swfcd_beta", 0.0) > 0:
-        from .metrics.swfcd_torch import SwFCD
-        window = training_config['training']['loss_params'].get("swfcd_window", 30)
-        step = training_config['training']['loss_params'].get("swfcd_step", 3)
-        swfcd = SwFCD(loaders['train_loader'].dataset, window, step)
-        model.set_swfcd(swfcd)
+    _configure_model_training_state(model, training_config, loaders)
 
     dry_run = bool(training_config.get("training", {}).get("dry_run", False))
     tracker = None
@@ -864,7 +1006,7 @@ def run_training(
     history, mse_pca = train_vae(
         model,
         loaders['train_loader'],
-        loaders['val_loader'],
+        loaders.get('val_loader'),
         num_epochs=1 if dry_run else training_config['training'].get('num_epochs', 50),
         learning_rate=training_config['training'].get('learning_rate', 1e-3),
         weight_decay=training_config['training'].get('weight_decay', 1e-4),
@@ -929,6 +1071,8 @@ def run_evaluation(
     dry_run=False,
     results_dir=None,
     evaluation_scope_override=None,
+    classifier_loaders_override=None,
+    group_transfer_target_group=None,
 ):
     from .eval import eval_vae
 
@@ -960,10 +1104,21 @@ def run_evaluation(
     eval_metrics = eval_vae(
         model,
         loaders['train_loader'],
-        loaders['val_loader'],
+        loaders.get('val_loader'),
         loaders['test_loader'],
         pca=pca,
         evaluation_scope=evaluation_scope_override or training_config["training"].get("evaluation_scope", "combined"),
+        classifier_train_loader=(
+            classifier_loaders_override.get("train_loader")
+            if isinstance(classifier_loaders_override, dict)
+            else None
+        ),
+        classifier_val_loader=(
+            classifier_loaders_override.get("val_loader")
+            if isinstance(classifier_loaders_override, dict)
+            else None
+        ),
+        group_transfer_target_group=group_transfer_target_group,
         device=device,
     )
 
@@ -1014,6 +1169,21 @@ def run_standard_experiment_pipeline(
             data_config=data_config,
             num_workers=num_workers,
         )
+    cv_summary = None
+    if not dry_run and _should_use_cross_validation_epoch_search(data_config, training_config, loaders):
+        print("  Stage: cross-validation epoch search", flush=True)
+        cv_summary = _run_cross_validation_epoch_search(
+            loaders=loaders,
+            data_config=data_config,
+            model_config=model_config,
+            training_config=training_config,
+            device=device,
+        )
+        training_config = deepcopy(training_config)
+        training_config.setdefault("training", {})
+        training_config["training"]["num_epochs"] = int(cv_summary["selected_num_epochs"])
+        loaders = dict(loaders)
+        loaders.pop("val_loader", None)
     input_dim = loaders['input_dim']
     timepoint_dim = loaders['timepoint_dim']
     print("  Stage: build model", flush=True)
@@ -1036,6 +1206,7 @@ def run_standard_experiment_pipeline(
         data_config,
         device=device,
         results_dir=results_dir,
+        extra_metadata={"cross_validation": cv_summary} if cv_summary is not None else None,
     )
     print("  Stage: evaluate model", flush=True)
     run_evaluation(
@@ -1188,6 +1359,8 @@ def run_group_transfer_matrix_pipeline(
             dry_run=dry_run,
             results_dir=results_dir,
             evaluation_scope_override="per_group",
+            classifier_loaders_override=loaders,
+            group_transfer_target_group=group_name,
         )
         if not dry_run:
             group_finetune_ids[group_name] = child_experiment_id

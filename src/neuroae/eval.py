@@ -318,6 +318,22 @@ def _comparison_deltas(model_metrics, pca_metrics):
     }
 
 
+def _slice_classifier_metrics(classifier_result, group_indices):
+    if not isinstance(classifier_result, dict):
+        return None
+    if classifier_result.get("test_predictions") is None:
+        return None
+    encoded_true = classifier_result["label_payload"]["test"][group_indices]
+    encoded_pred = classifier_result["test_predictions"][group_indices]
+    encoded_proba = classifier_result["test_probabilities"][group_indices]
+    return compute_classification_metrics(
+        encoded_true,
+        encoded_pred,
+        classifier_result["label_payload"]["classes"],
+        y_proba=encoded_proba,
+    )
+
+
 def _subset_tensor(values, indices):
     if values is None:
         return None
@@ -388,6 +404,9 @@ def eval_vae(
     pca=None,
     use_pred_heads=False,
     evaluation_scope="combined",
+    classifier_train_loader=None,
+    classifier_val_loader=None,
+    group_transfer_target_group=None,
     device='cuda' if torch.cuda.is_available() else 'cpu',
 ):
     """
@@ -403,6 +422,9 @@ def eval_vae(
     device = torch.device(device)
     model = model.to(device)
     model.eval()
+    if val_loader is None:
+        val_loader = train_loader
+        print("Evaluation: validation loader missing, reusing the training loader for classifier validation.", flush=True)
 
     print("Evaluation: collecting train split latents", flush=True)
     swfcd = SwFCD(data_loader.dataset, 30, 3)
@@ -411,6 +433,31 @@ def eval_vae(
     val_outputs = _collect_split_outputs(model, val_loader, device, use_pred_heads=use_pred_heads, include_recons=False)
     print("Evaluation: collecting evaluation split reconstructions and latents", flush=True)
     eval_outputs = _collect_split_outputs(model, data_loader, device, use_pred_heads=use_pred_heads, include_recons=True)
+    classifier_train_loader = classifier_train_loader or train_loader
+    classifier_val_loader = classifier_val_loader or val_loader
+    use_classifier_overrides = (
+        classifier_train_loader is not train_loader or classifier_val_loader is not val_loader
+    )
+    if use_classifier_overrides:
+        print("Evaluation: collecting classifier train split latents from override loader", flush=True)
+        classifier_train_outputs = _collect_split_outputs(
+            model,
+            classifier_train_loader,
+            device,
+            use_pred_heads=use_pred_heads,
+            include_recons=False,
+        )
+        print("Evaluation: collecting classifier validation split latents from override loader", flush=True)
+        classifier_val_outputs = _collect_split_outputs(
+            model,
+            classifier_val_loader,
+            device,
+            use_pred_heads=use_pred_heads,
+            include_recons=False,
+        )
+    else:
+        classifier_train_outputs = train_outputs
+        classifier_val_outputs = val_outputs
 
     x_all = eval_outputs["inputs"]
     x_hat_all = eval_outputs["recons"]
@@ -421,16 +468,24 @@ def eval_vae(
     if scope not in {"combined", "per_group"}:
         raise ValueError(f"Unsupported evaluation_scope: {evaluation_scope}")
 
-    train_classifier_latents = _prepare_classifier_latents(model, train_outputs["latents"], split_name="train")
-    val_classifier_latents = _prepare_classifier_latents(model, val_outputs["latents"], split_name="val")
+    train_classifier_latents = _prepare_classifier_latents(
+        model,
+        classifier_train_outputs["latents"],
+        split_name="classifier_train" if use_classifier_overrides else "train",
+    )
+    val_classifier_latents = _prepare_classifier_latents(
+        model,
+        classifier_val_outputs["latents"],
+        split_name="classifier_val" if use_classifier_overrides else "val",
+    )
     eval_classifier_latents = _prepare_classifier_latents(model, eval_outputs["latents"], split_name="test")
 
     print("Evaluation: training latent classifier for model latents", flush=True)
     classifier_result = run_latent_braingnn_classifier(
         to_numpy(train_classifier_latents),
-        train_outputs["labels"].tolist(),
+        classifier_train_outputs["labels"].tolist(),
         to_numpy(val_classifier_latents),
-        val_outputs["labels"].tolist(),
+        classifier_val_outputs["labels"].tolist(),
         test_latents=to_numpy(eval_classifier_latents),
         test_labels=labels.tolist(),
         device=device,
@@ -462,14 +517,14 @@ def eval_vae(
         x_all_np = x_all.detach().cpu().numpy()
         valid_mask_np = to_numpy(valid_mask_all) if valid_mask_all is not None else None
         z_pca = pca.transform(x_all_np)
-        train_latents_pca = pca.transform(train_outputs["inputs"].detach().cpu().numpy())
-        val_latents_pca = pca.transform(val_outputs["inputs"].detach().cpu().numpy())
+        train_latents_pca = pca.transform(classifier_train_outputs["inputs"].detach().cpu().numpy())
+        val_latents_pca = pca.transform(classifier_val_outputs["inputs"].detach().cpu().numpy())
         print("Evaluation: training latent classifier for PCA latents", flush=True)
         pca_classifier_result = run_latent_braingnn_classifier(
             train_latents_pca,
-            train_outputs["labels"].tolist(),
+            classifier_train_outputs["labels"].tolist(),
             val_latents_pca,
-            val_outputs["labels"].tolist(),
+            classifier_val_outputs["labels"].tolist(),
             test_latents=z_pca,
             test_labels=labels.tolist(),
             device=device,
@@ -566,16 +621,12 @@ def eval_vae(
             group_valid_mask = _subset_tensor(valid_mask_all, group_idx_tensor) if valid_mask_all is not None else None
             group_labels = labels[group_indices]
             group_classifier_metrics = None
-            if classifier_result.get("test_predictions") is not None:
-                encoded_true = classifier_result["label_payload"]["test"][group_indices]
-                encoded_pred = classifier_result["test_predictions"][group_indices]
-                encoded_proba = classifier_result["test_probabilities"][group_indices]
-                group_classifier_metrics = compute_classification_metrics(
-                    encoded_true,
-                    encoded_pred,
-                    classifier_result["label_payload"]["classes"],
-                    y_proba=encoded_proba,
-                )
+            skip_group_classification = (
+                group_transfer_target_group is not None
+                and str(group_name) == str(group_transfer_target_group)
+            )
+            if not skip_group_classification:
+                group_classifier_metrics = _slice_classifier_metrics(classifier_result, group_indices)
 
             group_model_metrics = _compute_model_metrics(
                 sw_fcd=swfcd,
@@ -594,16 +645,8 @@ def eval_vae(
                 group_valid_mask_np = to_numpy(group_valid_mask) if group_valid_mask is not None else None
                 group_latents_pca = pca.transform(group_inputs_np)
                 group_pca_classifier_metrics = None
-                if pca_classifier_result.get("test_predictions") is not None:
-                    encoded_true = pca_classifier_result["label_payload"]["test"][group_indices]
-                    encoded_pred = pca_classifier_result["test_predictions"][group_indices]
-                    encoded_proba = pca_classifier_result["test_probabilities"][group_indices]
-                    group_pca_classifier_metrics = compute_classification_metrics(
-                        encoded_true,
-                        encoded_pred,
-                        pca_classifier_result["label_payload"]["classes"],
-                        y_proba=encoded_proba,
-                    )
+                if not skip_group_classification:
+                    group_pca_classifier_metrics = _slice_classifier_metrics(pca_classifier_result, group_indices)
                 group_pca_metrics = _compute_pca_metrics(
                     pca=pca,
                     swfcd=swfcd,

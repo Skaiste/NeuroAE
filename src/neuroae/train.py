@@ -217,6 +217,10 @@ def loss_params2str(train_params, train_batches, val_params, val_batches):
     return f"{train_pstr} | {val_pstr}"
 
 
+def _train_only_loss_params_str(train_params, train_batches):
+    return " | ".join(f"Train {k}: {float(v/train_batches):.4f}" for k, v in train_params.items())
+
+
 def _batch_labels_to_list(batch_labels):
     if isinstance(batch_labels, torch.Tensor):
         return batch_labels.detach().cpu().tolist()
@@ -250,7 +254,7 @@ def _collect_latents_and_labels(model, data_loader, device, use_pred_heads, vali
 def train_vae(
     model,
     train_loader,
-    val_loader,
+    val_loader=None,
     num_epochs=100,
     learning_rate=1e-3,
     weight_decay=1e-4,
@@ -282,7 +286,7 @@ def train_vae(
     epochs_without_improvement = 0
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     train_valid_last_dim = _dataset_valid_last_dim(train_loader.dataset)
-    val_valid_last_dim = _dataset_valid_last_dim(val_loader.dataset)
+    val_valid_last_dim = _dataset_valid_last_dim(val_loader.dataset) if val_loader is not None else None
     selection_metric = str(checkpoint_selection_metric or "val_loss")
     selection_requires_joint_metrics = selection_metric in {"swfcd_classifier_joint", "swfcd_logreg_joint"}
     if selection_requires_joint_metrics:
@@ -294,11 +298,14 @@ def train_vae(
         )
     if compute_swfcd_during_training is None:
         compute_swfcd_during_training = selection_metric in {"swfcd_loss_joint", "swfcd_joint", "swfcd", "swfcd_pearson"}
+    if val_loader is None:
+        compute_swfcd_during_training = False
 
-    val_swfcd = SwFCD(val_loader.dataset, 30, 3) if compute_swfcd_during_training else None
+    val_swfcd = SwFCD(val_loader.dataset, 30, 3) if (compute_swfcd_during_training and val_loader is not None) else None
     val_reference_vec = None
     if (
         compute_swfcd_during_training
+        and val_loader is not None
         and vectorize_val_reference
         and not getattr(val_loader.dataset, "fc_input", False)
     ):
@@ -345,87 +352,75 @@ def train_vae(
                 history['train'][p] = []
             history['train'][p].append(train_loss_params[p] / num_batches)
 
-        # validation
-        model.eval()
-        val_loss_params = {}
-        val_recons = [] if val_reference_vec is not None else None
-        val_latents = []
-        val_labels = []
-        swfcd_pearson_sum = 0.0
-        swfcd_pearson_count = 0
-        with torch.no_grad():
-            for batch_idx, (data, labels) in enumerate(val_loader):
-                x = data.to(device)
-                valid_mask = _build_valid_mask(x, val_valid_last_dim)
-                output = model(x)
-                output = _apply_recon_mask(x, output, valid_mask)
-            
-                if use_pred_heads:
-                    heads = {bl:h.to(device) for bl,h in labels[1].items()}
-                    loss = model.loss(x, heads, output)
-                else:
-                    loss = model.loss(x, output)
-
-                for p in loss:
-                    if p not in val_loss_params:
-                        val_loss_params[p] = 0
-                    val_loss_params[p] += loss[p]
-
-                recon_x, latent = _extract_model_outputs(output)
-                recon_x_detached = recon_x.detach()
-                if val_recons is not None:
-                    val_recons.append(recon_x_detached)
-                elif compute_swfcd_during_training and not getattr(val_loader.dataset, "fc_input", False):
-                    swfcd_results = val_swfcd.apply(x.detach(), recon_x_detached)
-                    if swfcd_results is not None:
-                        swfcd_pearson_sum += float(swfcd_results["pearson"].detach().cpu().item()) * data.shape[0]
-                        swfcd_pearson_count += int(data.shape[0])
-                if latent is not None:
-                    val_latents.append(latent.detach().cpu())
-
-                batch_labels = labels[0] if use_pred_heads else labels
-                if isinstance(batch_labels, torch.Tensor):
-                    val_labels.extend(batch_labels.detach().cpu().tolist())
-                elif isinstance(batch_labels, np.ndarray):
-                    val_labels.extend(batch_labels.tolist())
-                elif isinstance(batch_labels, (list, tuple)):
-                    val_labels.extend(list(batch_labels))
-                else:
-                    val_labels.append(batch_labels)
-
-        num_val_batches = batch_idx + 1
-        for p in val_loss_params:
-            val_loss_params[p] = float(val_loss_params[p].detach())
-            _append_history_metric(history, 'val', p, val_loss_params[p] / num_val_batches)
-
         val_metric_str = ""
-        swfcd_pearson = float("nan")
-        if val_reference_vec is not None and val_recons:
-            swfcd_results = val_swfcd.apply(None, torch.cat(val_recons, dim=0), x_vec=val_reference_vec)
-            if swfcd_results is not None:
-                swfcd_pearson = float(swfcd_results["pearson"].detach().cpu().item())
-        elif swfcd_pearson_count > 0:
-            swfcd_pearson = swfcd_pearson_sum / swfcd_pearson_count
-        _append_history_metric(history, 'val', 'swfcd_pearson', swfcd_pearson)
-        val_metric_str += (
-            f" | Val swfcd_pearson: {swfcd_pearson:.4f}"
-            if np.isfinite(swfcd_pearson)
-            else " | Val swfcd_pearson: nan"
-        )
+        current_metrics = {
+            "train": {p: train_loss_params[p] / num_batches for p in train_loss_params},
+            "val": {},
+        }
+        if val_loader is not None:
+            model.eval()
+            val_loss_params = {}
+            val_recons = [] if val_reference_vec is not None else None
+            swfcd_pearson_sum = 0.0
+            swfcd_pearson_count = 0
+            with torch.no_grad():
+                for batch_idx, (data, labels) in enumerate(val_loader):
+                    x = data.to(device)
+                    valid_mask = _build_valid_mask(x, val_valid_last_dim)
+                    output = model(x)
+                    output = _apply_recon_mask(x, output, valid_mask)
+
+                    if use_pred_heads:
+                        heads = {bl:h.to(device) for bl,h in labels[1].items()}
+                        loss = model.loss(x, heads, output)
+                    else:
+                        loss = model.loss(x, output)
+
+                    for p in loss:
+                        if p not in val_loss_params:
+                            val_loss_params[p] = 0
+                        val_loss_params[p] += loss[p]
+
+                    recon_x, _ = _extract_model_outputs(output)
+                    recon_x_detached = recon_x.detach()
+                    if val_recons is not None:
+                        val_recons.append(recon_x_detached)
+                    elif compute_swfcd_during_training and not getattr(val_loader.dataset, "fc_input", False):
+                        swfcd_results = val_swfcd.apply(x.detach(), recon_x_detached)
+                        if swfcd_results is not None:
+                            swfcd_pearson_sum += float(swfcd_results["pearson"].detach().cpu().item()) * data.shape[0]
+                            swfcd_pearson_count += int(data.shape[0])
+
+            num_val_batches = batch_idx + 1
+            for p in val_loss_params:
+                val_loss_params[p] = float(val_loss_params[p].detach())
+                _append_history_metric(history, 'val', p, val_loss_params[p] / num_val_batches)
+
+            swfcd_pearson = float("nan")
+            if val_reference_vec is not None and val_recons:
+                swfcd_results = val_swfcd.apply(None, torch.cat(val_recons, dim=0), x_vec=val_reference_vec)
+                if swfcd_results is not None:
+                    swfcd_pearson = float(swfcd_results["pearson"].detach().cpu().item())
+            elif swfcd_pearson_count > 0:
+                swfcd_pearson = swfcd_pearson_sum / swfcd_pearson_count
+            _append_history_metric(history, 'val', 'swfcd_pearson', swfcd_pearson)
+            val_metric_str += (
+                f" | Val swfcd_pearson: {swfcd_pearson:.4f}"
+                if np.isfinite(swfcd_pearson)
+                else " | Val swfcd_pearson: nan"
+            )
+            current_metrics["val"] = {p: val_loss_params[p] / num_val_batches for p in val_loss_params}
+            current_metrics["val"]["swfcd_pearson"] = history["val"]["swfcd_pearson"][-1]
 
         print(
             f"Epoch {epoch}/{num_epochs} | "
-            f"{loss_params2str(train_loss_params, num_batches, val_loss_params, num_val_batches)}"
+            f"{loss_params2str(train_loss_params, num_batches, val_loss_params, num_val_batches) if val_loader is not None else _train_only_loss_params_str(train_loss_params, num_batches)}"
             f"{val_metric_str}", flush=True
         )
 
-        current_metrics = {
-            "train": {p: train_loss_params[p] / num_batches for p in train_loss_params},
-            "val": {p: val_loss_params[p] / num_val_batches for p in val_loss_params},
-        }
-        current_metrics["val"]["swfcd_pearson"] = history["val"]["swfcd_pearson"][-1]
-
-        if best_model_losses is None:
+        if val_loader is None:
+            improved = False
+        elif best_model_losses is None:
             improved = True
         else:
             tmp_history = {
@@ -452,10 +447,12 @@ def train_vae(
             epochs_without_improvement = 0
             if save_checkpoint:
                 torch.save(model.state_dict(), f'{save_dir}/{name}_model.pt')
-        else:
+        elif val_loader is not None:
             epochs_without_improvement += 1
 
         if (
+            val_loader is not None
+            and
             convergence_patience is not None
             and convergence_patience > 0
             and (epoch + 1) > convergence_warmup_epochs
@@ -470,7 +467,7 @@ def train_vae(
 
     # run validation set through pca
     mse_pca = 0
-    if pca is not None:
+    if pca is not None and val_loader is not None:
         total_mse_pca = 0
         num_batches = 0
         for batch_idx, (data, _) in enumerate(val_loader):
@@ -484,5 +481,8 @@ def train_vae(
             num_batches += 1
         mse_pca = float(total_mse_pca / num_batches)
             
+    if val_loader is None and save_checkpoint:
+        torch.save(model.state_dict(), f'{save_dir}/{name}_model.pt')
+
     print("Training complete!")
     return history, mse_pca
