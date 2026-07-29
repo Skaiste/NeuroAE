@@ -21,7 +21,7 @@ from neuroae.utils.dict_utils import deepupdate
 from training_tracker import TrainingResultsManager
 
 from .eval import compute_classification_metrics
-from .features import build_feature_splits
+from .features import build_feature_splits, load_precomputed_feature_splits
 from .models import create_model
 from .train import train_sklearn_model, train_torch_model
 from .utils.runtime import (
@@ -88,16 +88,30 @@ def load_completed_experiment_signatures(results_dir):
 
 def _prepare_runtime(data_dir, data_config, model_config, training_config, num_workers):
     configure_reproducibility(data_config=data_config, training_config=training_config)
+    requested_input_mode = str(model_config.get("model", {}).get("input_mode", "raw_flat"))
+    precomputed_payload = load_precomputed_feature_splits(
+        data_config=data_config,
+        expected_input_mode=requested_input_mode,
+    )
     LOGGER.info(
         "Preparing runtime: dataset=%s parcellation=%s parcellation_type=%s merge_groups=%s input_mode=%s",
         data_config.get("data", {}).get("type", "ADNI3"),
         data_config.get("data", {}).get("parcelations"),
         data_config.get("data", {}).get("parcellation_type"),
         data_config.get("data", {}).get("merge_groups"),
-        model_config.get("model", {}).get("input_mode"),
+        requested_input_mode,
     )
-    loaders = load_adni3_loaders(data_dir=data_dir, data_config=data_config, num_workers=num_workers)
-    feature_payload = build_feature_splits(loaders, model_config, training_config, data_config)
+    if precomputed_payload is not None:
+        loaders = None
+        feature_payload = precomputed_payload
+        LOGGER.info(
+            "Using precomputed feature cache: input_mode=%s train_samples=%d",
+            feature_payload["input_mode"],
+            len(feature_payload["train"]["labels"]),
+        )
+    else:
+        loaders = load_adni3_loaders(data_dir=data_dir, data_config=data_config, num_workers=num_workers)
+        feature_payload = build_feature_splits(loaders, model_config, training_config, data_config)
     label_payload = encode_labels(
         feature_payload["train"]["labels"],
         feature_payload["val"]["labels"] if feature_payload["val"] is not None else None,
@@ -123,6 +137,35 @@ def _prepare_runtime(data_dir, data_config, model_config, training_config, num_w
     return loaders, feature_payload, label_payload, feature_metadata
 
 
+def _log_training_data_source(feature_payload, feature_metadata, data_config):
+    cache_path = data_config.get("data", {}).get("precomputed_feature_cache")
+    input_mode = feature_payload["input_mode"]
+    source = "precomputed feature cache" if cache_path else "features built from raw dataset"
+
+    if input_mode == "graph":
+        train_split = feature_payload["train"]
+        LOGGER.info(
+            "Classifier data: source=%s input_mode=%s train_node_features=%s train_adjacency=%s classes=%s%s",
+            source,
+            input_mode,
+            tuple(train_split["node_features"].shape),
+            tuple(train_split["adjacency"].shape),
+            feature_metadata["label_classes"],
+            f" cache_path={cache_path}" if cache_path else "",
+        )
+        return
+
+    train_split = feature_payload["train"]
+    LOGGER.info(
+        "Classifier data: source=%s input_mode=%s train_features=%s classes=%s%s",
+        source,
+        input_mode,
+        tuple(train_split["X"].shape),
+        feature_metadata["label_classes"],
+        f" cache_path={cache_path}" if cache_path else "",
+    )
+
+
 def _train_and_register(data_dir, data_config, model_config, training_config, device, results_dir, num_workers=0):
     loaders, feature_payload, label_payload, feature_metadata = _prepare_runtime(
         data_dir, data_config, model_config, training_config, num_workers
@@ -130,6 +173,7 @@ def _train_and_register(data_dir, data_config, model_config, training_config, de
     runtime = create_model(model_config, feature_metadata["input_shape"], len(label_payload["classes"]))
     model_name = runtime["name"]
     dry_run = bool(training_config.get("training", {}).get("dry_run", False))
+    _log_training_data_source(feature_payload, feature_metadata, data_config)
     LOGGER.info(
         "Training model: name=%s family=%s dry_run=%s",
         model_name,

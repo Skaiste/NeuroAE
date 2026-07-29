@@ -1,3 +1,5 @@
 model:
+  freeze_encoder: false
   latent_dim: 32
   name: LAE
+  reset_decoder: false

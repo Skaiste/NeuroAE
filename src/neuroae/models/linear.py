@@ -33,6 +33,7 @@ class LAE(ModelBase):
 
         # shared across timepoints
         self.encoder = nn.Linear(self.region_dim, self.latent_dim, bias=True)
+        self.encoder_logvar = nn.Linear(self.region_dim, self.latent_dim, bias=True)
         self.decoder = nn.Linear(self.latent_dim, self.region_dim, bias=True)
 
     def _reshape_input(self, x):
@@ -46,16 +47,65 @@ class LAE(ModelBase):
     def _flatten_latent(self, z_time):
         return z_time.reshape(z_time.shape[0], self.latent_flat_dim)
 
+    def _beta(self):
+        return float(getattr(self, "loss_fn_params", {}).get("beta", 0.0))
+
+    def _variational_enabled(self):
+        return self._beta() != 0.0
+
+    def reparameterize(self, mean, log_var):
+        std = torch.exp(0.5 * log_var)
+        epsilon = torch.randn_like(std)
+        return mean + std * epsilon
+
     def forward(self, x):
         x_time = self._reshape_input(x)           # (B,T,F)
-        z_time = self.encoder(x_time)             # (B,T,L), shared linear map over F
+        mu_time = self.encoder(x_time)            # (B,T,L), shared linear map over F
+
+        if self._variational_enabled():
+            log_var_time = self.encoder_logvar(x_time)
+            log_var_time = torch.clamp(log_var_time, -10.0, 10.0)
+            z_time = self.reparameterize(mu_time, log_var_time)
+        else:
+            log_var_time = torch.zeros_like(mu_time)
+            z_time = mu_time
+
         x_hat_time = self.decoder(z_time)         # (B,T,F)
+        mu = self._flatten_latent(mu_time)
+        log_var = self._flatten_latent(log_var_time)
         z = self._flatten_latent(z_time)          # (B,T*L)
+
+        if self._variational_enabled():
+            return x_hat_time, mu, log_var, z
         return x_hat_time, z
 
     def loss(self, x, model_output):
-        x_hat, _ = model_output
-        loss = {"loss": F.mse_loss(x_hat, x)}
+        error_per_feature = self.loss_fn_params.get("loss_per_feature", True)
+        beta = self._beta()
+
+        if len(model_output) == 4:
+            x_hat, mu, log_var, _ = model_output
+        else:
+            x_hat, _ = model_output
+            mu = None
+            log_var = None
+
+        if error_per_feature:
+            recon = F.mse_loss(x_hat, x, reduction="mean")
+        else:
+            recon = F.mse_loss(x_hat, x, reduction="none")
+            recon = recon.sum(dim=1).mean()
+
+        loss = {"loss": recon, "recon": recon}
+
+        if beta != 0.0 and mu is not None and log_var is not None:
+            kld = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
+            kld = kld.sum(dim=1).mean() / log_var.size(1)
+            loss["kld"] = kld
+            loss["loss"] += beta * kld
+        else:
+            loss["kld"] = torch.zeros((), device=x.device, dtype=x.dtype)
+
         if self.swfcd is not None:
             swfcd = self.swfcd.apply(x, x_hat)
             swfcd_beta = self.loss_fn_params.get("swfcd_beta", 1.0)
@@ -65,6 +115,8 @@ class LAE(ModelBase):
 
     def freeze_encoder(self):
         for param in self.encoder.parameters():
+            param.requires_grad = False
+        for param in self.encoder_logvar.parameters():
             param.requires_grad = False
 
     def reset_decoder(self):
@@ -109,19 +161,52 @@ class LAEPredHeads(LAE):
         return super().to(device)
 
     def forward(self, x):
-        x_hat, z = super().forward(x)
+        output = super().forward(x)
+
+        if len(output) == 4:
+            x_hat, mean, log_var, z = output
+        else:
+            x_hat, z = output
+            mean = None
+            log_var = None
+
         # reshape latent space to 2d
         z_2d = z.reshape(z.shape[0], -1, self.timepoint_dim)
         z_heads = [h(z_2d) for h in self.heads]
+        if mean is not None and log_var is not None:
+            return x_hat, mean, log_var, z_heads, z
         return x_hat, z_heads, z
     
     def loss(self, x, x_heads, model_output):
-        x_hat, z_heads, _ = model_output
+        beta = self._beta()
+        error_per_feature = self.loss_fn_params.get("loss_per_feature", True)
         pred_heads_delta = float(self.loss_fn_params.get("pred_heads_delta", 0.0))
-        
+
+        if len(model_output) == 5:
+            x_hat, mu, log_var, z_heads, _ = model_output
+        else:
+            x_hat, z_heads, _ = model_output
+            mu = None
+            log_var = None
+
+        if error_per_feature:
+            recon = F.mse_loss(x_hat, x, reduction="mean")
+        else:
+            recon = F.mse_loss(x_hat, x, reduction="none")
+            recon = recon.sum(dim=1).mean()
+
         loss = {
-            'loss': F.mse_loss(x_hat, x)
+            "loss": recon,
+            "recon": recon,
         }
+
+        if beta != 0.0 and mu is not None and log_var is not None:
+            kld = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
+            kld = kld.sum(dim=1).mean() / log_var.size(1)
+            loss["kld"] = kld
+            loss["loss"] += beta * kld
+        else:
+            loss["kld"] = torch.zeros((), device=x.device, dtype=x.dtype)
 
         # calculate loss from prediction heads
         assert len(x_heads) == len(z_heads), f"label heads ({len(x_heads)}) is not the same as predicted heads ({len(z_heads)})"

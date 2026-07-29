@@ -150,8 +150,115 @@ def _feature_cache_path(data_config, input_mode, dataset_splits):
     return cache_root / f"{input_mode}_{digest}.pt"
 
 
+def _resolve_precomputed_feature_cache(data_config):
+    feature_cache_path = data_config.get("data", {}).get("precomputed_feature_cache")
+    if not feature_cache_path:
+        return None
+    cache_path = Path(feature_cache_path)
+    if not cache_path.is_absolute():
+        cache_path = Path(__file__).resolve().parents[3] / cache_path
+    return cache_path
+
+
+def _validate_precomputed_payload(payload, expected_input_mode=None):
+    if not isinstance(payload, dict):
+        raise ValueError("Precomputed feature payload must be a dictionary.")
+
+    input_mode = payload.get("input_mode")
+    if not isinstance(input_mode, str):
+        raise ValueError("Precomputed feature payload is missing string field 'input_mode'.")
+    if expected_input_mode is not None and input_mode != expected_input_mode:
+        raise ValueError(
+            f"Precomputed feature payload input_mode={input_mode!r} does not match requested "
+            f"model input_mode={expected_input_mode!r}."
+        )
+
+    train_split = payload.get("train")
+    if not isinstance(train_split, dict):
+        raise ValueError("Precomputed feature payload is missing split 'train'.")
+
+    is_graph = input_mode == "graph"
+    required_keys = ("node_features", "adjacency", "labels") if is_graph else ("X", "labels")
+    optional_keys = ("subject_ids",)
+
+    for split_name in ("train", "val", "test"):
+        split_payload = payload.get(split_name)
+        if split_payload is None:
+            continue
+        if not isinstance(split_payload, dict):
+            raise ValueError(f"Precomputed split {split_name!r} must be a dictionary or null.")
+        missing = [key for key in required_keys if key not in split_payload]
+        if missing:
+            raise ValueError(
+                f"Precomputed split {split_name!r} is missing required keys: {', '.join(missing)}."
+            )
+        extra_allowed = set(required_keys) | set(optional_keys)
+        unknown = [key for key in split_payload.keys() if key not in extra_allowed]
+        if unknown:
+            raise ValueError(
+                f"Precomputed split {split_name!r} has unsupported keys: {', '.join(sorted(unknown))}."
+            )
+
+        labels = split_payload["labels"]
+        if len(labels) == 0:
+            continue
+
+        if is_graph:
+            node_features = np.asarray(split_payload["node_features"])
+            adjacency = np.asarray(split_payload["adjacency"])
+            if node_features.ndim != 3:
+                raise ValueError(
+                    f"Precomputed graph split {split_name!r} node_features must have shape "
+                    f"(samples, nodes, features), got {node_features.shape}."
+                )
+            if adjacency.ndim != 3:
+                raise ValueError(
+                    f"Precomputed graph split {split_name!r} adjacency must have shape "
+                    f"(samples, nodes, nodes), got {adjacency.shape}."
+                )
+            if node_features.shape[0] != len(labels) or adjacency.shape[0] != len(labels):
+                raise ValueError(
+                    f"Precomputed graph split {split_name!r} sample counts do not match labels."
+                )
+        else:
+            X = np.asarray(split_payload["X"])
+            if X.ndim != 2:
+                raise ValueError(
+                    f"Precomputed vector split {split_name!r} X must have shape (samples, features), "
+                    f"got {X.shape}."
+                )
+            if X.shape[0] != len(labels):
+                raise ValueError(
+                    f"Precomputed vector split {split_name!r} sample count does not match labels."
+                )
+
+        subject_ids = split_payload.get("subject_ids")
+        if subject_ids is not None and len(subject_ids) != len(labels):
+            raise ValueError(
+                f"Precomputed split {split_name!r} subject_ids count does not match labels."
+            )
+
+
+def load_precomputed_feature_splits(data_config, expected_input_mode=None):
+    cache_path = _resolve_precomputed_feature_cache(data_config)
+    if cache_path is None:
+        return None
+    payload = torch.load(cache_path, map_location="cpu", weights_only=False)
+    _validate_precomputed_payload(payload, expected_input_mode=expected_input_mode)
+    if "scaler" not in payload:
+        payload["scaler"] = None
+    return payload
+
+
 def build_feature_splits(loaders, model_config, training_config, data_config):
     input_mode = str(model_config["model"].get("input_mode", "raw_flat"))
+    precomputed_payload = load_precomputed_feature_splits(
+        data_config=data_config,
+        expected_input_mode=input_mode,
+    )
+    if precomputed_payload is not None:
+        return precomputed_payload
+
     scaler_type = training_config.get("training", {}).get("feature_scaler", "standard")
     dataset_splits = {
         "train": loaders["train_loader"].dataset,
@@ -205,4 +312,3 @@ def build_feature_splits(loaders, model_config, training_config, data_config):
     if cache_path is not None:
         torch.save(payload, cache_path)
     return payload
-

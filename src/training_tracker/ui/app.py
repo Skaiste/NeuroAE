@@ -369,18 +369,17 @@ def _write_yaml(path: Path, payload: dict) -> None:
 
 
 EVALUATION_METRIC_SPECS = [
-    {"source": "accuracy", "row": "test_accuracy", "title": "Accuracy"},
-    {"source": "balanced_accuracy", "row": "test_balanced_accuracy", "title": "Balanced Accuracy"},
-    {"source": "macro_f1", "row": "test_macro_f1", "title": "Macro F1"},
-    {"source": "roc_auc", "row": "test_roc_auc", "title": "ROC AUC"},
-    {"source": "roc_auc_ovr_macro", "row": "test_roc_auc_ovr_macro", "title": "ROC AUC OVR Macro"},
-    {"source": "mse", "row": "test_mse", "title": "MSE"},
-    {"source": "fc_preservation", "row": "test_fc_preservation", "title": "FC Pearson"},
-    {"source": "silhouette", "row": "test_silhouette", "title": "Silhouette"},
-    {"source": "logreg_accuracy", "row": "test_logreg_accuracy", "title": "LogReg Accuracy"},
-    {"source": "swfcd_pearson", "row": "test_swfcd_pearson", "title": "SWFCD Pearson"},
-    {"source": "swfcd_mad", "row": "test_swfcd_mad", "title": "SWFCD MAD"},
-    {"source": "swfcd_rmse", "row": "test_swfcd_rmse", "title": "SWFCD RMSE"},
+    {"sources": ("accuracy", "classifier_accuracy"), "row": "test_accuracy", "title": "Accuracy"},
+    {"sources": ("balanced_accuracy", "classifier_balanced_accuracy"), "row": "test_balanced_accuracy", "title": "Balanced Accuracy"},
+    {"sources": ("classifier_macro_f1", "macro_f1"), "row": "test_macro_f1", "title": "CLS Macro F1"},
+    {"sources": ("roc_auc",), "row": "test_roc_auc", "title": "ROC AUC"},
+    {"sources": ("roc_auc_ovr_macro",), "row": "test_roc_auc_ovr_macro", "title": "ROC AUC OVR Macro"},
+    {"sources": ("mse",), "row": "test_mse", "title": "MSE"},
+    {"sources": ("fc_preservation",), "row": "test_fc_preservation", "title": "FC Pearson"},
+    {"sources": ("silhouette",), "row": "test_silhouette", "title": "Silhouette"},
+    {"sources": ("swfcd_pearson",), "row": "test_swfcd_pearson", "title": "SWFCD Pearson"},
+    {"sources": ("swfcd_mad",), "row": "test_swfcd_mad", "title": "SWFCD MAD"},
+    {"sources": ("swfcd_rmse",), "row": "test_swfcd_rmse", "title": "SWFCD RMSE"},
 ]
 
 PER_CLASS_METRIC_TITLES = {
@@ -388,6 +387,14 @@ PER_CLASS_METRIC_TITLES = {
     "recall": "Recall",
     "f1": "F1",
     "support": "Support",
+}
+
+PREFERRED_CLASS_ORDER = ("HC", "MCI", "AD")
+
+METRIC_TITLE_PRIORITY = {
+    "FC Pearson": 0,
+    "SWFCD Pearson": 1,
+    "CLS Macro F1": 2,
 }
 
 
@@ -408,16 +415,21 @@ def _parse_per_class_metric_row_key(metric_key: str) -> tuple[str, str] | None:
 def _dynamic_metric_specs_from_keys(metric_keys: set[str]) -> list[tuple[str, str]]:
     parsed_specs: list[tuple[str, str, str]] = []
     metric_order = {name: idx for idx, name in enumerate(PER_CLASS_METRIC_TITLES)}
+    class_order = {label: idx for idx, label in enumerate(PREFERRED_CLASS_ORDER)}
     for metric_key in metric_keys:
         parsed = _parse_per_class_metric_row_key(metric_key)
         if parsed is None:
             continue
         class_label, metric_name = parsed
+        metric_title = PER_CLASS_METRIC_TITLES[metric_name]
+        display_title = f"{class_label} {metric_title}"
+        if metric_name == "f1":
+            display_title = f"CLS {class_label} F1"
         parsed_specs.append(
             (
                 metric_key,
-                f"{class_label} {PER_CLASS_METRIC_TITLES[metric_name]}",
-                f"{class_label.lower()}::{metric_order[metric_name]:02d}",
+                display_title,
+                f"{class_order.get(class_label, len(class_order)):02d}::{class_label.lower()}::{metric_order[metric_name]:02d}",
             )
         )
     parsed_specs.sort(key=lambda item: item[2])
@@ -426,6 +438,7 @@ def _dynamic_metric_specs_from_keys(metric_keys: set[str]) -> list[tuple[str, st
 
 def _per_class_f1_specs_from_keys(metric_keys: set[str]) -> list[tuple[str, str]]:
     specs: list[tuple[str, str, str]] = []
+    class_order = {label: idx for idx, label in enumerate(PREFERRED_CLASS_ORDER)}
     for metric_key in metric_keys:
         parsed = _parse_per_class_metric_row_key(metric_key)
         if parsed is None:
@@ -433,20 +446,32 @@ def _per_class_f1_specs_from_keys(metric_keys: set[str]) -> list[tuple[str, str]
         class_label, metric_name = parsed
         if metric_name != "f1":
             continue
-        specs.append((metric_key, f"{class_label} F1", class_label.lower()))
+        sort_key = f"{class_order.get(class_label, len(class_order)):02d}::{class_label.lower()}"
+        specs.append((metric_key, f"CLS {class_label} F1", sort_key))
     specs.sort(key=lambda item: item[2])
     return [(metric_key, title) for metric_key, title, _ in specs]
+
+
+def _metric_title_sort_key(title: str, default_index: int) -> tuple[int, int, str]:
+    return (METRIC_TITLE_PRIORITY.get(title, 100), default_index, title)
+
+
+def _sort_metric_specs(specs: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    enumerated = list(enumerate(specs))
+    enumerated.sort(key=lambda item: _metric_title_sort_key(item[1][1], item[0]))
+    return [spec for _idx, spec in enumerated]
 
 
 def _extract_per_class_rows(model_metrics: dict | None) -> pd.DataFrame:
     if not isinstance(model_metrics, dict):
         return pd.DataFrame()
-    per_class = model_metrics.get("per_class")
-    if not isinstance(per_class, dict):
+    per_class = _model_eval_per_class_metrics(model_metrics)
+    if not per_class:
         return pd.DataFrame()
 
     rows: list[dict[str, object]] = []
-    for class_label in sorted(per_class, key=lambda value: str(value)):
+    class_order = {label: idx for idx, label in enumerate(PREFERRED_CLASS_ORDER)}
+    for class_label in sorted(per_class, key=lambda value: (class_order.get(str(value), len(class_order)), str(value))):
         class_metrics = per_class.get(class_label)
         if not isinstance(class_metrics, dict):
             continue
@@ -460,6 +485,46 @@ def _extract_per_class_rows(model_metrics: dict | None) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
+
+def _metric_value_from_spec(metric_payload: dict | None, spec: dict[str, object]) -> float | None:
+    if not isinstance(metric_payload, dict):
+        return None
+    for source_key in spec.get("sources", ()):
+        value = _to_float(metric_payload.get(str(source_key)))
+        if value is not None:
+            return value
+    return None
+
+
+def _model_eval_per_class_metrics(model_eval: dict | None) -> dict[str, dict[str, float | None]]:
+    if not isinstance(model_eval, dict):
+        return {}
+    classifier_per_class_f1 = model_eval.get("classifier_per_class_f1")
+    if isinstance(classifier_per_class_f1, dict) and classifier_per_class_f1:
+        normalized = {}
+        for class_label, f1_value in classifier_per_class_f1.items():
+            normalized[str(class_label)] = {
+                "precision": None,
+                "recall": None,
+                "f1": _to_float(f1_value),
+                "support": None,
+            }
+        return normalized
+
+    per_class = model_eval.get("per_class")
+    if isinstance(per_class, dict):
+        normalized: dict[str, dict[str, float | None]] = {}
+        for class_label, class_metrics in per_class.items():
+            if not isinstance(class_metrics, dict):
+                continue
+            normalized[str(class_label)] = {
+                metric_name: _to_float(class_metrics.get(metric_name))
+                for metric_name in PER_CLASS_METRIC_TITLES
+            }
+        if normalized:
+            return normalized
+    return {}
 
 
 def _metric_specs_for_rows(rows: list[dict], include_fc: bool = True) -> list[tuple[str, str]]:
@@ -476,7 +541,7 @@ def _metric_specs_for_rows(rows: list[dict], include_fc: bool = True) -> list[tu
         if spec["row"] in available_keys:
             specs.append((spec["row"], spec["title"]))
     specs.extend(_dynamic_metric_specs_from_keys(available_keys))
-    return specs
+    return _sort_metric_specs(specs)
 
 
 def _metric_specs_for_grouped(
@@ -496,13 +561,13 @@ def _metric_specs_for_grouped(
         if spec["row"] in available_keys:
             specs.append((spec["row"], spec["title"]))
     specs.extend(_dynamic_metric_specs_from_keys(available_keys))
-    return specs
+    return _sort_metric_specs(specs)
 
 
 def _metric_specs_for_model_metrics(model_metrics: dict) -> list[dict[str, str]]:
     specs: list[dict[str, str]] = []
     for spec in EVALUATION_METRIC_SPECS:
-        if _to_float(model_metrics.get(spec["source"])) is not None:
+        if _metric_value_from_spec(model_metrics, spec) is not None:
             specs.append(spec)
     return specs
 
@@ -515,14 +580,44 @@ def _attach_parameter_index_per_class_f1(rows: list[dict], parameter_index_cache
         parameter_row = parameter_index_cache.get(experiment_id, {})
         evaluation = parameter_row.get("evaluation", {}) if isinstance(parameter_row, dict) else {}
         model_eval = evaluation.get("model", {}) if isinstance(evaluation, dict) else {}
-        per_class = model_eval.get("per_class", {}) if isinstance(model_eval, dict) else {}
-        if isinstance(per_class, dict):
+        per_class = _model_eval_per_class_metrics(model_eval)
+        if per_class:
             for class_label, class_metrics in per_class.items():
-                if not isinstance(class_metrics, dict):
-                    continue
                 row_copy[_per_class_metric_row_key(str(class_label), "f1")] = _to_float(class_metrics.get("f1"))
         output.append(row_copy)
     return output
+
+
+def _classifier_f1_specs_for_grouped(grouped: dict[object, dict[str, list[float]]]) -> list[tuple[str, str]]:
+    specs = [
+        (metric_key, metric_title)
+        for metric_key, metric_title in _metric_specs_for_grouped(grouped)
+        if metric_title == "CLS Macro F1" or (metric_title.startswith("CLS ") and metric_title.endswith(" F1"))
+    ]
+    if not specs:
+        return []
+    macro_specs = [spec for spec in specs if spec[1] == "CLS Macro F1"]
+    per_class_specs = [spec for spec in specs if spec[1] != "CLS Macro F1"]
+    per_class_specs.sort(key=lambda item: item[1].lower())
+    return macro_specs + per_class_specs
+
+
+def _classifier_per_class_f1_specs_for_grouped(grouped: dict[object, dict[str, list[float]]]) -> list[tuple[str, str]]:
+    specs = [
+        (metric_key, metric_title)
+        for metric_key, metric_title in _metric_specs_for_grouped(grouped)
+        if metric_title.startswith("CLS ") and metric_title.endswith(" F1") and metric_title != "CLS Macro F1"
+    ]
+    if not specs:
+        return []
+    class_order = {label: idx for idx, label in enumerate(PREFERRED_CLASS_ORDER)}
+    specs.sort(
+        key=lambda item: (
+            class_order.get(item[1].removeprefix("CLS ").removesuffix(" F1"), len(class_order)),
+            item[1].lower(),
+        )
+    )
+    return specs
 
 
 def _has_displayable_values(series: pd.Series, numeric: bool = False) -> bool:
@@ -538,8 +633,8 @@ def _all_experiments_table_specs(table_df: pd.DataFrame) -> tuple[list[str], dic
         ("model_type", "model_type", False),
         ("latent_dim", "latent_dim", True),
         ("score", "score", True),
-        ("swfcd_logreg_score", "SWFCD+LogReg score", True),
-        ("fc_logreg_score", "FC+LogReg score", True),
+        ("swfcd_macro_f1_score", "SWFCD+Macro F1 score", True),
+        ("fc_macro_f1_score", "FC+Macro F1 score", True),
         ("best_val_loss", "best_val_loss", True),
         ("test_mse", "test_mse", True),
         ("test_accuracy", "test_accuracy", True),
@@ -592,7 +687,7 @@ def _extract_group_metric_rows(groups_payload: dict | None) -> pd.DataFrame:
             continue
         row = {"group": group_name}
         for spec in _metric_specs_for_model_metrics(model_metrics):
-            row[spec["title"]] = _to_float(model_metrics.get(spec["source"]))
+            row[spec["title"]] = _metric_value_from_spec(model_metrics, spec)
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -607,15 +702,12 @@ def _apply_metric_bundle_to_row(
         del row[key]
 
     for spec in EVALUATION_METRIC_SPECS:
-        row[spec["row"]] = _to_float(model_eval.get(spec["source"])) if isinstance(model_eval, dict) else None
+        row[spec["row"]] = _metric_value_from_spec(model_eval, spec)
 
-    per_class = model_eval.get("per_class") if isinstance(model_eval, dict) else None
-    if isinstance(per_class, dict):
-        for class_label, class_metrics in per_class.items():
-            if not isinstance(class_metrics, dict):
-                continue
-            for metric_name in PER_CLASS_METRIC_TITLES:
-                row[_per_class_metric_row_key(str(class_label), metric_name)] = _to_float(class_metrics.get(metric_name))
+    per_class = _model_eval_per_class_metrics(model_eval)
+    for class_label, class_metrics in per_class.items():
+        for metric_name in PER_CLASS_METRIC_TITLES:
+            row[_per_class_metric_row_key(str(class_label), metric_name)] = _to_float(class_metrics.get(metric_name))
 
     if isinstance(pca_eval, dict):
         row["pca_mse"] = _to_float(pca_eval.get("mse"))
@@ -672,7 +764,7 @@ def _overwrite_configs_from_metadata(metadata: dict, config_dir: Path) -> None:
 
 def _render_evaluation_tab(
     metadata: dict,
-    best_fc_logreg_row: dict | None,
+    best_fc_macro_f1_row: dict | None,
 ) -> None:
     evaluation = metadata.get("evaluation")
     if not isinstance(evaluation, dict):
@@ -691,20 +783,20 @@ def _render_evaluation_tab(
 
     selected_id = str(metadata.get("experiment_id", "selected"))
     selected_label = f"selected_{_short_experiment_id(selected_id)}"
-    best_fc_logreg_label = (
-        f"best_fc_logreg_{_short_experiment_id(str(best_fc_logreg_row.get('experiment_id', 'na')))}"
-        if best_fc_logreg_row is not None
-        else "best_fc_logreg"
+    best_fc_macro_f1_label = (
+        f"best_fc_macro_f1_{_short_experiment_id(str(best_fc_macro_f1_row.get('experiment_id', 'na')))}"
+        if best_fc_macro_f1_row is not None
+        else "best_fc_macro_f1"
     )
     metric_specs = []
     for spec in EVALUATION_METRIC_SPECS:
-        selected_value = _to_float(selected_model_metrics.get(spec["source"]))
-        best_fc_logreg_value = (
-            _to_float(best_fc_logreg_row.get(spec["row"]))
-            if best_fc_logreg_row is not None
+        selected_value = _metric_value_from_spec(selected_model_metrics, spec)
+        best_fc_macro_f1_value = (
+            _to_float(best_fc_macro_f1_row.get(spec["row"]))
+            if best_fc_macro_f1_row is not None
             else None
         )
-        if selected_value is None and best_fc_logreg_value is None:
+        if selected_value is None and best_fc_macro_f1_value is None:
             continue
         metric_specs.append(spec)
 
@@ -715,10 +807,10 @@ def _render_evaluation_tab(
             row_metrics = metric_specs[idx:idx + 4]
             row_cols = st.columns(4)
             for col, spec in zip(row_cols, row_metrics):
-                selected_value = _to_float(selected_model_metrics.get(spec["source"]))
-                best_fc_logreg_value = (
-                    _to_float(best_fc_logreg_row.get(spec["row"]))
-                    if best_fc_logreg_row is not None
+                selected_value = _metric_value_from_spec(selected_model_metrics, spec)
+                best_fc_macro_f1_value = (
+                    _to_float(best_fc_macro_f1_row.get(spec["row"]))
+                    if best_fc_macro_f1_row is not None
                     else None
                 )
                 labels = []
@@ -726,9 +818,9 @@ def _render_evaluation_tab(
                 if selected_value is not None:
                     labels.append(selected_label)
                     values.append(selected_value)
-                if best_fc_logreg_value is not None:
-                    labels.append(best_fc_logreg_label)
-                    values.append(best_fc_logreg_value)
+                if best_fc_macro_f1_value is not None:
+                    labels.append(best_fc_macro_f1_label)
+                    values.append(best_fc_macro_f1_value)
                 if not values:
                     continue
                 metric_df = pd.DataFrame(
@@ -944,6 +1036,15 @@ def _hydrate_rows_with_metadata(
             row_copy["_evaluation_groups"] = groups_payload if isinstance(groups_payload, dict) else {}
             group_names = parameter_row.get("evaluation_group_names", [])
             row_copy["evaluation_group_names"] = sorted(group_names) if isinstance(group_names, list) else []
+            parameter_evaluation = parameter_row.get("evaluation", {})
+            if not isinstance(parameter_evaluation, dict):
+                parameter_evaluation = {}
+            _apply_metric_bundle_to_row(
+                row_copy,
+                parameter_evaluation.get("model"),
+                parameter_evaluation.get("pca"),
+                parameter_evaluation.get("comparison"),
+            )
             hydrated_rows.append(row_copy)
             continue
 
@@ -981,6 +1082,12 @@ def _hydrate_rows_with_metadata(
         groups_payload = evaluation.get("groups", {})
         row_copy["_evaluation_groups"] = groups_payload if isinstance(groups_payload, dict) else {}
         row_copy["evaluation_group_names"] = sorted(row_copy["_evaluation_groups"].keys())
+        _apply_metric_bundle_to_row(
+            row_copy,
+            evaluation.get("model"),
+            evaluation.get("pca"),
+            evaluation.get("comparison"),
+        )
         hydrated_rows.append(row_copy)
 
     if status is not None:
@@ -1079,13 +1186,13 @@ def _add_scores(rows: list[dict]) -> None:
     test_mse = [_to_float(row.get("test_mse")) for row in rows]
     test_fc = [_to_float(row.get("test_fc_preservation")) for row in rows]
     test_sil = [_to_float(row.get("test_silhouette")) for row in rows]
-    test_logreg = [_to_float(row.get("test_logreg_accuracy")) for row in rows]
+    test_macro_f1 = [_to_float(row.get("test_macro_f1")) for row in rows]
     test_swfcd_pearson = [_to_float(row.get("test_swfcd_pearson")) for row in rows]
 
     test_mse_norm = _minmax_normalize(test_mse)
     test_fc_norm = _minmax_normalize(test_fc)
     test_sil_norm = _minmax_normalize(test_sil)
-    test_logreg_norm = _minmax_normalize(test_logreg)
+    test_macro_f1_norm = _minmax_normalize(test_macro_f1)
     test_swfcd_pearson_norm = _minmax_normalize(test_swfcd_pearson)
 
     for idx, row in enumerate(rows):
@@ -1097,7 +1204,7 @@ def _add_scores(rows: list[dict]) -> None:
         if fc_component is None:
             fc_component = 0.5
         silhouette_component = 0.0
-        logreg_component = 0.5 if test_logreg_norm[idx] is None else test_logreg_norm[idx]
+        macro_f1_component = 0.5 if test_macro_f1_norm[idx] is None else test_macro_f1_norm[idx]
         swfcd_component = 0.5
         if test_swfcd_pearson_norm[idx] is not None:
             swfcd_component = test_swfcd_pearson_norm[idx]
@@ -1105,31 +1212,31 @@ def _add_scores(rows: list[dict]) -> None:
             mse_component
             + fc_component
             + silhouette_component
-            + logreg_component
+            + macro_f1_component
             + swfcd_component
         )
         if test_fc_norm[idx] is None or test_swfcd_pearson_norm[idx] is None:
             row["fc_score"] = None
         else:
             row["fc_score"] = test_fc_norm[idx] + test_swfcd_pearson_norm[idx]
-        if test_swfcd_pearson_norm[idx] is None or test_logreg_norm[idx] is None:
-            row["swfcd_logreg_score"] = None
+        if test_swfcd_pearson_norm[idx] is None or test_macro_f1_norm[idx] is None:
+            row["swfcd_macro_f1_score"] = None
         else:
-            row["swfcd_logreg_score"] = (
+            row["swfcd_macro_f1_score"] = (
                 test_swfcd_pearson_norm[idx]
-                + test_logreg_norm[idx]
+                + test_macro_f1_norm[idx]
             )
         if (
             test_fc_norm[idx] is None
             or test_swfcd_pearson_norm[idx] is None
-            or test_logreg_norm[idx] is None
+            or test_macro_f1_norm[idx] is None
         ):
-            row["fc_logreg_score"] = None
+            row["fc_macro_f1_score"] = None
         else:
-            row["fc_logreg_score"] = (
+            row["fc_macro_f1_score"] = (
                 test_fc_norm[idx]
                 + test_swfcd_pearson_norm[idx]
-                + test_logreg_norm[idx]
+                + test_macro_f1_norm[idx]
             )
 
 
@@ -1595,25 +1702,12 @@ def _build_model_compare_boxplot_spec(grouped: dict[str, dict[str, list[float]]]
     return "\n".join(lines)
 
 
-F1_BAR_CHART_TITLES = ["Macro F1", "HC F1", "MCI F1", "AD F1"]
+def _build_classifier_f1_bar_chart_spec(grouped: dict[str, dict[str, list[float]]]) -> str:
+    f1_specs = _classifier_f1_specs_for_grouped(grouped)
+    if not f1_specs:
+        raise ValueError("Classifier F1 metrics are not available.")
 
-
-def _f1_metric_keys_for_grouped(grouped: dict[object, dict[str, list[float]]]) -> list[str] | None:
-    title_to_key = {
-        metric_title: metric_key
-        for metric_key, metric_title in _metric_specs_for_grouped(grouped)
-    }
-    if not all(title in title_to_key for title in F1_BAR_CHART_TITLES):
-        return None
-    return [title_to_key[title] for title in F1_BAR_CHART_TITLES]
-
-
-def _build_model_compare_f1_bar_chart_spec(grouped: dict[str, dict[str, list[float]]]) -> str:
-    metric_keys = _f1_metric_keys_for_grouped(grouped)
-    if metric_keys is None:
-        raise ValueError("Required F1 metrics are not available.")
-
-    label_list = ", ".join(json.dumps(title) for title in F1_BAR_CHART_TITLES)
+    label_list = ", ".join(json.dumps(title) for _, title in f1_specs)
     lines = [
         "```chart",
         "type: bar",
@@ -1623,7 +1717,7 @@ def _build_model_compare_f1_bar_chart_spec(grouped: dict[str, dict[str, list[flo
 
     for model_name, model_metrics in grouped.items():
         averaged_values: list[str] = []
-        for metric_key in metric_keys:
+        for metric_key, _metric_title in f1_specs:
             mean_value = _average_metric(model_metrics.get(metric_key, []))
             averaged_values.append("null" if mean_value is None else f"{mean_value:.6f}")
         lines.append(f"    - title: {json.dumps(str(model_name))}")
@@ -1633,11 +1727,86 @@ def _build_model_compare_f1_bar_chart_spec(grouped: dict[str, dict[str, list[flo
     return "\n".join(lines)
 
 
+RAINCLOUD_METRIC_TITLES = ["FC Pearson", "SWFCD Pearson", "CLS Macro F1"]
+
+
+def _raincloud_metric_specs_for_grouped(grouped: dict[object, dict[str, list[float]]]) -> list[tuple[str, str]]:
+    title_to_key = {
+        metric_title: metric_key
+        for metric_key, metric_title in _metric_specs_for_grouped(grouped)
+    }
+    return [
+        (title_to_key[metric_title], metric_title)
+        for metric_title in RAINCLOUD_METRIC_TITLES
+        if metric_title in title_to_key
+    ]
+
+
 def _build_raincloud_spec(
     grouped: dict[str, dict[str, list[float]]],
-    include_fc: bool = True,
 ) -> dict[str, object]:
-    metric_specs = _metric_specs_for_grouped(grouped, include_fc=include_fc)
+    metric_specs = _raincloud_metric_specs_for_grouped(grouped)
+    return _build_raincloud_spec_for_metric_specs(grouped, metric_specs)
+
+
+def _build_model_compare_raincloud_spec(
+    grouped: dict[str, dict[str, list[float]]],
+) -> dict[str, object]:
+    desired_titles = ("FC Pearson", "SWFCD Pearson")
+    title_to_key = {
+        metric_title: metric_key
+        for metric_key, metric_title in _metric_specs_for_grouped(grouped)
+    }
+    metric_specs = [
+        (title_to_key[metric_title], metric_title)
+        for metric_title in desired_titles
+        if metric_title in title_to_key
+    ]
+    payload = _build_raincloud_spec_for_metric_specs(grouped, metric_specs)
+    return {
+        "type": payload["type"],
+        "facetByLabel": False,
+        "height": "250px",
+        "width": "450px",
+        "labels": payload["labels"],
+        "series": payload["series"],
+    }
+
+
+def _build_classifier_per_class_f1_raincloud_spec(
+    grouped: dict[str, dict[str, list[float]]],
+) -> dict[str, object]:
+    metric_specs = _classifier_per_class_f1_specs_for_grouped(grouped)
+    return _build_raincloud_spec_for_metric_specs(grouped, metric_specs)
+
+
+def _build_model_compare_classifier_f1_raincloud_spec(
+    grouped: dict[str, dict[str, list[float]]],
+) -> dict[str, object]:
+    desired_titles = ("CLS Macro F1", "CLS HC F1", "CLS MCI F1", "CLS AD F1")
+    title_to_key = {
+        metric_title: metric_key
+        for metric_key, metric_title in _classifier_f1_specs_for_grouped(grouped)
+    }
+    metric_specs = [
+        (title_to_key[metric_title], metric_title)
+        for metric_title in desired_titles
+        if metric_title in title_to_key
+    ]
+    payload = _build_raincloud_spec_for_metric_specs(grouped, metric_specs)
+    return {
+        "type": payload["type"],
+        "facetByLabel": False,
+        "height": "250px",
+        "labels": payload["labels"],
+        "series": payload["series"],
+    }
+
+
+def _build_raincloud_spec_for_metric_specs(
+    grouped: dict[str, dict[str, list[float]]],
+    metric_specs: list[tuple[str, str]],
+) -> dict[str, object]:
 
     series = []
     for title, metrics_by_key in grouped.items():
@@ -1664,7 +1833,54 @@ def _save_raincloud_spec(
     grouped: dict[str, dict[str, list[float]]],
     results_dir: Path,
     tab_name: str,
-    include_fc: bool = True,
+) -> Path:
+    return _save_plot_spec(
+        _build_raincloud_spec(grouped),
+        results_dir=results_dir,
+        tab_name=tab_name,
+    )
+
+
+def _save_classifier_per_class_f1_raincloud_spec(
+    grouped: dict[str, dict[str, list[float]]],
+    results_dir: Path,
+    tab_name: str,
+) -> Path:
+    return _save_plot_spec(
+        _build_classifier_per_class_f1_raincloud_spec(grouped),
+        results_dir=results_dir,
+        tab_name=tab_name,
+    )
+
+
+def _save_model_compare_classifier_f1_raincloud_spec(
+    grouped: dict[str, dict[str, list[float]]],
+    results_dir: Path,
+    tab_name: str,
+) -> Path:
+    return _save_plot_spec(
+        _build_model_compare_classifier_f1_raincloud_spec(grouped),
+        results_dir=results_dir,
+        tab_name=tab_name,
+    )
+
+
+def _save_model_compare_raincloud_spec(
+    grouped: dict[str, dict[str, list[float]]],
+    results_dir: Path,
+    tab_name: str,
+) -> Path:
+    return _save_plot_spec(
+        _build_model_compare_raincloud_spec(grouped),
+        results_dir=results_dir,
+        tab_name=tab_name,
+    )
+
+
+def _save_plot_spec(
+    payload: dict[str, object],
+    results_dir: Path,
+    tab_name: str,
 ) -> Path:
     plot_data_dir = Path("plot_data")
     plot_data_dir.mkdir(parents=True, exist_ok=True)
@@ -1674,7 +1890,6 @@ def _save_raincloud_spec(
     else:
         run_name = results_dir.name or "current"
     output_path = plot_data_dir / f"{run_name}_{tab_slug}.yml"
-    payload = _build_raincloud_spec(grouped, include_fc=include_fc)
     _write_yaml(output_path, payload)
     return output_path
 
@@ -1936,9 +2151,9 @@ def main() -> None:
 
         metadata = manager.get_experiment(experiment_id)
         history = manager.get_history(experiment_id)
-        best_fc_logreg_row = max(
-            (row for row in rows if _to_float(row.get("fc_logreg_score")) is not None),
-            key=lambda row: float(row["fc_logreg_score"]),
+        best_fc_macro_f1_row = max(
+            (row for row in rows if _to_float(row.get("fc_macro_f1_score")) is not None),
+            key=lambda row: float(row["fc_macro_f1_score"]),
             default=None,
         )
         tabs = st.tabs(["Evaluation", "History", "Overview", "Raw JSON"])
@@ -1946,7 +2161,7 @@ def main() -> None:
         with tabs[0]:
             _render_evaluation_tab(
                 metadata=metadata,
-                best_fc_logreg_row=best_fc_logreg_row,
+                best_fc_macro_f1_row=best_fc_macro_f1_row,
             )
 
         with tabs[1]:
@@ -2106,18 +2321,12 @@ def main() -> None:
         _render_pvalue_matrices(export_grouped)
 
         st.markdown("---")
-        export_cols = st.columns([1, 1.2])
-        with export_cols[1]:
-            exclude_fc = st.checkbox(
-                "Exclude FC Pearson",
-                value=False,
-                key="compare_exclude_fc",
-            )
+        export_cols = st.columns(1)
         with export_cols[0]:
             if st.button("Copy as markdown table", key="compare_copy_markdown"):
                 markdown_table = _build_compare_markdown_table(
                     selected_rows,
-                    include_fc=not exclude_fc,
+                    include_fc=True,
                 )
                 components.html(
                     f"""
@@ -2351,27 +2560,55 @@ def main() -> None:
         if param_compare_grouped is not None and param_compare_display_grouped is not None:
             _render_pvalue_matrices(param_compare_display_grouped)
             st.markdown("---")
-            export_cols = st.columns([1, 1, 1.2, 1])
-            with export_cols[3]:
-                exclude_fc = st.checkbox(
-                    "Exclude FC Pearson",
-                    value=False,
-                    key="param_compare_exclude_fc",
-                )
+            has_classifier_f1_export = bool(_classifier_f1_specs_for_grouped(param_compare_display_grouped))
+            has_classifier_per_class_f1_raincloud = bool(_classifier_per_class_f1_specs_for_grouped(param_compare_display_grouped))
+            if has_classifier_f1_export and has_classifier_per_class_f1_raincloud:
+                export_cols = st.columns([1, 1, 1, 1.2, 1.2])
+                classifier_raincloud_col = export_cols[3]
+                raincloud_col = export_cols[4]
+            elif has_classifier_f1_export:
+                export_cols = st.columns([1, 1, 1, 1.2])
+                classifier_raincloud_col = None
+                raincloud_col = export_cols[3]
+            else:
+                export_cols = st.columns([1, 1, 1.2])
+                classifier_raincloud_col = None
+                raincloud_col = export_cols[2]
             with export_cols[2]:
+                if has_classifier_f1_export and st.button("Export classifier F1 bar chart", key="param_compare_export_f1_bar_chart"):
+                    bar_chart_spec = _build_classifier_f1_bar_chart_spec(param_compare_display_grouped)
+                    components.html(
+                        f"""
+                        <script>
+                        navigator.clipboard.writeText({json.dumps(bar_chart_spec)});
+                        </script>
+                        """,
+                        height=0,
+                    )
+                    st.success("Classifier F1 bar chart spec copied to clipboard.")
+                    st.code(bar_chart_spec, language="yaml")
+            if classifier_raincloud_col is not None:
+                with classifier_raincloud_col:
+                    if st.button("Save CLS classwise F1 raincloud", key="param_compare_save_classifier_per_class_f1_raincloud"):
+                        output_path = _save_model_compare_classifier_f1_raincloud_spec(
+                            param_compare_display_grouped,
+                            results_dir=results_dir,
+                            tab_name=f"model_parameters_{loaded_model_type}_cls_f1",
+                        )
+                        st.success(f"Classifier classwise F1 raincloud spec saved to {output_path}")
+            with raincloud_col:
                 if st.button("Save Raincloud plot spec", key="param_compare_save_raincloud"):
-                    output_path = _save_raincloud_spec(
+                    output_path = _save_model_compare_raincloud_spec(
                         param_compare_display_grouped,
                         results_dir=results_dir,
-                        tab_name="model_parameters",
-                        include_fc=not exclude_fc,
+                        tab_name=f"model_parameters_{loaded_model_type}",
                     )
                     st.success(f"Raincloud plot spec saved to {output_path}")
             with export_cols[0]:
                 if st.button("Copy as markdown table", key="param_compare_copy_markdown"):
                     markdown_table = _build_parameter_compare_markdown_table(
                         param_compare_grouped,
-                        include_fc=not exclude_fc,
+                        include_fc=True,
                     )
                     components.html(
                         f"""
@@ -2387,7 +2624,7 @@ def main() -> None:
                 if st.button("Copy boxplot spec", key="param_compare_copy_boxplot_spec"):
                     boxplot_spec = _build_parameter_compare_boxplot_spec(
                         param_compare_grouped,
-                        include_fc=not exclude_fc,
+                        include_fc=True,
                     )
                     components.html(
                         f"""
@@ -2605,27 +2842,55 @@ def main() -> None:
         if allparam_compare_grouped is not None and allparam_compare_display_grouped is not None:
             _render_pvalue_matrices(allparam_compare_display_grouped)
             st.markdown("---")
-            export_cols = st.columns([1, 1, 1, 1.2])
-            with export_cols[3]:
-                exclude_fc = st.checkbox(
-                    "Exclude FC Pearson",
-                    value=False,
-                    key="allparam_compare_exclude_fc",
-                )
+            has_classifier_f1_export = bool(_classifier_f1_specs_for_grouped(allparam_compare_display_grouped))
+            has_classifier_per_class_f1_raincloud = bool(_classifier_per_class_f1_specs_for_grouped(allparam_compare_display_grouped))
+            if has_classifier_f1_export and has_classifier_per_class_f1_raincloud:
+                export_cols = st.columns([1, 1, 1, 1.2, 1.2])
+                classifier_raincloud_col = export_cols[3]
+                raincloud_col = export_cols[4]
+            elif has_classifier_f1_export:
+                export_cols = st.columns([1, 1, 1, 1.2])
+                classifier_raincloud_col = None
+                raincloud_col = export_cols[3]
+            else:
+                export_cols = st.columns([1, 1, 1.2])
+                classifier_raincloud_col = None
+                raincloud_col = export_cols[2]
             with export_cols[2]:
+                if has_classifier_f1_export and st.button("Export classifier F1 bar chart", key="allparam_compare_export_f1_bar_chart"):
+                    bar_chart_spec = _build_classifier_f1_bar_chart_spec(allparam_compare_display_grouped)
+                    components.html(
+                        f"""
+                        <script>
+                        navigator.clipboard.writeText({json.dumps(bar_chart_spec)});
+                        </script>
+                        """,
+                        height=0,
+                    )
+                    st.success("Classifier F1 bar chart spec copied to clipboard.")
+                    st.code(bar_chart_spec, language="yaml")
+            if classifier_raincloud_col is not None:
+                with classifier_raincloud_col:
+                    if st.button("Save CLS classwise F1 raincloud", key="allparam_compare_save_classifier_per_class_f1_raincloud"):
+                        output_path = _save_model_compare_classifier_f1_raincloud_spec(
+                            allparam_compare_display_grouped,
+                            results_dir=results_dir,
+                            tab_name="parameter_comparison_cls_f1",
+                        )
+                        st.success(f"Classifier classwise F1 raincloud spec saved to {output_path}")
+            with raincloud_col:
                 if st.button("Save Raincloud plot spec", key="allparam_compare_save_raincloud"):
-                    output_path = _save_raincloud_spec(
+                    output_path = _save_model_compare_raincloud_spec(
                         allparam_compare_display_grouped,
                         results_dir=results_dir,
                         tab_name="parameter_comparison",
-                        include_fc=not exclude_fc,
                     )
                     st.success(f"Raincloud plot spec saved to {output_path}")
             with export_cols[0]:
                 if st.button("Copy as markdown table", key="allparam_compare_copy_markdown"):
                     markdown_table = _build_parameter_compare_markdown_table(
                         allparam_compare_grouped,
-                        include_fc=not exclude_fc,
+                        include_fc=True,
                     )
                     components.html(
                         f"""
@@ -2641,7 +2906,7 @@ def main() -> None:
                 if st.button("Copy boxplot spec", key="allparam_compare_copy_boxplot_spec"):
                     boxplot_spec = _build_parameter_compare_boxplot_spec(
                         allparam_compare_grouped,
-                        include_fc=not exclude_fc,
+                        include_fc=True,
                     )
                     components.html(
                         f"""
@@ -2693,6 +2958,11 @@ def main() -> None:
         if not filtered_model_rows:
             st.info("No experiments match the selected data/model filters.")
             return
+        filtered_model_rows = _hydrate_rows_with_metadata(
+            filtered_model_rows,
+            manager,
+            progress_label="Loading metadata for model comparison",
+        )
 
         metric_specs = _metric_specs_for_rows(filtered_model_rows)
         if not metric_specs:
@@ -2760,8 +3030,20 @@ def main() -> None:
 
         _render_pvalue_matrices(export_grouped)
         st.markdown("---")
-        has_f1_bar_export = _f1_metric_keys_for_grouped(export_grouped) is not None
-        export_cols = st.columns(3 if has_f1_bar_export else 2)
+        has_f1_bar_export = bool(_classifier_f1_specs_for_grouped(export_grouped))
+        has_classifier_per_class_f1_raincloud = bool(_classifier_per_class_f1_specs_for_grouped(export_grouped))
+        if has_f1_bar_export and has_classifier_per_class_f1_raincloud:
+            export_cols = st.columns(4)
+            classifier_raincloud_col = export_cols[2]
+            raincloud_col = export_cols[3]
+        elif has_f1_bar_export:
+            export_cols = st.columns(3)
+            classifier_raincloud_col = None
+            raincloud_col = export_cols[2]
+        else:
+            export_cols = st.columns(2)
+            classifier_raincloud_col = None
+            raincloud_col = export_cols[1]
         with export_cols[0]:
             if st.button("Copy boxplot spec", key="model_compare_copy_boxplot_spec"):
                 boxplot_spec = _build_model_compare_boxplot_spec(export_grouped)
@@ -2777,8 +3059,8 @@ def main() -> None:
                 st.code(boxplot_spec, language="yaml")
         if has_f1_bar_export:
             with export_cols[1]:
-                if st.button("Export F1 bar chart", key="model_compare_export_f1_bar_chart"):
-                    bar_chart_spec = _build_model_compare_f1_bar_chart_spec(export_grouped)
+                if st.button("Export classifier F1 bar chart", key="model_compare_export_f1_bar_chart"):
+                    bar_chart_spec = _build_classifier_f1_bar_chart_spec(export_grouped)
                     components.html(
                         f"""
                         <script>
@@ -2789,13 +3071,21 @@ def main() -> None:
                     )
                     st.success("F1 bar chart spec copied to clipboard.")
                     st.code(bar_chart_spec, language="yaml")
-        with export_cols[2 if has_f1_bar_export else 1]:
+        if classifier_raincloud_col is not None:
+            with classifier_raincloud_col:
+                if st.button("Save CLS classwise F1 raincloud", key="model_compare_save_classifier_per_class_f1_raincloud"):
+                    output_path = _save_model_compare_classifier_f1_raincloud_spec(
+                        export_grouped,
+                        results_dir=results_dir,
+                        tab_name="model_comparison_cls_f1",
+                    )
+                    st.success(f"Classifier classwise F1 raincloud spec saved to {output_path}")
+        with raincloud_col:
             if st.button("Save Raincloud plot spec", key="model_compare_save_raincloud"):
-                output_path = _save_raincloud_spec(
+                output_path = _save_model_compare_raincloud_spec(
                     export_grouped,
                     results_dir=results_dir,
                     tab_name="model_comparison",
-                    include_fc=True,
                 )
                 st.success(f"Raincloud plot spec saved to {output_path}")
 
@@ -2866,7 +3156,13 @@ def main() -> None:
 
         _render_pvalue_matrices(export_grouped)
         st.markdown("---")
-        export_cols = st.columns(2)
+        has_classifier_per_class_f1_raincloud = bool(_classifier_per_class_f1_specs_for_grouped(export_grouped))
+        if has_classifier_per_class_f1_raincloud:
+            export_cols = st.columns(3)
+            classifier_raincloud_col = export_cols[2]
+        else:
+            export_cols = st.columns(2)
+            classifier_raincloud_col = None
         with export_cols[0]:
             if st.button("Copy boxplot spec", key="data_compare_copy_boxplot_spec"):
                 boxplot_spec = _build_model_compare_boxplot_spec(export_grouped)
@@ -2886,9 +3182,17 @@ def main() -> None:
                     export_grouped,
                     results_dir=results_dir,
                     tab_name="data_comparison",
-                    include_fc=True,
                 )
                 st.success(f"Raincloud plot spec saved to {output_path}")
+        if classifier_raincloud_col is not None:
+            with classifier_raincloud_col:
+                if st.button("Save CLS classwise F1 raincloud", key="data_compare_save_classifier_per_class_f1_raincloud"):
+                    output_path = _save_classifier_per_class_f1_raincloud_spec(
+                        export_grouped,
+                        results_dir=results_dir,
+                        tab_name="data_comparison_cls_f1",
+                    )
+                    st.success(f"Classifier classwise F1 raincloud spec saved to {output_path}")
 
 
 if __name__ == "__main__":
