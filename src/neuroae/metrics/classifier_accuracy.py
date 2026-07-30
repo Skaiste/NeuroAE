@@ -12,53 +12,53 @@ from neurocls.models import create_model
 from neurocls.train import train_torch_model
 
 
-# LATENT_BRAINGNN_MODEL_CONFIG = {
-#     "model": {
-#         "name": "braingnn",
-#         "hidden_dims": [128, 64],
-#         "pool_ratios": [0.75, 0.5],
-#         "dropout": 0.2,
-#         "aux_loss_weight": 0.5,
-#     }
-# }
-# LATENT_BRAINGNN_TRAINING_CONFIG = {
-#     "training": {
-#         "learning_rate": 0.005,
-#         "convergence_patience": 10,
-#         "classifier_metric": "macro_f1",
-#         "batch_size": 16,
-#         "weight_decay": 0,
-#         "convergence_min_delta": 0,
-#         "convergence_warmup_epochs": 0,
-#         "num_epochs": 50,
-#         "reproducibility": {"seed": 42},
-#     }
-# }
-
-# after rerunning braingnn parameter search on latent space of best LAE
 LATENT_BRAINGNN_MODEL_CONFIG = {
     "model": {
         "name": "braingnn",
-        "hidden_dims": [256, 128],
-        "pool_ratios": [0.5, 0.5],
-        "dropout": 0.0,
-        "aux_loss_weight": 0.01,
+        "hidden_dims": [128, 64],
+        "pool_ratios": [0.75, 0.5],
+        "dropout": 0.2,
+        "aux_loss_weight": 0.5,
     }
 }
-
 LATENT_BRAINGNN_TRAINING_CONFIG = {
     "training": {
         "learning_rate": 0.005,
         "convergence_patience": 10,
         "classifier_metric": "macro_f1",
-        "batch_size": 32,
-        "weight_decay": 0.0001,
-        "convergence_min_delta": 0.0001,
-        "convergence_warmup_epochs": 5,
+        "batch_size": 16,
+        "weight_decay": 0,
+        "convergence_min_delta": 0,
+        "convergence_warmup_epochs": 0,
         "num_epochs": 50,
-        "reproducibility": {"seed": 751},
+        "reproducibility": {"seed": 42},
     }
 }
+
+# after rerunning braingnn parameter search on latent space of best LAE
+# LATENT_BRAINGNN_MODEL_CONFIG = {
+#     "model": {
+#         "name": "braingnn",
+#         "hidden_dims": [256, 128],
+#         "pool_ratios": [0.5, 0.5],
+#         "dropout": 0.0,
+#         "aux_loss_weight": 0.01,
+#     }
+# }
+
+# LATENT_BRAINGNN_TRAINING_CONFIG = {
+#     "training": {
+#         "learning_rate": 0.005,
+#         "convergence_patience": 10,
+#         "classifier_metric": "macro_f1",
+#         "batch_size": 32,
+#         "weight_decay": 0.0001,
+#         "convergence_min_delta": 0.0001,
+#         "convergence_warmup_epochs": 5,
+#         "num_epochs": 50,
+#         "reproducibility": {"seed": 751},
+#     }
+# }
 
 
 def _emit_classifier_progress(message):

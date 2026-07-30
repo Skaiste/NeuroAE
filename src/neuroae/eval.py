@@ -422,39 +422,53 @@ def eval_vae(
     device = torch.device(device)
     model = model.to(device)
     model.eval()
-    if val_loader is None:
-        val_loader = train_loader
-        print("Evaluation: validation loader missing, reusing the training loader for classifier validation.", flush=True)
+    base_val_loader = val_loader
+    classifier_train_loader = classifier_train_loader or train_loader
+    classifier_val_loader = classifier_val_loader or base_val_loader or classifier_train_loader
+    if base_val_loader is None:
+        print("Evaluation: validation loader missing, reusing the training loader where validation latents are required.", flush=True)
 
     print("Evaluation: collecting train split latents", flush=True)
     swfcd = SwFCD(data_loader.dataset, 30, 3)
     train_outputs = _collect_split_outputs(model, train_loader, device, use_pred_heads=use_pred_heads, include_recons=False)
-    print("Evaluation: collecting validation split latents", flush=True)
-    val_outputs = _collect_split_outputs(model, val_loader, device, use_pred_heads=use_pred_heads, include_recons=False)
+    if base_val_loader is not None:
+        print("Evaluation: collecting validation split latents", flush=True)
+        val_outputs = _collect_split_outputs(model, base_val_loader, device, use_pred_heads=use_pred_heads, include_recons=False)
+    else:
+        val_outputs = train_outputs
     print("Evaluation: collecting evaluation split reconstructions and latents", flush=True)
     eval_outputs = _collect_split_outputs(model, data_loader, device, use_pred_heads=use_pred_heads, include_recons=True)
-    classifier_train_loader = classifier_train_loader or train_loader
-    classifier_val_loader = classifier_val_loader or val_loader
     use_classifier_overrides = (
-        classifier_train_loader is not train_loader or classifier_val_loader is not val_loader
+        classifier_train_loader is not train_loader
+        or (base_val_loader is not None and classifier_val_loader is not base_val_loader)
+        or (base_val_loader is None and classifier_val_loader is not train_loader)
     )
     if use_classifier_overrides:
-        print("Evaluation: collecting classifier train split latents from override loader", flush=True)
-        classifier_train_outputs = _collect_split_outputs(
-            model,
-            classifier_train_loader,
-            device,
-            use_pred_heads=use_pred_heads,
-            include_recons=False,
-        )
-        print("Evaluation: collecting classifier validation split latents from override loader", flush=True)
-        classifier_val_outputs = _collect_split_outputs(
-            model,
-            classifier_val_loader,
-            device,
-            use_pred_heads=use_pred_heads,
-            include_recons=False,
-        )
+        if classifier_train_loader is train_loader:
+            classifier_train_outputs = train_outputs
+        else:
+            print("Evaluation: collecting classifier train split latents from override loader", flush=True)
+            classifier_train_outputs = _collect_split_outputs(
+                model,
+                classifier_train_loader,
+                device,
+                use_pred_heads=use_pred_heads,
+                include_recons=False,
+            )
+
+        if classifier_val_loader is classifier_train_loader:
+            classifier_val_outputs = classifier_train_outputs
+        elif base_val_loader is not None and classifier_val_loader is base_val_loader:
+            classifier_val_outputs = val_outputs
+        else:
+            print("Evaluation: collecting classifier validation split latents from override loader", flush=True)
+            classifier_val_outputs = _collect_split_outputs(
+                model,
+                classifier_val_loader,
+                device,
+                use_pred_heads=use_pred_heads,
+                include_recons=False,
+            )
     else:
         classifier_train_outputs = train_outputs
         classifier_val_outputs = val_outputs

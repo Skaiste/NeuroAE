@@ -47,28 +47,56 @@ default:
       seed: 42
       warn_only: false
 
+
 LAE:
   static_params:
     model:
       name: LAE
       latent_dim: 32
-  exp_params:
     training:
       loss_params:
-        beta: [0, 1.0]
+        beta: 0
+  exp_params:
+    training:
       reproducibility:
         seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
   
+VLAE:
+  static_params:
+    model:
+      name: LAE
+      latent_dim: 32
+    training:
+      loss_params:
+        beta: 0.5
+  exp_params:
+    training:
+      reproducibility:
+        seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
+
 DAE:
   static_params:
     model:
       name: VAE
       latent_dim: 32
       hidden_dims: [32]
-  exp_params:
     training:
       loss_params:
-        beta: [0, 1.0]
+        beta: 0
+  exp_params:
+      reproducibility:
+        seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
+
+VDAE:
+  static_params:
+    model:
+      name: VAE
+      latent_dim: 32
+      hidden_dims: [32]
+    training:
+      loss_params:
+        beta: 0.5
+  exp_params:
       reproducibility:
         seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
 
@@ -94,7 +122,7 @@ ConvVAE:
       name: ConvVAE
       latent_dim: 32
       hidden_dims: [32, 16]
-      kernel_size: 5
+      kernel_size: 3
     training:
       loss_params:
         beta: 0.5

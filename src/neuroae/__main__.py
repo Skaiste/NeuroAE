@@ -417,8 +417,8 @@ def _resolve_transfer_groups(data_config, loaders):
 
 
 def _build_group_transfer_loaders(loaders, group_name, training_config):
-    if "val_loader" not in loaders or "test_loader" not in loaders:
-        raise ValueError("group_transfer_matrix requires train, val, and test splits.")
+    if "test_loader" not in loaders:
+        raise ValueError("group_transfer_matrix requires a test split.")
     if loaders.get("val_is_test", False):
         raise ValueError(
             "group_transfer_matrix requires a distinct validation split. "
@@ -426,19 +426,27 @@ def _build_group_transfer_loaders(loaders, group_name, training_config):
         )
 
     filtered_train = filter_dataset_by_labels(loaders["train_loader"].dataset, [group_name])
-    filtered_val = filter_dataset_by_labels(loaders["val_loader"].dataset, [group_name])
+    filtered_val = None
+    if "val_loader" in loaders:
+        filtered_val = filter_dataset_by_labels(loaders["val_loader"].dataset, [group_name])
 
-    if len(filtered_train) == 0 or len(filtered_val) == 0:
+    if len(filtered_train) == 0:
         raise ValueError(
-            f"Group {group_name!r} has zero train or val samples after the shared split. "
+            f"Group {group_name!r} has zero train samples after the shared split. "
+            "Adjust split ratios or group selection."
+        )
+    if filtered_val is not None and len(filtered_val) == 0:
+        raise ValueError(
+            f"Group {group_name!r} has zero val samples after the shared split. "
             "Adjust split ratios or group selection."
         )
 
     datasets = {
         "train": filtered_train,
-        "val": filtered_val,
         "test": loaders["test_loader"].dataset,
     }
+    if filtered_val is not None:
+        datasets["val"] = filtered_val
     group_loaders = build_data_loader_result(
         datasets=datasets,
         batch_size=training_config["training"].get("batch_size", loaders["train_loader"].batch_size),
@@ -683,6 +691,36 @@ def _run_cross_validation_epoch_search(loaders, data_config, model_config, train
         flush=True,
     )
     return summary
+
+
+def _apply_cross_validation_epoch_search_if_needed(
+    stage_name,
+    loaders,
+    data_config,
+    model_config,
+    training_config,
+    device,
+):
+    if not _should_use_cross_validation_epoch_search(data_config, training_config, loaders):
+        return loaders, training_config, None
+
+    print(f"  Stage: cross-validation epoch search ({stage_name})", flush=True)
+    cv_summary = _run_cross_validation_epoch_search(
+        loaders=loaders,
+        data_config=data_config,
+        model_config=model_config,
+        training_config=training_config,
+        device=device,
+    )
+
+    updated_training_config = deepcopy(training_config)
+    updated_training_config.setdefault("training", {})
+    updated_training_config["training"]["num_epochs"] = int(cv_summary["selected_num_epochs"])
+
+    updated_loaders = dict(loaders)
+    updated_loaders.pop("val_loader", None)
+    updated_loaders["val_is_test"] = False
+    return updated_loaders, updated_training_config, cv_summary
 
 
 def load_model_from_config(model_config, data_config, input_dim, timepoint_dim, device, preserve_timepoints=False):
@@ -1170,20 +1208,15 @@ def run_standard_experiment_pipeline(
             num_workers=num_workers,
         )
     cv_summary = None
-    if not dry_run and _should_use_cross_validation_epoch_search(data_config, training_config, loaders):
-        print("  Stage: cross-validation epoch search", flush=True)
-        cv_summary = _run_cross_validation_epoch_search(
+    if not dry_run:
+        loaders, training_config, cv_summary = _apply_cross_validation_epoch_search_if_needed(
+            stage_name="standard",
             loaders=loaders,
             data_config=data_config,
             model_config=model_config,
             training_config=training_config,
             device=device,
         )
-        training_config = deepcopy(training_config)
-        training_config.setdefault("training", {})
-        training_config["training"]["num_epochs"] = int(cv_summary["selected_num_epochs"])
-        loaders = dict(loaders)
-        loaders.pop("val_loader", None)
     input_dim = loaders['input_dim']
     timepoint_dim = loaders['timepoint_dim']
     print("  Stage: build model", flush=True)
@@ -1255,8 +1288,21 @@ def run_group_transfer_matrix_pipeline(
     if not transfer_groups:
         raise ValueError("group_transfer_matrix requires at least one training group.")
 
-    input_dim = loaders["input_dim"]
-    timepoint_dim = loaders["timepoint_dim"]
+    general_loaders = loaders
+    general_training_config = training_config
+    general_cv_summary = None
+    if not dry_run:
+        general_loaders, general_training_config, general_cv_summary = _apply_cross_validation_epoch_search_if_needed(
+            stage_name="group_transfer_general",
+            loaders=loaders,
+            data_config=data_config,
+            model_config=model_config,
+            training_config=training_config,
+            device=device,
+        )
+
+    input_dim = general_loaders["input_dim"]
+    timepoint_dim = general_loaders["timepoint_dim"]
     print("  Stage: build model", flush=True)
     general_model, model_name, latent_dim = load_model_from_config(
         model_config=model_config,
@@ -1264,7 +1310,7 @@ def run_group_transfer_matrix_pipeline(
         input_dim=input_dim,
         timepoint_dim=timepoint_dim,
         device=device,
-        preserve_timepoints=loaders.get("preserve_timepoints", False),
+        preserve_timepoints=general_loaders.get("preserve_timepoints", False),
     )
     if not _has_model_transfer_hooks(general_model):
         raise ValueError(f"Model {model_name} does not provide freeze_encoder/reset_decoder hooks.")
@@ -1276,13 +1322,15 @@ def run_group_transfer_matrix_pipeline(
         "group_finetune_ids": {},
         "pipeline_complete": False,
     }
+    if general_cv_summary is not None:
+        general_metadata["cross_validation"] = general_cv_summary
     print("  Stage: train general model", flush=True)
     general_experiment_id = run_training(
         general_model,
         model_name,
         latent_dim,
-        loaders,
-        training_config,
+        general_loaders,
+        general_training_config,
         model_config,
         data_config,
         device=device,
@@ -1293,8 +1341,8 @@ def run_group_transfer_matrix_pipeline(
     general_eval_metrics = run_evaluation(
         general_model,
         latent_dim,
-        loaders,
-        training_config,
+        general_loaders,
+        general_training_config,
         data_config,
         device=device,
         experiment_id=general_experiment_id,
@@ -1309,20 +1357,32 @@ def run_group_transfer_matrix_pipeline(
         general_state_dict = deepcopy(general_model.state_dict())
         general_model_path = None
     else:
-        general_model_path = pathlib.Path(training_config["training"]["save_dir"]) / f"{general_experiment_id}_model.pt"
+        general_model_path = pathlib.Path(general_training_config["training"]["save_dir"]) / f"{general_experiment_id}_model.pt"
         general_state_dict = torch.load(general_model_path, map_location=torch.device(device))
 
     group_finetune_ids = {}
     for group_name in transfer_groups:
         print(f"Running transfer fine-tune for group: {group_name}")
         group_loaders = _build_group_transfer_loaders(loaders, group_name, training_config)
+        group_training_loaders = group_loaders
+        child_training_config = training_config
+        child_cv_summary = None
+        if not dry_run:
+            group_training_loaders, child_training_config, child_cv_summary = _apply_cross_validation_epoch_search_if_needed(
+                stage_name=f"group_transfer_{group_name}",
+                loaders=group_loaders,
+                data_config=data_config,
+                model_config=model_config,
+                training_config=training_config,
+                device=device,
+            )
         transfer_model, _, _ = load_model_from_config(
             model_config=model_config,
             data_config=data_config,
             input_dim=input_dim,
             timepoint_dim=timepoint_dim,
             device=device,
-            preserve_timepoints=group_loaders.get("preserve_timepoints", False),
+            preserve_timepoints=group_training_loaders.get("preserve_timepoints", False),
         )
         transfer_model.load_state_dict(general_state_dict)
         transfer_model.freeze_encoder()
@@ -1334,12 +1394,14 @@ def run_group_transfer_matrix_pipeline(
             "source_experiment_id": general_experiment_id,
             "target_group": group_name,
         }
+        if child_cv_summary is not None:
+            child_metadata["cross_validation"] = child_cv_summary
         child_experiment_id = run_training(
             transfer_model,
             model_name,
             latent_dim,
-            group_loaders,
-            training_config,
+            group_training_loaders,
+            child_training_config,
             model_config,
             data_config,
             device=device,
@@ -1349,8 +1411,8 @@ def run_group_transfer_matrix_pipeline(
         run_evaluation(
             transfer_model,
             latent_dim,
-            group_loaders,
-            training_config,
+            group_training_loaders,
+            child_training_config,
             data_config,
             device=device,
             experiment_id=child_experiment_id,

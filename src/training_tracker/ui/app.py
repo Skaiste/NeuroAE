@@ -392,8 +392,8 @@ PER_CLASS_METRIC_TITLES = {
 PREFERRED_CLASS_ORDER = ("HC", "MCI", "AD")
 
 METRIC_TITLE_PRIORITY = {
-    "FC Pearson": 0,
-    "SWFCD Pearson": 1,
+    "SWFCD Pearson": 0,
+    "FC Pearson": 1,
     "CLS Macro F1": 2,
 }
 
@@ -1752,7 +1752,7 @@ def _build_raincloud_spec(
 def _build_model_compare_raincloud_spec(
     grouped: dict[str, dict[str, list[float]]],
 ) -> dict[str, object]:
-    desired_titles = ("FC Pearson", "SWFCD Pearson")
+    desired_titles = ("SWFCD Pearson", "FC Pearson")
     title_to_key = {
         metric_title: metric_key
         for metric_key, metric_title in _metric_specs_for_grouped(grouped)
