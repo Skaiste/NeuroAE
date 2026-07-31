@@ -17,7 +17,7 @@ class VAE(ModelBase):
             last_dim = region_dim
             for dim in hidden_dims:
                 layers.append(nn.Linear(last_dim, dim))
-                layers.append(nn.LeakyReLU(0.2))
+                layers.append(nn.GELU())
                 last_dim = dim
             self.fc = nn.Sequential(*layers)
             self.fc_mean = nn.Linear(last_dim, latent_dim)
@@ -42,7 +42,7 @@ class VAE(ModelBase):
             last_dim = latent_dim
             for dim in hidden_dims[::-1]:
                 layers.append(nn.Linear(last_dim, dim))
-                layers.append(nn.LeakyReLU(0.2))
+                layers.append(nn.GELU())
                 last_dim = dim
             layers.append(nn.Linear(last_dim, region_dim))
             self.fc = nn.Sequential(*layers)
