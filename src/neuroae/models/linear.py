@@ -65,7 +65,7 @@ class LAE(ModelBase):
         if self._variational_enabled():
             log_var_time = self.encoder_logvar(x_time)
             log_var_time = torch.clamp(log_var_time, -10.0, 10.0)
-            z_time = self.reparameterize(mu_time, log_var_time)
+            z_time = self.reparameterize(mu_time, log_var_time) if self.training else mu_time
         else:
             log_var_time = torch.zeros_like(mu_time)
             z_time = mu_time

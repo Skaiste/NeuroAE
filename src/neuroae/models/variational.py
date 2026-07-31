@@ -134,7 +134,7 @@ class VAE(ModelBase):
 
         mean = self._flatten_latent(mean_time)
         log_var = self._flatten_latent(log_var_time)
-        z = self.reparameterize(mean, torch.exp(0.5 * log_var))
+        z = self.reparameterize(mean, torch.exp(0.5 * log_var)) if self.training else mean
 
         z_time = self._reshape_latent(z)
         x_hat_time = self.decoder(z_time)

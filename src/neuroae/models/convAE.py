@@ -234,7 +234,7 @@ class ConvAE(ModelBase):
             return x_hat, z
 
         mu, log_var = self.encode(x)
-        z = self.reparameterize(mu, torch.exp(0.5 * log_var))
+        z = self.reparameterize(mu, torch.exp(0.5 * log_var)) if self.training else mu
         x_hat = self.decode(z)
         return x_hat, mu, log_var, z
 
