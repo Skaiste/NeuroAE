@@ -5,7 +5,7 @@ default:
       parcelations: 400
       batch_size: 32
       cache_file: data/ADNI_preprocessed_cache_400.pt
-      cache_mode: none
+      cache_mode: load
       fc_input: false
       flatten: false
       normalize: true
@@ -46,7 +46,6 @@ default:
       enabled: true
       seed: 42
       warn_only: false
-    pipeline: group_transfer_matrix
 
 
 LAE:
@@ -54,9 +53,53 @@ LAE:
     model:
       name: LAE
       latent_dim: 32
+  exp_params:
     training:
       loss_params:
-        beta: 0
+        beta: [0, 0.5]
+      reproducibility:
+        seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
+  
+DAE:
+  static_params:
+    model:
+      name: VAE
+      latent_dim: 8
+      hidden_dims: [32]
+  exp_params:
+      loss_params:
+        beta: [0, 0.5]
+      reproducibility:
+        seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
+
+ConvAE:
+  static_params:
+    model:
+      name: ConvAE
+      latent_dim: 32
+      kernel_size: 3
+      hidden_dims: [32]
+    training:
+      reproducibility:
+        deterministic: false
+  exp_params:
+    training:
+      reproducibility:
+        seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
+
+
+ConvVAE:
+  static_params:
+    model:
+      name: ConvVAE
+      latent_dim: 32
+      hidden_dims: [16]
+      kernel_size: 5
+    training:
+      loss_params:
+        beta: 1.0
+      reproducibility:
+        deterministic: false
   exp_params:
     training:
       reproducibility:
