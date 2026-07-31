@@ -1636,6 +1636,16 @@ def main():
             data_config=data_config,
             num_workers=args.num_workers,
         )
+        cv_summary = None
+        if not args.dry_run:
+            loaders, training_config, cv_summary = _apply_cross_validation_epoch_search_if_needed(
+                stage_name="train_cli",
+                loaders=loaders,
+                data_config=data_config,
+                model_config=model_config,
+                training_config=training_config,
+                device=args.device,
+            )
         input_dim = loaders['input_dim']
         timepoint_dim = loaders['timepoint_dim']
         
@@ -1658,6 +1668,7 @@ def main():
             data_config,
             device=args.device,
             results_dir=results_dir,
+            extra_metadata={"cross_validation": cv_summary} if cv_summary is not None else None,
         )
         if args.dry_run:
             run_evaluation(

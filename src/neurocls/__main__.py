@@ -23,7 +23,7 @@ from training_tracker import TrainingResultsManager
 from .eval import compute_classification_metrics
 from .features import build_feature_splits, load_precomputed_feature_splits
 from .models import create_model
-from .train import train_sklearn_model, train_torch_model
+from .train import run_torch_cross_validation_epoch_search, train_sklearn_model, train_torch_model
 from .utils.runtime import (
     build_experiment_summary,
     build_feature_metadata,
@@ -166,6 +166,15 @@ def _log_training_data_source(feature_payload, feature_metadata, data_config):
     )
 
 
+def _should_use_cross_validation_epoch_search(data_config, training_config, feature_payload):
+    training_section = training_config.get("training", {})
+    requested_val_split = float(data_config.get("data", {}).get("val_split", 0.15))
+    enabled = training_section.get("cross_validation_enabled")
+    if enabled is None:
+        return requested_val_split <= 0.0 and feature_payload.get("val") is None
+    return bool(enabled)
+
+
 def _train_and_register(data_dir, data_config, model_config, training_config, device, results_dir, num_workers=0):
     loaders, feature_payload, label_payload, feature_metadata = _prepare_runtime(
         data_dir, data_config, model_config, training_config, num_workers
@@ -180,6 +189,27 @@ def _train_and_register(data_dir, data_config, model_config, training_config, de
         runtime["family"],
         dry_run,
     )
+    cv_summary = None
+    if (
+        runtime["family"] != "sklearn"
+        and not dry_run
+        and _should_use_cross_validation_epoch_search(data_config, training_config, feature_payload)
+    ):
+        cv_summary = run_torch_cross_validation_epoch_search(
+            model_factory=lambda: create_model(
+                model_config,
+                feature_metadata["input_shape"],
+                len(label_payload["classes"]),
+            )["model"],
+            family=runtime["family"],
+            feature_payload=feature_payload,
+            label_payload=label_payload,
+            training_config=training_config,
+            device=device,
+        )
+        training_config = deepcopy(training_config)
+        training_config.setdefault("training", {})
+        training_config["training"]["num_epochs"] = int(cv_summary["selected_num_epochs"])
 
     if runtime["family"] == "sklearn":
         trained_model, history, train_metrics, val_metrics = train_sklearn_model(
@@ -236,6 +266,8 @@ def _train_and_register(data_dir, data_config, model_config, training_config, de
             "label_classes": list(label_payload["classes"]),
             "artifacts": {"model_path": str(artifact_path)},
         }
+        if cv_summary is not None:
+            metadata["cross_validation"] = deepcopy(cv_summary)
         tracker.register_experiment(metadata=metadata, history=history)
         LOGGER.info(
             "Registered experiment: id=%s train_accuracy=%.4f train_macro_f1=%.4f%s",

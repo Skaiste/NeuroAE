@@ -151,7 +151,9 @@ class SwFCD:
         fc_vec = self._safe_standardize_last_dim(fc_vec)
         fcd = torch.matmul(fc_vec, fc_vec.transpose(-1, -2))
 
-        iu_w = self._triu_indices(n_windows, n_windows, offset=1, device=x_btr.device)
+        # Exclude correlations between temporally nearby windows when scoring
+        # SwFCD. FC itself continues to use its standard k=1 upper triangle.
+        iu_w = self._triu_indices(n_windows, n_windows, offset=10, device=x_btr.device)
         return fcd[..., iu_w[0], iu_w[1]]
 
 
@@ -180,8 +182,10 @@ class SwFCD:
         rows, cols = torch.tril_indices(n_rois, n_rois, offset=-1)
         lower_triangular_parts = corr_mtrxs[:, :, rows, cols]
         
-        cotsampling = x_btr.new_zeros((batches, n_windows * (n_windows - 1) // 2))
-        rows, cols = torch.triu_indices(n_windows, n_windows, offset=1)
+        # The final SwFCD vector omits the first nine window lags (k=10).
+        # This is intentionally different from the FC upper triangle (k=1).
+        rows, cols = torch.triu_indices(n_windows, n_windows, offset=10)
+        cotsampling = x_btr.new_zeros((batches, rows.numel()))
         for b in range(batches):
             corr = torch.corrcoef(lower_triangular_parts[b])
             cotsampling[b] = corr[rows, cols]

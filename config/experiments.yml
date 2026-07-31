@@ -5,7 +5,7 @@ default:
       parcelations: 400
       batch_size: 32
       cache_file: data/ADNI_preprocessed_cache_400.pt
-      cache_mode: load
+      cache_mode: none
       fc_input: false
       flatten: false
       normalize: true
@@ -26,7 +26,7 @@ default:
     num_epochs: 1000
     save_dir: ./models
     checkpoint_selection_metric: swfcd_loss_joint
-    evaluation_scope: per_group
+    evaluation_scope: combined
     vectorize_val_reference: false
     compute_swfcd_during_training: true
     learning_rate: 1e-3
@@ -46,6 +46,7 @@ default:
       enabled: true
       seed: 42
       warn_only: false
+    pipeline: group_transfer_matrix
 
 
 LAE:
@@ -56,78 +57,6 @@ LAE:
     training:
       loss_params:
         beta: 0
-  exp_params:
-    training:
-      reproducibility:
-        seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
-  
-VLAE:
-  static_params:
-    model:
-      name: LAE
-      latent_dim: 32
-    training:
-      loss_params:
-        beta: 0.5
-  exp_params:
-    training:
-      reproducibility:
-        seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
-
-DAE:
-  static_params:
-    model:
-      name: VAE
-      latent_dim: 32
-      hidden_dims: [32]
-    training:
-      loss_params:
-        beta: 0
-  exp_params:
-      reproducibility:
-        seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
-
-VDAE:
-  static_params:
-    model:
-      name: VAE
-      latent_dim: 32
-      hidden_dims: [32]
-    training:
-      loss_params:
-        beta: 0.5
-  exp_params:
-      reproducibility:
-        seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
-
-ConvAE:
-  static_params:
-    model:
-      name: ConvAE
-      latent_dim: 32
-      kernel_size: 3
-      hidden_dims: [16]
-    training:
-      reproducibility:
-        deterministic: false
-  exp_params:
-    training:
-      reproducibility:
-        seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
-
-
-ConvVAE:
-  static_params:
-    model:
-      name: ConvVAE
-      latent_dim: 32
-      hidden_dims: [32, 16]
-      kernel_size: 3
-    training:
-      loss_params:
-        beta: 0.5
-      reproducibility:
-        deterministic: false
   exp_params:
     training:
       reproducibility:

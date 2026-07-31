@@ -1,7 +1,7 @@
 data:
   batch_size: 32
   cache_file: data/ADNI_preprocessed_cache_400.pt
-  cache_mode: load
+  cache_mode: none
   fc_input: false
   flatten: false
   heldout_subject_ids:
@@ -39,3 +39,4 @@ data:
   truncate_features: false
   type: ADNI3
   val_split: 0.0
+  groups: [AD]

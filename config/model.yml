@@ -1,5 +1,6 @@
 model:
-  freeze_encoder: false
   latent_dim: 32
   name: LAE
-  reset_decoder: false
+  load_path: models/exp_20260731_065302_lae_9281701a_model.pt
+  freeze_encoder: true
+  reset_decoder: true

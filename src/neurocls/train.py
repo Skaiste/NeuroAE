@@ -6,6 +6,7 @@ from copy import deepcopy
 import numpy as np
 import torch
 from sklearn.base import clone
+from sklearn.model_selection import KFold, StratifiedKFold
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
@@ -17,6 +18,141 @@ LOGGER = logging.getLogger("neurocls")
 def _emit_progress(message):
     LOGGER.info(message)
     print(message, flush=True)
+
+
+def select_best_epoch(history, metric_name="macro_f1", min_delta=0.0):
+    val_metrics = history.get("val", {}) if isinstance(history, dict) else {}
+    metric_values = list(val_metrics.get(metric_name, [])) if isinstance(val_metrics, dict) else []
+    if not metric_values:
+        return None
+
+    best_index = 0
+    best_score = float(metric_values[0])
+    for idx in range(1, len(metric_values)):
+        score = float(metric_values[idx])
+        if score > (best_score + float(min_delta)):
+            best_score = score
+            best_index = idx
+
+    return {
+        "best_index": best_index,
+        "best_epoch": best_index + 1,
+        "best_score": best_score,
+        "metric_name": metric_name,
+    }
+
+
+def _subset_split_payload(split_payload, indices, input_mode):
+    indices = np.asarray(indices, dtype=int)
+    subset = {
+        "labels": [split_payload["labels"][idx] for idx in indices.tolist()],
+        "subject_ids": [split_payload.get("subject_ids", [None] * len(split_payload["labels"]))[idx] for idx in indices.tolist()],
+    }
+    if input_mode == "graph":
+        subset["node_features"] = np.asarray(split_payload["node_features"])[indices]
+        subset["adjacency"] = np.asarray(split_payload["adjacency"])[indices]
+    else:
+        subset["X"] = np.asarray(split_payload["X"])[indices]
+    return subset
+
+
+def _make_cv_splits(train_labels, n_splits, random_seed):
+    labels = np.asarray(train_labels, dtype=object)
+    if labels.shape[0] < n_splits:
+        raise ValueError(
+            f"cross_validation_folds={n_splits} exceeds available training samples {labels.shape[0]}."
+        )
+    unique_labels, counts = np.unique(labels.astype(str), return_counts=True)
+    can_stratify = len(unique_labels) > 1 and counts.min() >= n_splits
+    splitter = (
+        StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_seed)
+        if can_stratify
+        else KFold(n_splits=n_splits, shuffle=True, random_state=random_seed)
+    )
+    split_iter = splitter.split(np.arange(labels.shape[0]), labels.astype(str) if can_stratify else None)
+    return split_iter, can_stratify
+
+
+def run_torch_cross_validation_epoch_search(model_factory, family, feature_payload, label_payload, training_config, device):
+    input_mode = feature_payload["input_mode"]
+    train_split = feature_payload["train"]
+    train_labels = train_split["labels"]
+    n_splits = int(training_config["training"].get("cross_validation_folds", 5))
+    base_seed = int(training_config["training"].get("reproducibility", {}).get("seed", 42))
+    metric_name = str(training_config["training"].get("classifier_metric", "macro_f1"))
+    min_delta = float(training_config["training"].get("convergence_min_delta", 0.0))
+    split_iter, stratified = _make_cv_splits(train_labels, n_splits, base_seed)
+    fold_summaries = []
+
+    _emit_progress(
+        f"[neurocls] Running {n_splits}-fold cross-validation on the training split "
+        f"to select the final epoch count ({'stratified' if stratified else 'non-stratified'} folds)"
+    )
+
+    for fold_idx, (fold_train_idx, fold_val_idx) in enumerate(split_iter, start=1):
+        fold_feature_payload = {
+            "input_mode": input_mode,
+            "train": _subset_split_payload(train_split, fold_train_idx, input_mode),
+            "val": _subset_split_payload(train_split, fold_val_idx, input_mode),
+            "test": feature_payload.get("test"),
+            "scaler": feature_payload.get("scaler"),
+        }
+        fold_label_payload = {
+            "classes": list(label_payload["classes"]),
+            "class_to_index": deepcopy(label_payload["class_to_index"]),
+            "train": np.asarray(label_payload["train"])[fold_train_idx],
+            "val": np.asarray(label_payload["train"])[fold_val_idx],
+            "test": label_payload.get("test"),
+        }
+        torch.manual_seed(base_seed + fold_idx)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(base_seed + fold_idx)
+        model = model_factory()
+        _emit_progress(f"[neurocls] Cross-validation fold {fold_idx}/{n_splits}")
+        _, history, _, best_val_metrics = train_torch_model(
+            model,
+            family,
+            fold_feature_payload,
+            fold_label_payload,
+            training_config,
+            device,
+        )
+        selection = select_best_epoch(history, metric_name=metric_name, min_delta=min_delta)
+        best_epoch = selection["best_epoch"] if selection is not None else max(len(history["train"].get("loss", [])), 1)
+        fold_summary = {
+            "fold": fold_idx,
+            "train_samples": int(len(fold_train_idx)),
+            "val_samples": int(len(fold_val_idx)),
+            "best_epoch": int(best_epoch),
+            "selected_metric": metric_name,
+            "selected_metric_value": (
+                selection["best_score"]
+                if selection is not None
+                else (best_val_metrics.get(metric_name) if isinstance(best_val_metrics, dict) else None)
+            ),
+        }
+        fold_summaries.append(fold_summary)
+        _emit_progress(
+            f"[neurocls] Cross-validation fold {fold_idx} selected epoch {best_epoch} "
+            f"({metric_name}={fold_summary['selected_metric_value']})"
+        )
+
+    best_epochs = [fold["best_epoch"] for fold in fold_summaries]
+    selected_num_epochs = max(1, int(round(float(np.median(best_epochs)))))
+    summary = {
+        "enabled": True,
+        "num_folds": n_splits,
+        "selection_metric": metric_name,
+        "folds": fold_summaries,
+        "fold_best_epochs": best_epochs,
+        "selected_num_epochs": selected_num_epochs,
+        "aggregation": "median",
+    }
+    _emit_progress(
+        f"[neurocls] Cross-validation selected {selected_num_epochs} training epochs "
+        f"from fold best epochs {best_epochs}"
+    )
+    return summary
 
 
 class VectorDataset(Dataset):
