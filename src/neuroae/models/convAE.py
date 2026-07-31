@@ -6,8 +6,20 @@ from . import ModelBase
 from .head import PredHeadAvg, PredHeadConv, PredHeadTemporalPool, PredHeadGatedTemporalPool
 
 
+def _region_reduction_params(regions, latent_dim):
+    """Return convolution parameters that map a length of ``regions`` to ``latent_dim``."""
+    if latent_dim > regions:
+        raise ValueError(
+            "latent_dim must be <= regions when using learned regional downsampling."
+        )
+
+    stride = regions // latent_dim
+    kernel_size = regions - stride * (latent_dim - 1)
+    return kernel_size, stride
+
+
 class _ConvEncoder(nn.Module):
-    def __init__(self, hidden_channels, latent_dim, kernel_size):
+    def __init__(self, hidden_channels, latent_dim, kernel_size, region_kernel_size, region_stride):
         super().__init__()
         if isinstance(hidden_channels, int):
             hidden_channels = [hidden_channels]
@@ -22,17 +34,29 @@ class _ConvEncoder(nn.Module):
             layers.append(nn.GELU())
             in_channels = channels
         self.features = nn.Sequential(*layers)
+        # Reduce the region axis with a separate learned filter for each
+        # hidden channel: (N, H, R) -> (N, H, L).
+        self.reduce_regions = nn.Sequential(
+            nn.Conv1d(
+                in_channels,
+                in_channels,
+                kernel_size=region_kernel_size,
+                stride=region_stride,
+                groups=in_channels,
+            ),
+            nn.GELU(),
+        )
+        # Mix the H features at each latent position: (N, H, L) -> (N, 1, L).
         self.to_latent = nn.Conv1d(in_channels, 1, kernel_size=1)
-        self.pool = nn.AdaptiveAvgPool1d(latent_dim)
 
     def forward(self, x):
         h = self.features(x)
-        h = self.to_latent(h)
-        return self.pool(h)
+        h = self.reduce_regions(h)
+        return self.to_latent(h)
 
 
 class _ConvDecoder(nn.Module):
-    def __init__(self, hidden_channels, output_dim, kernel_size):
+    def __init__(self, hidden_channels, kernel_size, region_kernel_size, region_stride):
         super().__init__()
         if isinstance(hidden_channels, int):
             hidden_channels = [hidden_channels]
@@ -43,7 +67,18 @@ class _ConvDecoder(nn.Module):
         decoder_channels = list(hidden_channels[::-1])
 
         self.expand = nn.Conv1d(1, decoder_channels[0], kernel_size=1)
-        self.upsample = nn.Upsample(size=output_dim, mode="linear", align_corners=False)
+        # Restore the encoder's regional length exactly:
+        # (L - 1) * stride + kernel_size == R.
+        self.expand_regions = nn.Sequential(
+            nn.ConvTranspose1d(
+                decoder_channels[0],
+                decoder_channels[0],
+                kernel_size=region_kernel_size,
+                stride=region_stride,
+                groups=decoder_channels[0],
+            ),
+            nn.GELU(),
+        )
 
         layers = []
         in_channels = decoder_channels[0]
@@ -56,7 +91,7 @@ class _ConvDecoder(nn.Module):
 
     def forward(self, z):
         h = self.expand(z)
-        h = self.upsample(h)
+        h = self.expand_regions(h)
         return self.reconstruction(h)
 
 
@@ -100,11 +135,16 @@ class ConvAE(ModelBase):
         self.kernel_size = int(kernel_size)
         self.variational = bool(variational)
         self.device = device
+        self.region_kernel_size, self.region_stride = _region_reduction_params(
+            self.regions, self.latent_dim
+        )
 
         self.encoder = _ConvEncoder(
             hidden_channels=self.hidden_channels,
             latent_dim=self.latent_dim,
             kernel_size=self.kernel_size,
+            region_kernel_size=self.region_kernel_size,
+            region_stride=self.region_stride,
         ).to(device)
 
         if self.variational:
@@ -116,8 +156,9 @@ class ConvAE(ModelBase):
 
         self.decoder = _ConvDecoder(
             hidden_channels=self.hidden_channels,
-            output_dim=self.regions,
             kernel_size=self.kernel_size,
+            region_kernel_size=self.region_kernel_size,
+            region_stride=self.region_stride,
         ).to(device)
 
     def freeze_encoder(self):
@@ -133,8 +174,9 @@ class ConvAE(ModelBase):
     def reset_decoder(self):
         self.decoder = _ConvDecoder(
             hidden_channels=self.hidden_channels,
-            output_dim=self.regions,
             kernel_size=self.kernel_size,
+            region_kernel_size=self.region_kernel_size,
+            region_stride=self.region_stride,
         ).to(self.device)
 
     def _check_input(self, x):
