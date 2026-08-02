@@ -1145,6 +1145,7 @@ def run_evaluation(
         loaders.get('val_loader'),
         loaders['test_loader'],
         pca=pca,
+        use_pred_heads=len(data_config["data"].get("use_bio_levels", [])) > 0,
         evaluation_scope=evaluation_scope_override or training_config["training"].get("evaluation_scope", "combined"),
         classifier_train_loader=(
             classifier_loaders_override.get("train_loader")
