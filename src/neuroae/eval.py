@@ -502,7 +502,7 @@ def eval_vae(
         print("Evaluation: validation loader missing, reusing the training loader where validation latents are required.", flush=True)
 
     print("Evaluation: collecting train split latents", flush=True)
-    swfcd = SwFCD(data_loader.dataset, 10, 1)
+    swfcd = SwFCD(data_loader.dataset, 2, 1)
     train_outputs = _collect_split_outputs(model, train_loader, device, use_pred_heads=use_pred_heads, include_recons=False)
     if base_val_loader is not None:
         print("Evaluation: collecting validation split latents", flush=True)
