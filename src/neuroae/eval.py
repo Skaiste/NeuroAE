@@ -248,7 +248,57 @@ def _classifier_metric_bundle(metrics):
     }
 
 
-def _compute_pca_metrics(pca, swfcd, inputs, latents, labels, dataset, classifier_metrics=None, valid_mask=None):
+def _compute_swfcd_metrics_in_batches(swfcd, inputs, recons, device, batch_size):
+    """Compute dataset-level SwFCD metrics without materializing every subject on one device."""
+    if inputs is None or recons is None or inputs.shape[0] == 0:
+        return {"pearson": np.nan, "mad": np.nan, "rmse": np.nan}
+
+    device = torch.device(device)
+    batch_size = max(1, int(batch_size or inputs.shape[0]))
+    samples_per_subject = 1
+    if getattr(swfcd.dataset, "timepoints_as_samples", False):
+        samples_per_subject = int(swfcd.dataset.original_shape[0])
+        batch_size = max(samples_per_subject, batch_size // samples_per_subject * samples_per_subject)
+
+    metric_sums = {"pearson": 0.0, "mad": 0.0, "rmse": 0.0}
+    subject_count = 0
+    with torch.no_grad():
+        for start in range(0, inputs.shape[0], batch_size):
+            end = min(start + batch_size, inputs.shape[0])
+            # A timepoint-as-sample dataset must retain complete subjects in each chunk.
+            if samples_per_subject > 1 and (end - start) % samples_per_subject:
+                end -= (end - start) % samples_per_subject
+                if end == start:
+                    end = min(start + samples_per_subject, inputs.shape[0])
+
+            input_batch = inputs[start:end].to(device)
+            recon_batch = recons[start:end].to(device)
+            results = swfcd.apply(input_batch, recon_batch)
+            batch_subject_count = (end - start) // samples_per_subject
+            if results is not None and batch_subject_count > 0:
+                for name in metric_sums:
+                    metric_sums[name] += _to_scalar_metric(results[name]) * batch_subject_count
+                subject_count += batch_subject_count
+
+            del input_batch, recon_batch, results
+
+    if subject_count == 0:
+        return {"pearson": np.nan, "mad": np.nan, "rmse": np.nan}
+    return {name: value / subject_count for name, value in metric_sums.items()}
+
+
+def _compute_pca_metrics(
+    pca,
+    swfcd,
+    inputs,
+    latents,
+    labels,
+    dataset,
+    classifier_metrics=None,
+    valid_mask=None,
+    device="cpu",
+    swfcd_batch_size=None,
+):
     mse = np.nan
     fc = np.nan
     swfcd_results = {'pearson': np.nan, 'mad': np.nan, 'rmse': np.nan}
@@ -259,7 +309,13 @@ def _compute_pca_metrics(pca, swfcd, inputs, latents, labels, dataset, classifie
 
         inputs_t = torch.as_tensor(inputs, dtype=torch.float32)
         recon_t = torch.as_tensor(recon, dtype=torch.float32)
-        swfcd_results = swfcd.apply(inputs_t, recon_t)
+        swfcd_results = _compute_swfcd_metrics_in_batches(
+            swfcd,
+            inputs_t,
+            recon_t,
+            device=device,
+            batch_size=swfcd_batch_size,
+        )
 
     swfcd_pearson = _to_scalar_metric(swfcd_results['pearson']) if swfcd_results else np.nan
     swfcd_mad = _to_scalar_metric(swfcd_results['mad']) if swfcd_results else np.nan
@@ -278,11 +334,28 @@ def _compute_pca_metrics(pca, swfcd, inputs, latents, labels, dataset, classifie
     return metrics
 
 
-def _compute_model_metrics(sw_fcd, inputs, recons, latents, labels, dataset, classifier_metrics=None, valid_mask=None):
+def _compute_model_metrics(
+    sw_fcd,
+    inputs,
+    recons,
+    latents,
+    labels,
+    dataset,
+    classifier_metrics=None,
+    valid_mask=None,
+    device="cpu",
+    swfcd_batch_size=None,
+):
     mse = _masked_mse_torch(recons, inputs, valid_mask)
     fc_preservation = fc_preservation_score(inputs, recons, dataset)
 
-    swfcd_results = sw_fcd.apply(inputs, recons)
+    swfcd_results = _compute_swfcd_metrics_in_batches(
+        sw_fcd,
+        inputs,
+        recons,
+        device=device,
+        batch_size=swfcd_batch_size,
+    )
     swfcd_pearson = _to_scalar_metric(swfcd_results["pearson"]) if swfcd_results else np.nan
     swfcd_mad = _to_scalar_metric(swfcd_results["mad"]) if swfcd_results else np.nan
     swfcd_rmse = _to_scalar_metric(swfcd_results["rmse"]) if swfcd_results else np.nan
@@ -429,7 +502,7 @@ def eval_vae(
         print("Evaluation: validation loader missing, reusing the training loader where validation latents are required.", flush=True)
 
     print("Evaluation: collecting train split latents", flush=True)
-    swfcd = SwFCD(data_loader.dataset, 2, 1)
+    swfcd = SwFCD(data_loader.dataset, 10, 1)
     train_outputs = _collect_split_outputs(model, train_loader, device, use_pred_heads=use_pred_heads, include_recons=False)
     if base_val_loader is not None:
         print("Evaluation: collecting validation split latents", flush=True)
@@ -517,6 +590,8 @@ def eval_vae(
         dataset=data_loader.dataset,
         classifier_metrics=classifier_metrics,
         valid_mask=valid_mask_all,
+        device=device,
+        swfcd_batch_size=getattr(data_loader, "batch_size", None),
     )
     metrics = {
         "scope": scope,
@@ -555,6 +630,8 @@ def eval_vae(
             dataset=data_loader.dataset,
             classifier_metrics=pca_classifier_result.get("test_metrics"),
             valid_mask=valid_mask_np,
+            device=device,
+            swfcd_batch_size=getattr(data_loader, "batch_size", None),
         )
 
         metrics["pca"] = pca_metrics
