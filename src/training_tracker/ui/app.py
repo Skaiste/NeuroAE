@@ -1248,6 +1248,22 @@ def _value_sort_key(value):
     return (2, str(value))
 
 
+_CLINICAL_GROUP_ORDER = {"hc": 0, "mci": 1, "ad": 2}
+
+
+def _parameter_value_sort_key(value):
+    """Sort clinical evaluation groups in their conventional cohort order."""
+    if isinstance(value, str):
+        clinical_order = _CLINICAL_GROUP_ORDER.get(value.strip().casefold())
+        if clinical_order is not None:
+            return (0, clinical_order)
+    return (1, _value_sort_key(value))
+
+
+def _ordered_parameter_values(values) -> list[object]:
+    return sorted(values, key=_parameter_value_sort_key)
+
+
 def _value_label(value) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -1457,7 +1473,7 @@ def _parameter_value_options(rows: list[dict], path: tuple[str, ...]) -> list[ob
         for row in rows
         for value in _get_param_values_from_row(row, path)
     }
-    return sorted(values, key=_value_sort_key)
+    return _ordered_parameter_values(values)
 
 
 def _rows_matching_param_filters(
@@ -1486,7 +1502,7 @@ def _expand_rows_for_parameter(rows: list[dict], path: tuple[str, ...]) -> list[
     for row in rows:
         groups_payload = row.get("_evaluation_groups")
         if isinstance(groups_payload, dict) and groups_payload:
-            for group_name in sorted(groups_payload):
+            for group_name in _ordered_parameter_values(groups_payload):
                 group_payload = groups_payload.get(group_name)
                 if not isinstance(group_payload, dict):
                     continue
@@ -1560,7 +1576,7 @@ def _build_parameter_compare_markdown_table(
         "| " + " | ".join(["---"] * len(headers)) + " |",
     ]
 
-    sorted_param_values = sorted(grouped.keys(), key=_value_sort_key)
+    sorted_param_values = _ordered_parameter_values(grouped)
     for param_value in sorted_param_values:
         metric_avgs = []
         for metric_key, _metric_title in metric_specs:
@@ -1620,7 +1636,7 @@ def _build_parameter_compare_boxplot_spec(
     include_fc: bool = True,
 ) -> str:
     metric_specs = _metric_specs_for_grouped(grouped, include_fc=include_fc)
-    sorted_param_values = sorted(grouped.keys(), key=_value_sort_key)
+    sorted_param_values = _ordered_parameter_values(grouped)
 
     lines = [
         "```chart",
@@ -1715,7 +1731,8 @@ def _build_classifier_f1_bar_chart_spec(grouped: dict[str, dict[str, list[float]
         "series:",
     ]
 
-    for model_name, model_metrics in grouped.items():
+    for model_name in _ordered_parameter_values(grouped):
+        model_metrics = grouped[model_name]
         averaged_values: list[str] = []
         for metric_key, _metric_title in f1_specs:
             mean_value = _average_metric(model_metrics.get(metric_key, []))
@@ -1809,7 +1826,8 @@ def _build_raincloud_spec_for_metric_specs(
 ) -> dict[str, object]:
 
     series = []
-    for title, metrics_by_key in grouped.items():
+    for title in _ordered_parameter_values(grouped):
+        metrics_by_key = grouped[title]
         series.append(
             {
                 "title": str(title),
@@ -1898,7 +1916,7 @@ def _pairwise_pvalue_matrix(
     grouped: dict[str, dict[str, list[float]]],
     metric_key: str,
 ) -> pd.DataFrame:
-    labels = list(grouped.keys())
+    labels = _ordered_parameter_values(grouped)
     matrix_rows: list[list[str]] = []
     for left_label in labels:
         left_values = [_to_float(value) for value in grouped[left_label].get(metric_key, [])]
@@ -2497,7 +2515,7 @@ def main() -> None:
                     if metric_value is not None:
                         grouped[encoded_param_value][metric_key].append(metric_value)
 
-            sorted_param_values = sorted(grouped.keys(), key=_value_sort_key)
+            sorted_param_values = _ordered_parameter_values(grouped)
             display_grouped = {
                 _display_group_value(param_value): grouped[param_value]
                 for param_value in sorted_param_values
@@ -2779,7 +2797,7 @@ def main() -> None:
                     if metric_value is not None:
                         grouped[encoded_param_value][metric_key].append(metric_value)
 
-            sorted_param_values = sorted(grouped.keys(), key=_value_sort_key)
+            sorted_param_values = _ordered_parameter_values(grouped)
             display_grouped = {
                 _display_group_value(param_value): grouped[param_value]
                 for param_value in sorted_param_values
