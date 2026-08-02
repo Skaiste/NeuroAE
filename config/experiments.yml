@@ -8,7 +8,7 @@ default:
       cache_mode: load
       fc_input: false
       flatten: false
-      normalize: true
+      normalize: false
       pad_features: false
       preserve_timepoints: false
       random_seed: 42
@@ -66,9 +66,25 @@ DAE:
       name: VAE
       latent_dim: 8
       hidden_dims: [32]
-  exp_params:
+    training:
       loss_params:
-        beta: [0, 0.5]
+        beta: 0
+  exp_params:
+    training:
+      reproducibility:
+        seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
+
+VDAE:
+  static_params:
+    model:
+      name: VAE
+      latent_dim: 16
+      hidden_dims: [32]
+    training:
+      loss_params:
+        beta: 0.5
+  exp_params:
+    training:
       reproducibility:
         seed: [42, 100, 1, 111, 1007, 751, 149, 1216, 67, 1717]
 

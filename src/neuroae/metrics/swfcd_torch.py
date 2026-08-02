@@ -124,7 +124,7 @@ class SwFCD:
                 self._describe_input(x_btr),
             )
 
-    def _swfcd_vector_from_bold(self, x_btr: torch.Tensor) -> torch.Tensor:
+    def _swfcd_vector_from_bold(self, x_btr: torch.Tensor, offset=10) -> torch.Tensor:
         """Compute SWFCD vector per batch element from BOLD time series (B, T, R)."""
         bsz, t_len, n_roi = x_btr.shape
         if t_len < self.window_size:
@@ -153,11 +153,11 @@ class SwFCD:
 
         # Exclude correlations between temporally nearby windows when scoring
         # SwFCD. FC itself continues to use its standard k=1 upper triangle.
-        iu_w = self._triu_indices(n_windows, n_windows, offset=10, device=x_btr.device)
+        iu_w = self._triu_indices(n_windows, n_windows, offset=offset, device=x_btr.device)
         return fcd[..., iu_w[0], iu_w[1]]
 
 
-    def _swfcd_vector_from_bold_2(self, x_btr: torch.Tensor) -> torch.Tensor:
+    def _swfcd_vector_from_bold_2(self, x_btr: torch.Tensor, offset=10) -> torch.Tensor:
         x_btr = x_btr.transpose(2,1)
         batches, t_max, n_rois = x_btr.shape
 
@@ -184,7 +184,7 @@ class SwFCD:
         
         # The final SwFCD vector omits the first nine window lags (k=10).
         # This is intentionally different from the FC upper triangle (k=1).
-        rows, cols = torch.triu_indices(n_windows, n_windows, offset=10)
+        rows, cols = torch.triu_indices(n_windows, n_windows, offset=offset)
         cotsampling = x_btr.new_zeros((batches, rows.numel()))
         for b in range(batches):
             corr = torch.corrcoef(lower_triangular_parts[b])
@@ -218,7 +218,7 @@ class SwFCD:
         # Keep compatibility with loss code expecting a scalar tensor.
         return pearson.mean(), mad.mean(), rmse.mean()
 
-    def vectorize(self, x: torch.Tensor, *, track_grad: Optional[bool] = None) -> Optional[torch.Tensor]:
+    def vectorize(self, x: torch.Tensor, *, track_grad: Optional[bool] = None, offset=10) -> Optional[torch.Tensor]:
         x_btr = self.ensure_correct_dim(x)
         if x_btr is None:
             return None
@@ -228,7 +228,7 @@ class SwFCD:
 
         if track_grad:
             try:
-                return self._swfcd_vector_from_bold_2(x_btr)
+                return self._swfcd_vector_from_bold_2(x_btr, offset=offset)
             except Exception as exc:
                 raise RuntimeError(
                     f"SwFCD vectorization failed with gradients enabled. {self._describe_input(x_btr)}"
@@ -236,13 +236,13 @@ class SwFCD:
 
         with torch.no_grad():
             try:
-                return self._swfcd_vector_from_bold_2(x_btr)
+                return self._swfcd_vector_from_bold_2(x_btr, offset=offset)
             except Exception as exc:
                 raise RuntimeError(
                     f"SwFCD vectorization failed under no_grad. {self._describe_input(x_btr)}"
                 ) from exc
 
-    def apply(self, x: Optional[torch.Tensor], x_hat: torch.Tensor, x_vec: Optional[torch.Tensor] = None):
+    def apply(self, x: Optional[torch.Tensor], x_hat: torch.Tensor, x_vec: Optional[torch.Tensor] = None, offset=10):
         if x_vec is None:
             if x is None:
                 raise ValueError("SwFCD.apply requires either x or x_vec.")
@@ -254,7 +254,7 @@ class SwFCD:
             return None
 
         try:
-            x_hat_vec = self._swfcd_vector_from_bold_2(x_hat_btr)
+            x_hat_vec = self._swfcd_vector_from_bold_2(x_hat_btr, offset=offset)
         except Exception as exc:
             raise RuntimeError(
                 f"SwFCD apply failed while vectorizing reconstruction. {self._describe_input(x_hat_btr)}"
