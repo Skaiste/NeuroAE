@@ -227,10 +227,23 @@ class BioLevelDataset(BaseTimeseriesDataset):
         self.bio_data = data[1]
 
     def prepare(self, label, normaliser=None, fit=False, means=None):
-        is_none = lambda n: (n == None).all()
+        def is_none(value):
+            return value is None or np.all(np.asarray(value, dtype=object) == None)
 
         data = self.bio_data[label]
-        data_size = max([ab.size for ab in data if not is_none(ab)])
+        observed = [ab for ab in data if not is_none(ab)]
+        if observed:
+            data_size = max(ab.size for ab in observed)
+        elif means is not None:
+            # Validation/test can legitimately contain no acquired biomarker
+            # values.  Preserve the target shape using the train-split mean
+            # that will be used to impute these missing labels.
+            data_size = np.asarray(means).size
+        else:
+            raise ValueError(
+                f"No observed values for biomarker '{label}' in the training split. "
+                "Remove it from use_bio_levels or provide at least one measured target."
+            )
         data = [np.asarray(ts) if not is_none(ts) else np.asarray([np.nan] * data_size) for ts in data]
         data = np.array(data, dtype=np.float32)
 

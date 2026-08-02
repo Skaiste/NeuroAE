@@ -781,6 +781,11 @@ def prepare_data_loaders(
                 bio_levels=use_bio_levels,
             )
 
+    # Keep these flags before biomarker targets wrap each split into a tuple.
+    # An empty ``([], {...})`` tuple is truthy and must not create a loader.
+    has_val_data = len(val_data) > 0
+    has_test_data = len(test_data) > 0
+
     dataset_cls = BaseTimeseriesDataset
     if len(use_bio_levels) > 0:
         dataset_cls = BioLevelDataset
@@ -811,7 +816,7 @@ def prepare_data_loaders(
 
     datasets = {"train": train_dataset}
 
-    if val_data:
+    if has_val_data:
         val_dataset = dataset_cls(
             val_data,
             val_labels,
@@ -831,7 +836,7 @@ def prepare_data_loaders(
             val_dataset.prepare(bl, means=bio_means[bl])
         datasets["val"] = val_dataset
 
-    if test_data:
+    if has_test_data:
         test_dataset = dataset_cls(
             test_data,
             test_labels,

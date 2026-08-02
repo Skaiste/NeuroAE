@@ -200,10 +200,13 @@ class VAEPredHeads(VAE):
         if pred_head_type not in pred_head_idx:
             raise ValueError(f"Selected prediction head type - '{pred_head_type}' is not available.")
         
-        self.heads = [pred_head_idx[pred_head_type](latent_dim, self.region_dim) for i in range(pred_head_num)]
+        # Register the heads as submodules so their parameters are included in
+        # ``model.parameters()`` and are consequently optimized and saved.
+        self.heads = nn.ModuleList(
+            [pred_head_idx[pred_head_type](latent_dim, self.region_dim) for _ in range(pred_head_num)]
+        )
 
     def to(self, device):
-        self.heads = [h.to(device) for h in self.heads]
         return super().to(device)
 
     def forward(self, x):
