@@ -922,11 +922,28 @@ def _experiment_identity_fields(training_params=None, extra_metadata=None):
     return output
 
 
-def build_experiment_signature(model_type, model_params, training_params, data_params, extra_metadata=None):
+def build_experiment_signature(
+    model_type,
+    model_params,
+    training_params,
+    data_params,
+    extra_metadata=None,
+    ignore_training_num_epochs=False,
+):
+    """Build a stable signature for a requested experiment configuration.
+
+    Cross-validation epoch search replaces ``training.num_epochs`` with its
+    selected value before persisting metadata.  ``ignore_training_num_epochs``
+    is used only to recognise legacy records that predate
+    ``requested_training_params``.
+    """
+    normalized_training_params = deepcopy(training_params)
+    if ignore_training_num_epochs and isinstance(normalized_training_params, dict):
+        normalized_training_params.pop("num_epochs", None)
     canonical = {
         "model_type": model_type,
         "model_params": model_params,
-        "training_params": training_params,
+        "training_params": normalized_training_params,
         "data_params": data_params,
         "identity": _experiment_identity_fields(training_params=training_params, extra_metadata=extra_metadata),
     }
@@ -978,14 +995,37 @@ def load_completed_experiment_signatures(results_dir):
         elif not _has_evaluation_results(metadata):
             continue
 
+        # New records retain the configuration requested by the sweep.  The
+        # runtime training parameters may instead contain the epoch count
+        # selected by cross-validation.
+        requested_training_params = metadata.get("requested_training_params")
+        training_params = (
+            requested_training_params
+            if isinstance(requested_training_params, dict)
+            else metadata.get("training_params", {})
+        )
         signature = build_experiment_signature(
             model_type=metadata.get("model_type", "unknown"),
             model_params=metadata.get("model_params", {}),
-            training_params=metadata.get("training_params", {}),
+            training_params=training_params,
             data_params=metadata.get("data_params", {}),
             extra_metadata=metadata,
         )
         completed_signatures.add(signature)
+        # Records created before requested_training_params was added cannot
+        # recover their pre-CV epoch cap.  Match them while ignoring only that
+        # CV-derived field, leaving all other sweep parameters exact.
+        if not isinstance(requested_training_params, dict) and isinstance(metadata.get("cross_validation"), dict):
+            completed_signatures.add(
+                build_experiment_signature(
+                    model_type=metadata.get("model_type", "unknown"),
+                    model_params=metadata.get("model_params", {}),
+                    training_params=training_params,
+                    data_params=metadata.get("data_params", {}),
+                    extra_metadata=metadata,
+                    ignore_training_num_epochs=True,
+                )
+            )
     return completed_signatures
 
 
@@ -1208,6 +1248,7 @@ def run_standard_experiment_pipeline(
             data_config=data_config,
             num_workers=num_workers,
         )
+    requested_training_params = deepcopy(training_config.get("training", {}))
     cv_summary = None
     if not dry_run:
         loaders, training_config, cv_summary = _apply_cross_validation_epoch_search_if_needed(
@@ -1240,7 +1281,14 @@ def run_standard_experiment_pipeline(
         data_config,
         device=device,
         results_dir=results_dir,
-        extra_metadata={"cross_validation": cv_summary} if cv_summary is not None else None,
+        extra_metadata=(
+            {
+                "cross_validation": cv_summary,
+                "requested_training_params": requested_training_params,
+            }
+            if cv_summary is not None
+            else None
+        ),
     )
     print("  Stage: evaluate model", flush=True)
     run_evaluation(
@@ -1823,7 +1871,15 @@ def main():
                     data_params=dc,
                     extra_metadata={"pipeline": _get_training_pipeline(tc)},
                 )
-                if signature in completed_signatures:
+                legacy_cv_signature = build_experiment_signature(
+                    model_type=mc["model"]["name"],
+                    model_params=mc.get("model", {}),
+                    training_params=tc.get("training", {}),
+                    data_params=dc,
+                    extra_metadata={"pipeline": _get_training_pipeline(tc)},
+                    ignore_training_num_epochs=True,
+                )
+                if signature in completed_signatures or legacy_cv_signature in completed_signatures:
                     skipped_completed += 1
                     continue
                 if signature in seen_signatures:
