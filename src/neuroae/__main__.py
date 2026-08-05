@@ -600,6 +600,16 @@ def _configure_model_training_state(model, training_config, loaders):
         model.set_swfcd(swfcd)
 
 
+def _classification_labels(loaders):
+    """Return a stable label vocabulary from all available data splits."""
+    labels = []
+    for loader_name in ("train_loader", "val_loader", "test_loader"):
+        loader = loaders.get(loader_name)
+        if loader is not None:
+            labels.extend(label for label in getattr(loader.dataset, "labels", []) if label is not None)
+    return sorted(set(labels), key=str)
+
+
 def _run_cross_validation_epoch_search(loaders, data_config, model_config, training_config, device):
     from .train import select_best_checkpoint, train_vae
 
@@ -629,6 +639,7 @@ def _run_cross_validation_epoch_search(loaders, data_config, model_config, train
             timepoint_dim=timepoint_dim,
             device=device,
             preserve_timepoints=fold_loaders.get("preserve_timepoints", False),
+            class_labels=_classification_labels(loaders),
         )
         _configure_model_training_state(model, training_config, fold_loaders)
         print(f"Cross-validation fold {fold_idx}/{n_splits}", flush=True)
@@ -645,6 +656,7 @@ def _run_cross_validation_epoch_search(loaders, data_config, model_config, train
             pca=None,
             noise=training_config["training"].get("noise", None),
             use_pred_heads=use_pred_heads,
+            use_cls_head=hasattr(model, "cls_head"),
             convergence_patience=training_config["training"].get("convergence_patience"),
             convergence_min_delta=training_config["training"].get("convergence_min_delta", 0.0),
             convergence_warmup_epochs=training_config["training"].get("convergence_warmup_epochs", 0),
@@ -723,7 +735,9 @@ def _apply_cross_validation_epoch_search_if_needed(
     return updated_loaders, updated_training_config, cv_summary
 
 
-def load_model_from_config(model_config, data_config, input_dim, timepoint_dim, device, preserve_timepoints=False):
+def load_model_from_config(
+    model_config, data_config, input_dim, timepoint_dim, device, preserve_timepoints=False, class_labels=None
+):
     model_name = model_config['model']['name']
     latent_dim = 0
 
@@ -775,6 +789,24 @@ def load_model_from_config(model_config, data_config, input_dim, timepoint_dim, 
             latent_dim=latent_dim,
             pred_head_type=pred_head_type,
             pred_head_num=pred_head_num
+        )
+    elif model_name == "LAEClsHead":
+        from .models.linear import LAEClsHead
+        latent_dim = model_config['model']['latent_dim']
+        hidden_dim = None
+        configured_labels = model_config['model'].get("class_labels")
+        class_labels = list(class_labels or configured_labels or [])
+        num_classes = int(model_config['model'].get("num_classes", len(class_labels) or 2))
+        if not class_labels:
+            class_labels = list(range(num_classes))
+        model = LAEClsHead(
+            region_dim=input_dim[-1],
+            timepoint_dim=input_dim[0],
+            latent_dim=latent_dim,
+            num_classes=num_classes,
+            cls_head_type=model_config['model'].get("cls_head_type", "linear"),
+            cls_head_hidden_dim=model_config['model'].get("cls_head_hidden_dim"),
+            class_labels=class_labels,
         )
     elif model_name == "ConvAE":
         from .models.convAE import ConvAE
@@ -1044,6 +1076,7 @@ def run_training(
     from .train import train_vae
 
     use_pred_heads = len(data_config['data'].get('use_bio_levels', [])) > 0
+    use_cls_head = hasattr(model, "cls_head")
 
     model.set_loss_fn_params(training_config['training'].get('loss_params', None))
     _configure_model_training_state(model, training_config, loaders)
@@ -1094,6 +1127,7 @@ def run_training(
         pca=pca,
         noise=training_config['training'].get("noise", None),
         use_pred_heads=use_pred_heads,
+        use_cls_head=use_cls_head,
         convergence_patience=training_config['training'].get('convergence_patience'),
         convergence_min_delta=training_config['training'].get('convergence_min_delta', 0.0),
         convergence_warmup_epochs=training_config['training'].get('convergence_warmup_epochs', 0),
@@ -1268,7 +1302,8 @@ def run_standard_experiment_pipeline(
         input_dim=input_dim,
         timepoint_dim=timepoint_dim,
         device=device,
-        preserve_timepoints=loaders.get('preserve_timepoints', False)
+        preserve_timepoints=loaders.get('preserve_timepoints', False),
+        class_labels=_classification_labels(loaders),
     )
     print("  Stage: train model", flush=True)
     exp_id = run_training(
@@ -1360,6 +1395,7 @@ def run_group_transfer_matrix_pipeline(
         timepoint_dim=timepoint_dim,
         device=device,
         preserve_timepoints=general_loaders.get("preserve_timepoints", False),
+        class_labels=_classification_labels(general_loaders),
     )
     if not _has_model_transfer_hooks(general_model):
         raise ValueError(f"Model {model_name} does not provide freeze_encoder/reset_decoder hooks.")
@@ -1432,6 +1468,7 @@ def run_group_transfer_matrix_pipeline(
             timepoint_dim=timepoint_dim,
             device=device,
             preserve_timepoints=group_training_loaders.get("preserve_timepoints", False),
+            class_labels=_classification_labels(group_training_loaders),
         )
         transfer_model.load_state_dict(general_state_dict)
         transfer_model.freeze_encoder()
@@ -1704,7 +1741,8 @@ def main():
             input_dim=input_dim,
             timepoint_dim=timepoint_dim,
             device=args.device,
-            preserve_timepoints=loaders.get('preserve_timepoints', False)
+            preserve_timepoints=loaders.get('preserve_timepoints', False),
+            class_labels=_classification_labels(loaders),
         )
 
         run_training(
@@ -1758,7 +1796,8 @@ def main():
             input_dim=input_dim,
             timepoint_dim=timepoint_dim,
             device=args.device,
-            preserve_timepoints=loaders.get('preserve_timepoints', False)
+            preserve_timepoints=loaders.get('preserve_timepoints', False),
+            class_labels=_classification_labels(loaders),
         )
         run_evaluation(
             model,

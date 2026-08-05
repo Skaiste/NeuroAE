@@ -3,7 +3,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from . import ModelBase
-from .head import PredHeadAvg, PredHeadConv, PredHeadTemporalPool, PredHeadGatedTemporalPool
+from .head import (
+    ClsHeadLinear,
+    ClsHeadMLP,
+    PredHeadAvg,
+    PredHeadConv,
+    PredHeadTemporalPool,
+    PredHeadGatedTemporalPool,
+)
 
 
 class LAE(ModelBase):
@@ -228,5 +235,76 @@ class LAEPredHeads(LAE):
             loss['swfcd_rmse'] = swfcd['rmse']
             loss['loss'] += swfcd_beta * swfcd['rmse']
 
+        return loss
+
+
+class LAEClsHead(LAE):
+    """LAE with a supervised classifier attached to its flattened latent space."""
+    def __init__(
+        self,
+        region_dim,
+        timepoint_dim,
+        latent_dim=32,
+        num_classes=2,
+        cls_head_type: str = "linear",
+        cls_head_hidden_dim=None,
+        class_labels=None,
+    ):
+        super().__init__(region_dim=region_dim, timepoint_dim=timepoint_dim, latent_dim=latent_dim)
+        if int(num_classes) < 2:
+            raise ValueError("num_classes must be at least 2.")
+        head_types = {"linear": ClsHeadLinear, "mlp": ClsHeadMLP}
+        if cls_head_type not in head_types:
+            raise ValueError("cls_head_type must be either 'linear' or 'mlp'.")
+        self.class_labels = list(class_labels) if class_labels is not None else list(range(int(num_classes)))
+        if len(self.class_labels) != int(num_classes):
+            raise ValueError("class_labels length must match num_classes.")
+        self.class_to_idx = {label: idx for idx, label in enumerate(self.class_labels)}
+        if len(self.class_to_idx) != len(self.class_labels):
+            raise ValueError("class_labels must be unique.")
+        self.cls_head = head_types[cls_head_type](
+            self.latent_flat_dim, int(num_classes), cls_head_hidden_dim
+        ) if cls_head_type == "mlp" else head_types[cls_head_type](self.latent_flat_dim, int(num_classes))
+
+    def forward(self, x):
+        output = super().forward(x)
+        if len(output) == 4:
+            x_hat, mu, log_var, z = output
+            return x_hat, mu, log_var, self.cls_head(z), z
+        x_hat, z = output
+        return x_hat, self.cls_head(z), z
+
+    def loss(self, x, classes, model_output):
+        if len(model_output) == 5:
+            x_hat, mu, log_var, logits, _ = model_output
+        else:
+            x_hat, logits, _ = model_output
+            mu = log_var = None
+
+        if self.loss_fn_params.get("loss_per_feature", True):
+            recon = F.mse_loss(x_hat, x, reduction="mean")
+        else:
+            recon = F.mse_loss(x_hat, x, reduction="none").sum(dim=1).mean()
+        loss = {"loss": recon, "recon": recon}
+        beta = self._beta()
+        if beta != 0.0 and mu is not None and log_var is not None:
+            kld = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
+            kld = kld.sum(dim=1).mean() / log_var.size(1)
+            loss["kld"] = kld
+            loss["loss"] += beta * kld
+        else:
+            loss["kld"] = torch.zeros((), device=x.device, dtype=x.dtype)
+
+        cls_loss = F.cross_entropy(logits, classes.long())
+        loss["cls_loss"] = cls_loss
+        cls_weight = self.loss_fn_params.get(
+            "cls_head_weight", self.loss_fn_params.get("cls_head_delta", 1.0)
+        )
+        loss["loss"] += float(cls_weight) * cls_loss
+
+        if self.swfcd is not None:
+            swfcd = self.swfcd.apply(x, x_hat)
+            loss["swfcd_rmse"] = swfcd["rmse"]
+            loss["loss"] += self.loss_fn_params.get("swfcd_beta", 1.0) * swfcd["rmse"]
         return loss
     

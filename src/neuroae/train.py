@@ -264,6 +264,7 @@ def train_vae(
     pca=None,
     noise=None,
     use_pred_heads=False,
+    use_cls_head=False,
     convergence_patience=None,
     convergence_min_delta=0.0,
     convergence_warmup_epochs=0,
@@ -274,6 +275,20 @@ def train_vae(
 ):
     device = torch.device(device)
     model = model.to(device)
+
+    if use_pred_heads and use_cls_head:
+        raise ValueError("Prediction heads and a classification head cannot be trained together.")
+    class_to_idx = getattr(model, "class_to_idx", None)
+    if use_cls_head and not class_to_idx:
+        raise ValueError("Classification-head training requires model.class_to_idx.")
+
+    def _class_targets(batch_labels):
+        raw_labels = batch_labels[0] if use_pred_heads else batch_labels
+        try:
+            labels = [label.item() if torch.is_tensor(label) and label.ndim == 0 else label for label in raw_labels]
+            return torch.as_tensor([class_to_idx[label] for label in labels], device=device)
+        except KeyError as exc:
+            raise ValueError(f"Encountered class label not configured for cls_head: {exc.args[0]!r}") from exc
 
     if noise is not None:
         noise = {k:v for p in noise for k,v in p.items()}
@@ -334,6 +349,8 @@ def train_vae(
             if use_pred_heads:
                 heads = {bl:h.to(device) for bl,h in labels[1].items()}
                 loss = model.loss(x, heads, output)
+            elif use_cls_head:
+                loss = model.loss(x, _class_targets(labels), output)
             else:
                 loss = model.loss(x, output)
 
@@ -373,6 +390,8 @@ def train_vae(
                     if use_pred_heads:
                         heads = {bl:h.to(device) for bl,h in labels[1].items()}
                         loss = model.loss(x, heads, output)
+                    elif use_cls_head:
+                        loss = model.loss(x, _class_targets(labels), output)
                     else:
                         loss = model.loss(x, output)
 

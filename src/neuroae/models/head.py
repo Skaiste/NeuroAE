@@ -126,3 +126,28 @@ class PredHeadGatedTemporalPool(nn.Module):
     def forward(self, z):
         x, _ = self.pool(z)
         return self.head(x)
+
+
+class ClsHeadLinear(nn.Module):
+    """A linear classifier operating on a flattened latent representation."""
+    def __init__(self, latent_dim, num_classes):
+        super().__init__()
+        self.head = nn.Linear(latent_dim, num_classes)
+
+    def forward(self, z):
+        return self.head(z)
+
+
+class ClsHeadMLP(nn.Module):
+    """A small two-layer classifier operating on a flattened latent representation."""
+    def __init__(self, latent_dim, num_classes, hidden_dim=None):
+        super().__init__()
+        hidden_dim = int(hidden_dim or max(latent_dim, num_classes * 2))
+        self.head = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, num_classes),
+        )
+
+    def forward(self, z):
+        return self.head(z)
