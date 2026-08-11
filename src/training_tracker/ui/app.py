@@ -1254,10 +1254,20 @@ _CLINICAL_GROUP_ORDER = {"hc": 0, "mci": 1, "ad": 2}
 def _parameter_value_sort_key(value):
     """Sort clinical evaluation groups in their conventional cohort order."""
     if isinstance(value, str):
-        clinical_order = _CLINICAL_GROUP_ORDER.get(value.strip().casefold())
+        normalized_value = value.strip()
+        clinical_order = _CLINICAL_GROUP_ORDER.get(normalized_value.casefold())
         if clinical_order is not None:
             return (0, clinical_order)
-    return (1, _value_sort_key(value))
+        try:
+            numeric_value = float(normalized_value)
+        except ValueError:
+            pass
+        else:
+            if math.isfinite(numeric_value):
+                return (1, numeric_value)
+    elif isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+        return (1, float(value))
+    return (2, _value_sort_key(value))
 
 
 def _ordered_parameter_values(values) -> list[object]:
@@ -1478,19 +1488,28 @@ def _parameter_value_options(rows: list[dict], path: tuple[str, ...]) -> list[ob
 
 def _rows_matching_param_filters(
     rows: list[dict],
-    filters: list[tuple[str, object]],
+    filters: list[tuple],
 ) -> list[dict]:
     filtered_rows = rows
-    for param_key, expected_value in filters:
+    for filter_item in filters:
+        if len(filter_item) == 2:
+            param_key, expected_value = filter_item
+            operator = "="
+        else:
+            param_key, operator, expected_value = filter_item
         param_path = tuple(param_key.split("."))
-        filtered_rows = [
-            row
-            for row in filtered_rows
-            if any(
+        def _matches_filter(row: dict) -> bool:
+            matches_value = any(
                 _encode_group_value(value) == expected_value
                 for value in _get_param_values_from_row(row, param_path)
             )
-        ]
+            if operator == "=":
+                return matches_value
+            if operator == "≠":
+                return not matches_value
+            return False
+
+        filtered_rows = [row for row in filtered_rows if _matches_filter(row)]
     return filtered_rows
 
 
@@ -2404,7 +2423,7 @@ def main() -> None:
             ]
 
             max_parameter_filters = 10
-            extra_filters: list[tuple[str, object]] = []
+            extra_filters: list[tuple] = []
             current_rows = base_rows
             used_param_keys = {selected_param_key}
             for filter_idx in range(2, max_parameter_filters + 1):
@@ -2413,6 +2432,7 @@ def main() -> None:
                     break
 
                 filter_key_key = f"param_filter_extra_key_{filter_idx}"
+                filter_operator_key = f"param_filter_extra_operator_{filter_idx}"
                 filter_value_key = f"param_filter_extra_value_{filter_idx}"
 
                 if (
@@ -2425,8 +2445,13 @@ def main() -> None:
                     and filter_key_key not in st.session_state
                 ):
                     del st.session_state[filter_value_key]
+                if (
+                    filter_operator_key in st.session_state
+                    and filter_key_key not in st.session_state
+                ):
+                    del st.session_state[filter_operator_key]
 
-                line_cols = st.columns([1, 1])
+                line_cols = st.columns([1, 0.55, 0.65])
                 with line_cols[0]:
                     selected_extra_key = st.selectbox(
                         f"Parameter {filter_idx}",
@@ -2435,6 +2460,18 @@ def main() -> None:
                         key=filter_key_key,
                     )
                 with line_cols[1]:
+                    if selected_extra_key:
+                        st.markdown("<div style='height: 0.45rem'></div>", unsafe_allow_html=True)
+                        selected_filter_operator = st.selectbox(
+                            "Filter operator",
+                            options=["=", "≠"],
+                            key=filter_operator_key,
+                            label_visibility="collapsed",
+                        )
+                    else:
+                        selected_filter_operator = "="
+                        st.empty()
+                with line_cols[2]:
                     if selected_extra_key:
                         value_options = _parameter_value_options(current_rows, tuple(selected_extra_key.split(".")))
                         if (
@@ -2455,9 +2492,12 @@ def main() -> None:
                 if not selected_extra_key or selected_extra_value is None:
                     break
 
-                extra_filters.append((selected_extra_key, selected_extra_value))
+                extra_filters.append((selected_extra_key, selected_filter_operator, selected_extra_value))
                 used_param_keys.add(selected_extra_key)
-                current_rows = _rows_matching_param_filters(current_rows, [(selected_extra_key, selected_extra_value)])
+                current_rows = _rows_matching_param_filters(
+                    current_rows,
+                    [(selected_extra_key, selected_filter_operator, selected_extra_value)],
+                )
 
             candidate_rows = _rows_matching_param_filters(base_rows, extra_filters)
             st.caption(f"Selected for comparison: {len(candidate_rows)}")
@@ -2486,8 +2526,10 @@ def main() -> None:
 
             loaded_parameter_options = _parameter_options_for_model_type(loaded_model_type, model_rows)
             loaded_filter_text = ", ".join(
-                f"{loaded_parameter_options.get(param_key, param_key)}={_display_group_value(param_value)}"
-                for param_key, param_value in loaded_extra_filters
+                f"{loaded_parameter_options.get(filter_item[0], filter_item[0])}"
+                f"{filter_item[1] if len(filter_item) == 3 else '='}"
+                f"{_display_group_value(filter_item[-1])}"
+                for filter_item in loaded_extra_filters
             )
             st.caption(
                 f"Loaded: model={loaded_model_type}, "

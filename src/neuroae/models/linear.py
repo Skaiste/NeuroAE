@@ -307,4 +307,117 @@ class LAEClsHead(LAE):
             loss["swfcd_rmse"] = swfcd["rmse"]
             loss["loss"] += self.loss_fn_params.get("swfcd_beta", 1.0) * swfcd["rmse"]
         return loss
+
+
+class LAEPredClsHeads(LAEPredHeads):
+    """LAE with both regression prediction heads and a latent classifier.
+
+    The regression heads receive the time-preserving latent representation,
+    while the classification head receives the flattened latent vector.  Its
+    :meth:`loss` accepts both regression targets and class indices so the
+    reconstruction, regression, classification, and optional KL/SWFCD terms
+    can be optimized together.
+    """
+
+    def __init__(
+        self,
+        region_dim,
+        timepoint_dim,
+        pred_head_type: str = "gated_temp_pool",
+        pred_head_num: int = 1,
+        latent_dim=32,
+        num_classes=2,
+        cls_head_type: str = "linear",
+        cls_head_hidden_dim=None,
+        class_labels=None,
+    ):
+        super().__init__(
+            region_dim=region_dim,
+            timepoint_dim=timepoint_dim,
+            pred_head_type=pred_head_type,
+            pred_head_num=pred_head_num,
+            latent_dim=latent_dim,
+        )
+        if int(num_classes) < 2:
+            raise ValueError("num_classes must be at least 2.")
+        head_types = {"linear": ClsHeadLinear, "mlp": ClsHeadMLP}
+        if cls_head_type not in head_types:
+            raise ValueError("cls_head_type must be either 'linear' or 'mlp'.")
+
+        self.class_labels = (
+            list(class_labels) if class_labels is not None else list(range(int(num_classes)))
+        )
+        if len(self.class_labels) != int(num_classes):
+            raise ValueError("class_labels length must match num_classes.")
+        self.class_to_idx = {label: idx for idx, label in enumerate(self.class_labels)}
+        if len(self.class_to_idx) != len(self.class_labels):
+            raise ValueError("class_labels must be unique.")
+
+        self.cls_head = (
+            head_types[cls_head_type](self.latent_flat_dim, int(num_classes), cls_head_hidden_dim)
+            if cls_head_type == "mlp"
+            else head_types[cls_head_type](self.latent_flat_dim, int(num_classes))
+        )
+
+    def forward(self, x):
+        output = super().forward(x)
+        if len(output) == 5:
+            x_hat, mu, log_var, z_heads, z = output
+            return x_hat, mu, log_var, z_heads, self.cls_head(z), z
+        x_hat, z_heads, z = output
+        return x_hat, z_heads, self.cls_head(z), z
+
+    def loss(self, x, x_heads, classes, model_output):
+        """Return the joint loss for regression targets and class indices.
+
+        ``x_heads`` maps regression-head names to their target tensors.
+        ``classes`` must contain encoded class indices in ``[0, num_classes)``.
+        """
+        if len(model_output) == 6:
+            x_hat, mu, log_var, z_heads, logits, _ = model_output
+        else:
+            x_hat, z_heads, logits, _ = model_output
+            mu = log_var = None
+
+        if self.loss_fn_params.get("loss_per_feature", True):
+            recon = F.mse_loss(x_hat, x, reduction="mean")
+        else:
+            recon = F.mse_loss(x_hat, x, reduction="none").sum(dim=1).mean()
+        loss = {"loss": recon, "recon": recon}
+
+        beta = self._beta()
+        if beta != 0.0 and mu is not None and log_var is not None:
+            kld = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
+            kld = kld.sum(dim=1).mean() / log_var.size(1)
+            loss["kld"] = kld
+            loss["loss"] += beta * kld
+        else:
+            loss["kld"] = torch.zeros((), device=x.device, dtype=x.dtype)
+
+        if len(x_heads) != len(z_heads):
+            raise ValueError(
+                f"label heads ({len(x_heads)}) is not the same as predicted heads ({len(z_heads)})"
+            )
+        pred_losses = []
+        for prediction, (name, target) in zip(z_heads, x_heads.items()):
+            head_loss = F.smooth_l1_loss(prediction, target, reduction="mean", beta=1.0)
+            pred_losses.append(head_loss)
+            loss[f"{name}_loss"] = head_loss
+        if pred_losses:
+            loss["loss"] += float(self.loss_fn_params.get("pred_heads_delta", 0.0)) * (
+                sum(pred_losses) / len(pred_losses)
+            )
+
+        cls_loss = F.cross_entropy(logits, classes.long())
+        loss["cls_loss"] = cls_loss
+        cls_weight = self.loss_fn_params.get(
+            "cls_head_weight", self.loss_fn_params.get("cls_head_delta", 1.0)
+        )
+        loss["loss"] += float(cls_weight) * cls_loss
+
+        if self.swfcd is not None:
+            swfcd = self.swfcd.apply(x, x_hat)
+            loss["swfcd_rmse"] = swfcd["rmse"]
+            loss["loss"] += self.loss_fn_params.get("swfcd_beta", 1.0) * swfcd["rmse"]
+        return loss
     
