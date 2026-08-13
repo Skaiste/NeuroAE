@@ -23,7 +23,6 @@ import itertools
 from copy import deepcopy
 from neuronumba.tools.filters import BandPassFilter
 from sklearn.model_selection import KFold, StratifiedKFold
-from sklearn.preprocessing import StandardScaler
 
 from .utils import *
 from .utils.dict_utils import deepupdate
@@ -35,6 +34,7 @@ from .data import (
     load_ebrains,
     load_hcp,
     prepare_data_loaders,
+    SubjectRegionStandardScaler,
     subset_dataset,
 )
 from .data.utils import build_data_loader_result
@@ -305,7 +305,7 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
     # setup normaliser
     normaliser = None
     if data_config['data'].get('normalize', False):
-        normaliser = StandardScaler()
+        normaliser = SubjectRegionStandardScaler()
 
     group_defaults = (
         list(data_loader.get_subject_count().keys())

@@ -15,6 +15,22 @@ DEFAULT_GROUP_GLOB_PATTERNS = {
     "HC_ABetaPos": ["*HC*ABeta*Pos*.mat", "*HC*ABetaPos*.mat", "*HC*AB+*.mat"],
     "MCI": ["*MCI*ABeta*Pos*.mat", "*MCI*ABetaPos*.mat", "*MCI*AB+*.mat"],
 }
+NOTFILTERED_GROUP_GLOB_PATTERNS = {
+    "HC": ["tseries_ADNI3_HC_MPRAGE_batches*_sch*_matching_QC_COMBINED.mat"],
+    "MCI": ["tseries_ADNI3_MCI_MPRAGE_batches*_sch*_matching_QC_COMBINED.mat"],
+    "AD": ["tseries_ADNI3_AD_MPRAGE_batches*_sch*_matching_QC_COMBINED.mat"],
+}
+DEFAULT_COMPANION_ID_FILENAMES = {
+    "AD": "PTID_ADNI3_AD_ABetaPos_MPRAGE_IRFSPGR_all.mat",
+    "HC_ABetaNeg": "PTID_ADNI3_HC_ABetaNeg_MPRAGE_IRFSPGR_all.mat",
+    "HC_ABetaPos": "PTID_ADNI3_HC_ABetaPos_MPRAGE_IRFSPGR_all.mat",
+    "MCI": "PTID_ADNI3_MCI_ABetaPos_MPRAGE_IRFSPGR_all.mat",
+}
+NOTFILTERED_COMPANION_ID_FILENAMES = {
+    "HC": "combined_PTIDS_ADNI3_HC_MPRAGE.mat",
+    "MCI": "combined_PTIDS_ADNI3_MCI_MPRAGE.mat",
+    "AD": "combined_PTIDS_ADNI3_AD_MPRAGE.mat",
+}
 DEFAULT_SEPARATE_GROUP_LABELS = {
     "AD": "AD",
     "HC_ABetaNeg": "HC_AB-",
@@ -27,6 +43,7 @@ DEFAULT_MERGED_GROUP_LABELS = {
     "HC_ABetaPos": "HC",
     "MCI": "MCI",
 }
+NOTFILTERED_GROUP_LABELS = {"HC": "HC", "MCI": "MCI", "AD": "AD"}
 
 
 def get_data_dir():
@@ -38,6 +55,11 @@ def build_relative_data_dir(parcelation):
     return Path("ADNI") / f"Schaefer{int(parcelation)}" / "tseries" / "CONN_denoised_pipeline"
 
 
+def build_notfiltered_relative_data_dir(parcelation):
+    """Location of the raw N193 no-filter ADNI timeseries files."""
+    return Path("ADNI-B") / "N193_no_filt" / f"Schaefer{int(parcelation)}"
+
+
 def resolve_adni2_data_dir(data_dir=None, parcelation=100, relative_data_dir=None):
     if data_dir is None:
         data_dir = get_data_dir()
@@ -46,6 +68,17 @@ def resolve_adni2_data_dir(data_dir=None, parcelation=100, relative_data_dir=Non
     if relative_data_dir is None:
         relative_data_dir = build_relative_data_dir(parcelation)
 
+    if (data_dir / relative_data_dir).exists():
+        return data_dir / relative_data_dir
+    return data_dir
+
+
+def resolve_adni2_notfiltered_data_dir(data_dir=None, parcelation=100):
+    if data_dir is None:
+        data_dir = get_data_dir()
+
+    data_dir = Path(data_dir)
+    relative_data_dir = build_notfiltered_relative_data_dir(parcelation)
     if (data_dir / relative_data_dir).exists():
         return data_dir / relative_data_dir
     return data_dir
@@ -169,6 +202,52 @@ def resolve_group_file(data_dir, group_name, override, patterns):
     return matches[0]
 
 
+def resolve_companion_id_file(data_dir, group_name, override=None, notfiltered=False):
+    """Locate the PTID file paired with a CONN-denoised ADNI2 timeseries file.
+
+    The source timeseries MAT files do not embed participant IDs.  The matching
+    IDs live in the ADNI-B/N238rev/PTIDs directory and have the same ordering as
+    the entries in each group-specific timeseries file.
+    """
+    if override is not None:
+        path = Path(override)
+        if not path.is_absolute():
+            path = data_dir / path
+        if not path.exists():
+            raise FileNotFoundError(
+                f"Configured companion ID file for {group_name} does not exist: {path}"
+            )
+        return path
+
+    filename_map = (
+        NOTFILTERED_COMPANION_ID_FILENAMES
+        if notfiltered
+        else DEFAULT_COMPANION_ID_FILENAMES
+    )
+    filename = filename_map.get(group_name)
+    if filename is None:
+        return None
+
+    # Support both the usual data/ADNI/... location and datasets whose PTID
+    # files were copied beside the timeseries hierarchy.
+    candidates = []
+    for ancestor in (data_dir, *data_dir.parents):
+        candidates.extend((
+            ancestor / filename,
+            ancestor / "PTIDs" / filename,
+            ancestor / "ADNI-B" / "N238rev" / "PTIDs" / filename,
+        ))
+
+    seen = set()
+    for path in candidates:
+        if path in seen:
+            continue
+        seen.add(path)
+        if path.exists():
+            return path
+    return None
+
+
 def resolve_timeseries_key(mat_dict, group_name, override=None):
     if override is not None:
         return override
@@ -253,20 +332,31 @@ class ADNI2Loader(DataLoader):
         group_glob_patterns=None,
         timeseries_key_overrides=None,
         id_key_overrides=None,
+        companion_id_file_overrides=None,
+        notfiltered=False,
         expected_timepoints=197,
         tr=3,
     ):
         self.parcelation = int(parcelation)
-        self.data_dir = resolve_adni2_data_dir(
-            data_dir,
-            parcelation=self.parcelation,
-            relative_data_dir=relative_data_dir,
-        )
+        self.notfiltered = bool(notfiltered)
+        if self.notfiltered:
+            self.data_dir = resolve_adni2_notfiltered_data_dir(
+                data_dir, parcelation=self.parcelation
+            )
+        else:
+            self.data_dir = resolve_adni2_data_dir(
+                data_dir,
+                parcelation=self.parcelation,
+                relative_data_dir=relative_data_dir,
+            )
         self.merge_hc_groups = merge_hc_groups
         self.group_file_overrides = group_file_overrides or {}
-        self.group_glob_patterns = group_glob_patterns or DEFAULT_GROUP_GLOB_PATTERNS
+        self.group_glob_patterns = group_glob_patterns or (
+            NOTFILTERED_GROUP_GLOB_PATTERNS if self.notfiltered else DEFAULT_GROUP_GLOB_PATTERNS
+        )
         self.timeseries_key_overrides = timeseries_key_overrides or {}
         self.id_key_overrides = id_key_overrides or {}
+        self.companion_id_file_overrides = companion_id_file_overrides or {}
         self.expected_timepoints = expected_timepoints
         self._tr = tr
         self.timeseries = {}
@@ -274,7 +364,10 @@ class ADNI2Loader(DataLoader):
         self.source_files = {}
         self.resolved_keys = {}
 
-        if merge_hc_groups:
+        if self.notfiltered:
+            self.groups = ["HC", "MCI", "AD"]
+            self.group_labels = NOTFILTERED_GROUP_LABELS
+        elif merge_hc_groups:
             self.groups = ["HC", "MCI", "AD"]
             self.group_labels = DEFAULT_MERGED_GROUP_LABELS
         else:
@@ -288,7 +381,7 @@ class ADNI2Loader(DataLoader):
         print(self.get_subject_count())
 
     def name(self):
-        return "ADNI2"
+        return "ADNI2_no_filter" if self.notfiltered else "ADNI2"
 
     def set_basePath(self, path):
         self.data_dir = Path(path)
@@ -331,7 +424,9 @@ class ADNI2Loader(DataLoader):
         return self.group_labels[source_group]
 
     def _loadAllData(self):
-        source_groups = ["AD", "HC_ABetaNeg", "HC_ABetaPos", "MCI"]
+        source_groups = ["HC", "MCI", "AD"] if self.notfiltered else [
+            "AD", "HC_ABetaNeg", "HC_ABetaPos", "MCI"
+        ]
 
         for source_group in source_groups:
             file_path = resolve_group_file(
@@ -350,16 +445,43 @@ class ADNI2Loader(DataLoader):
                 expected_timepoints=self.expected_timepoints,
                 override=self.timeseries_key_overrides.get(source_group),
             )
-            subject_ids, id_key = extract_subject_ids(
+            id_key = resolve_id_key(
                 mat,
                 group_name=source_group,
-                n_subjects=len(timeseries_entries),
                 override=self.id_key_overrides.get(source_group),
             )
+            companion_id_file = None
+            if id_key is not None:
+                subject_ids, id_key = extract_subject_ids(
+                    mat,
+                    group_name=source_group,
+                    n_subjects=len(timeseries_entries),
+                    override=id_key,
+                )
+            else:
+                companion_id_file = resolve_companion_id_file(
+                    self.data_dir,
+                    group_name=source_group,
+                    override=self.companion_id_file_overrides.get(source_group),
+                    notfiltered=self.notfiltered,
+                )
+                if companion_id_file is None:
+                    raise FileNotFoundError(
+                        f"The timeseries file for {source_group} does not contain participant IDs, "
+                        "and no paired PTID file was found. Set companion_id_file_overrides "
+                        f"for {source_group!r}."
+                    )
+                companion_ids = load_mat_file(str(companion_id_file))
+                subject_ids, id_key = extract_subject_ids(
+                    companion_ids,
+                    group_name=source_group,
+                    n_subjects=len(timeseries_entries),
+                )
 
             self.resolved_keys[source_group] = {
                 "timeseries_key": ts_key,
                 "id_key": id_key,
+                "id_file": str(companion_id_file) if companion_id_file is not None else str(file_path),
             }
 
             target_group = self._target_group(source_group)
@@ -371,6 +493,7 @@ class ADNI2Loader(DataLoader):
                     "source_file": str(file_path),
                     "timeseries_key": ts_key,
                     "id_key": id_key,
+                    "id_file": str(companion_id_file) if companion_id_file is not None else str(file_path),
                 }
 
     def describe_sources(self):
@@ -384,6 +507,7 @@ class ADNI2Loader(DataLoader):
                     "file": str(file_path),
                     "timeseries_key": self.resolved_keys[source_group]["timeseries_key"],
                     "id_key": self.resolved_keys[source_group]["id_key"],
+                    "id_file": self.resolved_keys[source_group]["id_file"],
                     "subjects_loaded": sum(
                         1
                         for meta in self.subject_meta.values()
@@ -403,6 +527,8 @@ def load_adni2(
     group_glob_patterns=None,
     timeseries_key_overrides=None,
     id_key_overrides=None,
+    companion_id_file_overrides=None,
+    notfiltered=False,
     expected_timepoints=197,
     tr=3,
 ):
@@ -415,6 +541,8 @@ def load_adni2(
         group_glob_patterns=group_glob_patterns,
         timeseries_key_overrides=timeseries_key_overrides,
         id_key_overrides=id_key_overrides,
+        companion_id_file_overrides=companion_id_file_overrides,
+        notfiltered=notfiltered,
         expected_timepoints=expected_timepoints,
         tr=tr,
     )
@@ -423,7 +551,9 @@ def load_adni2(
 __all__ = [
     "ADNI2Loader",
     "build_relative_data_dir",
+    "build_notfiltered_relative_data_dir",
     "get_data_dir",
     "load_adni2",
     "resolve_adni2_data_dir",
+    "resolve_adni2_notfiltered_data_dir",
 ]

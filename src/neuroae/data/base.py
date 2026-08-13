@@ -1,7 +1,42 @@
 import numpy as np
 import torch
-from sklearn.exceptions import NotFittedError
 from torch.utils.data import Dataset
+
+
+class SubjectRegionStandardScaler:
+    """Z-score each region over time, independently for every subject.
+
+    The scaler is deliberately stateless: fitting statistics across subjects
+    would reintroduce the cross-subject normalisation this class avoids.
+    """
+
+    def get_params(self, deep=True):
+        """Match the estimator interface used when constructing cache keys."""
+        return {}
+
+    def fit(self, samples, y=None):
+        self._validate_samples(samples)
+        return self
+
+    def transform(self, samples):
+        samples = self._validate_samples(samples)
+        means = np.mean(samples, axis=0, keepdims=True)
+        scales = np.std(samples, axis=0, keepdims=True)
+        scales[scales == 0] = 1.0
+        return (samples - means) / scales
+
+    def fit_transform(self, samples, y=None):
+        return self.fit(samples, y).transform(samples)
+
+    @staticmethod
+    def _validate_samples(samples):
+        samples = np.asarray(samples)
+        if samples.ndim != 2:
+            raise ValueError(
+                "Subject-region normalisation requires a 2D timeseries with "
+                "shape (timepoints, regions)."
+            )
+        return samples
 
 
 class BaseTimeseriesDataset(Dataset):
@@ -43,20 +78,11 @@ class BaseTimeseriesDataset(Dataset):
 
         processed_timeseries = [np.asarray(ts) for ts in timeseries_data]
         if self.normaliser is not None and len(processed_timeseries) > 0:
-            flattened_data = np.asarray([ts.reshape(-1) for ts in processed_timeseries])
-            sample_shape = processed_timeseries[0].shape
-            if fit_normaliser:
-                flattened_data = self.normaliser.fit_transform(flattened_data)
-            else:
-                try:
-                    flattened_data = self.normaliser.transform(flattened_data)
-                except NotFittedError as exc:
-                    raise ValueError(
-                        "Received an unfitted normaliser with fit_normaliser=False. "
-                        "Fit on train first and reuse the same normaliser for val/test."
-                    ) from exc
+            # Each region is standardised over its own time course within a
+            # subject.  This must be fitted independently for every subject,
+            # including validation/test, rather than over the train cohort.
             processed_timeseries = [
-                flattened_data[i].reshape(sample_shape) for i in range(flattened_data.shape[0])
+                self.normaliser.fit_transform(ts.T).T for ts in processed_timeseries
             ]
 
         if self.filter is not None:

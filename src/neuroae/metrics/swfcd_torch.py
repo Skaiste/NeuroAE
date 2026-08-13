@@ -218,7 +218,7 @@ class SwFCD:
         # Keep compatibility with loss code expecting a scalar tensor.
         return pearson.mean(), mad.mean(), rmse.mean()
 
-    def vectorize(self, x: torch.Tensor, *, track_grad: Optional[bool] = None, offset=10) -> Optional[torch.Tensor]:
+    def vectorize(self, x: torch.Tensor, *, track_grad: Optional[bool] = None, offset=1) -> Optional[torch.Tensor]:
         x_btr = self.ensure_correct_dim(x)
         if x_btr is None:
             return None
@@ -242,7 +242,7 @@ class SwFCD:
                     f"SwFCD vectorization failed under no_grad. {self._describe_input(x_btr)}"
                 ) from exc
 
-    def apply(self, x: Optional[torch.Tensor], x_hat: torch.Tensor, x_vec: Optional[torch.Tensor] = None, offset=10):
+    def apply(self, x: Optional[torch.Tensor], x_hat: torch.Tensor, x_vec: Optional[torch.Tensor] = None, offset=1):
         if x_vec is None:
             if x is None:
                 raise ValueError("SwFCD.apply requires either x or x_vec.")
