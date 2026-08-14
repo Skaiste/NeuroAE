@@ -316,8 +316,8 @@ def train_vae(
     if val_loader is None:
         compute_swfcd_during_training = False
 
-    # val_swfcd = SwFCD(val_loader.dataset, 30, 3) if (compute_swfcd_during_training and val_loader is not None) else None
-    val_swfcd = SwFCD(val_loader.dataset, 2, 1) if (compute_swfcd_during_training and val_loader is not None) else None
+    val_swfcd = SwFCD(val_loader.dataset, 30, 3) if (compute_swfcd_during_training and val_loader is not None) else None
+    # val_swfcd = SwFCD(val_loader.dataset, 2, 1) if (compute_swfcd_during_training and val_loader is not None) else None
     val_reference_vec = None
     if (
         compute_swfcd_during_training

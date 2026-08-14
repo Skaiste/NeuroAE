@@ -812,9 +812,10 @@ def prepare_data_loaders(
     bio_norm = {bl: StandardScaler() for bl in use_bio_levels}
     bio_means = {}
     for bl in use_bio_levels:
-        bio_means[bl] = train_dataset.prepare(bl, fit=True)
+        bio_means[bl] = train_dataset.prepare(bl, normaliser=bio_norm[bl], fit=True)
 
     datasets = {"train": train_dataset}
+    breakpoint()
 
     if has_val_data:
         val_dataset = dataset_cls(
