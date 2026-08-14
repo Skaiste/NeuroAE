@@ -815,7 +815,6 @@ def prepare_data_loaders(
         bio_means[bl] = train_dataset.prepare(bl, normaliser=bio_norm[bl], fit=True)
 
     datasets = {"train": train_dataset}
-    breakpoint()
 
     if has_val_data:
         val_dataset = dataset_cls(
