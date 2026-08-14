@@ -274,13 +274,7 @@ class ConvAE(ModelBase):
                 "kld": kld,
             }
 
-        if self.swfcd is not None:
-            swfcd = self.swfcd.apply(x, model_output[0])
-            swfcd_beta = loss_fn_params.get("swfcd_beta", 1.0)
-            loss["swfcd_rmse"] = swfcd["rmse"]
-            loss["loss"] += swfcd_beta * swfcd["rmse"]
-
-        return loss
+        return self.add_weighted_fc_and_std_losses(loss, x, model_output[0])
 
 
 class ConvVAE(ConvAE):
@@ -393,13 +387,7 @@ class ConvAEPredHeads(ConvAE):
         if pred_head_loss:
             loss["loss"] += pred_heads_delta * sum(pred_head_loss) / len(pred_head_loss)
 
-        if self.swfcd is not None:
-            swfcd = self.swfcd.apply(x, x_hat)
-            swfcd_beta = loss_fn_params.get("swfcd_beta", 1.0)
-            loss["swfcd_rmse"] = swfcd["rmse"]
-            loss["loss"] += swfcd_beta * swfcd["rmse"]
-
-        return loss
+        return self.add_weighted_fc_and_std_losses(loss, x, x_hat)
 
 
 class ConvVAEPredHeads(ConvAEPredHeads):

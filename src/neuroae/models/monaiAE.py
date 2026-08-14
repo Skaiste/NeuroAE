@@ -4,6 +4,8 @@ import torch
 import torch.nn.functional as F
 from monai.networks.nets.autoencoderkl import AutoencoderKL
 
+from . import ModelBase
+
 
 class MonaiAEKL(AutoencoderKL):
     """
@@ -78,8 +80,6 @@ class MonaiAEKL(AutoencoderKL):
         self.use_combined_linear = bool(use_combined_linear)
         self.use_flash_attention = bool(use_flash_attention)
         self.device = device
-        self.swfcd = None
-
         self._downsample_factor = 2 ** max(len(self.hidden_channels) - 1, 0)
         self._monai_latent_length = self._compute_monai_latent_length(self.regions)
         self._monai_latent_flat_dim = self.latent_channels * self._monai_latent_length
@@ -259,9 +259,6 @@ class MonaiAEKL(AutoencoderKL):
     def set_loss_fn_params(self, params):
         self.loss_fn_params = params or {}
 
-    def set_swfcd(self, swfcd):
-        self.swfcd = swfcd
-
     def loss(self, x, model_output):
         x_hat, mu, log_var, _ = model_output
         loss_fn_params = getattr(self, "loss_fn_params", {})
@@ -285,10 +282,4 @@ class MonaiAEKL(AutoencoderKL):
             "kld": kld,
         }
 
-        if self.swfcd is not None:
-            swfcd = self.swfcd.apply(x, x_hat)
-            swfcd_beta = loss_fn_params.get("swfcd_beta", 1.0)
-            loss["swfcd_rmse"] = swfcd["rmse"]
-            loss["loss"] += swfcd_beta * swfcd["rmse"]
-
-        return loss
+        return ModelBase.add_weighted_fc_and_std_losses(self, loss, x, x_hat)

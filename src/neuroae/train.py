@@ -208,17 +208,43 @@ def select_best_checkpoint(
     }
 
 
-def loss_params2str(train_params, train_batches, val_params, val_batches):
+def _should_display_loss(loss_name, loss_params):
+    """Return whether a loss component contributes to the configured objective."""
+    loss_params = loss_params or {}
+    if loss_name == "kld":
+        return float(loss_params.get("beta", 0.0)) != 0.0
+    if loss_name == "fc_loss":
+        return float(loss_params.get("fc_weight", 0.0)) != 0.0
+    if loss_name == "std_loss":
+        return float(loss_params.get("std_weight", 0.0)) != 0.0
+    if loss_name == "cls_loss":
+        return float(
+            loss_params.get("cls_head_weight", loss_params.get("cls_head_delta", 1.0))
+        ) != 0.0
+    if loss_name.endswith("_loss"):
+        return float(loss_params.get("pred_heads_delta", 0.0)) != 0.0
+    return True
+
+
+def loss_params2str(train_params, train_batches, val_params, val_batches, loss_params=None):
     def _format_loss_dict(params, type, batches):
-        return " | ".join(f"{type} {k}: {float(v/batches):.4f}" for k, v in params.items())
+        return " | ".join(
+            f"{type} {k}: {float(v/batches):.4f}"
+            for k, v in params.items()
+            if _should_display_loss(k, loss_params)
+        )
 
     train_pstr = _format_loss_dict(train_params, "Train", train_batches)
     val_pstr = _format_loss_dict(val_params, "Val", val_batches)
     return f"{train_pstr} | {val_pstr}"
 
 
-def _train_only_loss_params_str(train_params, train_batches):
-    return " | ".join(f"Train {k}: {float(v/train_batches):.4f}" for k, v in train_params.items())
+def _train_only_loss_params_str(train_params, train_batches, loss_params=None):
+    return " | ".join(
+        f"Train {k}: {float(v/train_batches):.4f}"
+        for k, v in train_params.items()
+        if _should_display_loss(k, loss_params)
+    )
 
 
 def _batch_labels_to_list(batch_labels):
@@ -434,7 +460,7 @@ def train_vae(
 
         print(
             f"Epoch {epoch}/{num_epochs} | "
-            f"{loss_params2str(train_loss_params, num_batches, val_loss_params, num_val_batches) if val_loader is not None else _train_only_loss_params_str(train_loss_params, num_batches)}"
+            f"{loss_params2str(train_loss_params, num_batches, val_loss_params, num_val_batches, model.loss_fn_params) if val_loader is not None else _train_only_loss_params_str(train_loss_params, num_batches, model.loss_fn_params)}"
             f"{val_metric_str}", flush=True
         )
 

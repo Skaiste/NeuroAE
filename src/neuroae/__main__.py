@@ -31,12 +31,14 @@ from .data import (
     load_adni,
     load_adni2,
     load_adni3,
+    load_adni_long,
     load_ebrains,
     load_hcp,
     prepare_data_loaders,
     SubjectRegionStandardScaler,
     subset_dataset,
 )
+from .filters import NilearnBandPassFilter
 from .data.utils import build_data_loader_result
 from .models.old.pca import PCA, PCA_multi
 from training_tracker import TrainingResultsManager
@@ -146,7 +148,7 @@ def _build_data_cache_key(data_config):
 
 def _build_filter_cache_key(data_config, data_loader=None):
     filter_config = deepcopy(data_config.get("filter"))
-    if not filter_config or filter_config.get("type") != "BandPassFilter":
+    if not filter_config or filter_config.get("type") not in {"BandPassFilter", "NilearnBandPassFilter"}:
         return None
 
     key_fields = {"filter": filter_config}
@@ -220,6 +222,22 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
             counts = data_loader.get_subject_count()
             for group, count in counts.items():
                 print(f"  {group}: {count}")
+        elif data_type == "ADNI_Long":
+            print("\nLoading ADNI-Long progression dataset...")
+            long_filter_config = data_config.get("filter", {})
+            data_loader = load_adni_long(
+                data_dir=data_dir,
+                parcellation=data_config["data"].get("parcellation", "Schaefer400"),
+                filter_timeseries=data_config["data"].get("filter_timeseries", True),
+                high_pass=long_filter_config.get("high_pass", long_filter_config.get("flp", 0.008)),
+                low_pass=long_filter_config.get("low_pass", long_filter_config.get("fhi", 0.08)),
+                detrend=long_filter_config.get("detrend", long_filter_config.get("apply_detrend", False)),
+                normalise=data_config["data"].get(
+                    "normalise", data_config["data"].get("normalize", True)
+                ),
+            )
+            CACHED_DATA[data_cache_key] = data_loader
+            print(data_loader.summary())
         elif data_type == "HCP":
             print(f"\nLoading HCP dataset...")
             data_loader = load_hcp(data_dir, parcelations=default_parcelations)
@@ -252,7 +270,7 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
                 print(f"  {group}: {count}")
         else:
             raise ValueError(
-                f"Data type '{data_type}' is invalid, available only 'ADNI', 'ADNI2', 'ADNI3', 'HCP', and 'EBRAINS'"
+                f"Data type '{data_type}' is invalid, available only 'ADNI', 'ADNI2', 'ADNI3', 'ADNI_Long', 'HCP', and 'EBRAINS'"
             )
     elif cache_mode != "load":
         data_loader = CACHED_DATA[data_cache_key]
@@ -276,6 +294,14 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
             apply_detrend=filter_config['apply_detrend'],
             apply_finalDetrend=filter_config['apply_finalDetrend'],
         )
+    elif cache_mode == "load" and 'filter' in data_config and data_config['filter']['type'] == 'NilearnBandPassFilter':
+        filter_config = data_config['filter']
+        filter = NilearnBandPassFilter(
+            tr=filter_config['tr'],
+            high_pass=filter_config.get('high_pass', 0.008),
+            low_pass=filter_config.get('low_pass', 0.08),
+            detrend=filter_config.get('detrend', False),
+        )
     elif cache_mode == "load":
         filter = None
     else:
@@ -284,27 +310,41 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
             filter = None
         elif filter_cache_key not in CACHED_FILTER:
             filter_config = data_config['filter']
-            tr = data_loader.TR() * 1000
-            filter = BandPassFilter(
-                tr=tr,
-                flp=filter_config['flp'],
-                fhi=filter_config['fhi'],
-                k=filter_config['k'],
-                remove_artifacts=filter_config['remove_artifacts'],
-                apply_demean=filter_config['apply_demean'],
-                apply_detrend=filter_config['apply_detrend'],
-                apply_finalDetrend=filter_config['apply_finalDetrend'],
-            )
+            if filter_config['type'] == 'NilearnBandPassFilter':
+                filter = NilearnBandPassFilter(
+                    tr=filter_config.get('tr', data_loader.TR()),
+                    high_pass=filter_config.get('high_pass', 0.008),
+                    low_pass=filter_config.get('low_pass', 0.08),
+                    detrend=filter_config.get('detrend', False),
+                )
+            else:
+                tr = data_loader.TR() * 1000
+                filter = BandPassFilter(
+                    tr=tr,
+                    flp=filter_config['flp'],
+                    fhi=filter_config['fhi'],
+                    k=filter_config['k'],
+                    remove_artifacts=filter_config['remove_artifacts'],
+                    apply_demean=filter_config['apply_demean'],
+                    apply_detrend=filter_config['apply_detrend'],
+                    apply_finalDetrend=filter_config['apply_finalDetrend'],
+                )
             CACHED_FILTER[filter_cache_key] = filter
         else:
             filter = CACHED_FILTER[filter_cache_key]
 
+    # ADNI-Long performs the notebook's filter-then-normalise pipeline on
+    # each member of a progression pair before stacking them. Applying the
+    # generic dataset filter here would both repeat it and receive a 3D pair.
+    if data_type == "ADNI_Long" and filter is not None:
+        print("ADNI-Long uses its loader-level Nilearn preprocessing; skipping generic filter.")
+        filter = None
 
     # Prepare PyTorch DataLoaders
     print(f"\nPreparing PyTorch DataLoaders...")
     # setup normaliser
     normaliser = None
-    if data_config['data'].get('normalize', False):
+    if data_type != "ADNI_Long" and data_config['data'].get('normalize', False):
         normaliser = SubjectRegionStandardScaler()
 
     group_defaults = (
@@ -592,12 +632,6 @@ def _build_fold_loaders(base_loaders, train_indices, val_indices, training_confi
 
 def _configure_model_training_state(model, training_config, loaders):
     model.set_loss_fn_params(training_config["training"].get("loss_params", None))
-    if training_config["training"]["loss_params"].get("swfcd_beta", 0.0) > 0:
-        from .metrics.swfcd_torch import SwFCD
-        window = training_config["training"]["loss_params"].get("swfcd_window", 30)
-        step = training_config["training"]["loss_params"].get("swfcd_step", 3)
-        swfcd = SwFCD(loaders["train_loader"].dataset, window, step)
-        model.set_swfcd(swfcd)
 
 
 def _classification_labels(loaders):
@@ -1675,6 +1709,13 @@ def main():
         parser.error('--num-workers must be >= 0')
     if args.max_experiment_combinations < 1:
         parser.error('--max-experiment-combinations must be >= 1')
+
+    # Experiment mode owns its model settings in --experiment-config.  In all
+    # other modes that construct a model, honour --model-config consistently.
+    model_config = None
+    if args.mode in {'train', 'eval'}:
+        print(f"Using model config: {args.model_config}")
+        model_config = load_config(args.model_config)
     
     print("=" * 60)
     print("ADNI-B VAE")
@@ -1709,7 +1750,6 @@ def main():
         print("=" * 60)
 
         data_config = load_config(args.data_config)
-        model_config = load_config(args.model_config)
         training_config = load_config(args.training_config)
         _validate_non_exp_pipeline_usage("train", training_config)
         if args.dry_run:
@@ -1789,7 +1829,6 @@ def main():
 
         input_dim = loaders['input_dim']
         timepoint_dim = loaders['timepoint_dim']
-        model_config = load_config(args.model_config)
         model, model_name, latent_dim = load_model_from_config(
             model_config=model_config,
             data_config=data_config,

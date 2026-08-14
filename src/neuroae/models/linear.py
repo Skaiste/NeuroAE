@@ -113,12 +113,7 @@ class LAE(ModelBase):
         else:
             loss["kld"] = torch.zeros((), device=x.device, dtype=x.dtype)
 
-        if self.swfcd is not None:
-            swfcd = self.swfcd.apply(x, x_hat)
-            swfcd_beta = self.loss_fn_params.get("swfcd_beta", 1.0)
-            loss["swfcd_rmse"] = swfcd["rmse"]
-            loss["loss"] += swfcd_beta * swfcd["rmse"]
-        return loss
+        return self.add_weighted_fc_and_std_losses(loss, x, x_hat)
 
     def freeze_encoder(self):
         for param in self.encoder.parameters():
@@ -229,13 +224,7 @@ class LAEPredHeads(LAE):
         if len(pred_head_loss) > 0:
             loss['loss'] += pred_heads_delta * sum(pred_head_loss) / len(pred_head_loss)
 
-        if self.swfcd is not None:
-            swfcd = self.swfcd.apply(x, x_hat)
-            swfcd_beta = self.loss_fn_params.get("swfcd_beta", 1.0)
-            loss['swfcd_rmse'] = swfcd['rmse']
-            loss['loss'] += swfcd_beta * swfcd['rmse']
-
-        return loss
+        return self.add_weighted_fc_and_std_losses(loss, x, x_hat)
 
 
 class LAEClsHead(LAE):
@@ -302,11 +291,7 @@ class LAEClsHead(LAE):
         )
         loss["loss"] += float(cls_weight) * cls_loss
 
-        if self.swfcd is not None:
-            swfcd = self.swfcd.apply(x, x_hat)
-            loss["swfcd_rmse"] = swfcd["rmse"]
-            loss["loss"] += self.loss_fn_params.get("swfcd_beta", 1.0) * swfcd["rmse"]
-        return loss
+        return self.add_weighted_fc_and_std_losses(loss, x, x_hat)
 
 
 class LAEPredClsHeads(LAEPredHeads):
@@ -315,7 +300,7 @@ class LAEPredClsHeads(LAEPredHeads):
     The regression heads receive the time-preserving latent representation,
     while the classification head receives the flattened latent vector.  Its
     :meth:`loss` accepts both regression targets and class indices so the
-    reconstruction, regression, classification, and optional KL/SWFCD terms
+    reconstruction, regression, classification, and optional KL terms
     can be optimized together.
     """
 
@@ -415,9 +400,5 @@ class LAEPredClsHeads(LAEPredHeads):
         )
         loss["loss"] += float(cls_weight) * cls_loss
 
-        if self.swfcd is not None:
-            swfcd = self.swfcd.apply(x, x_hat)
-            loss["swfcd_rmse"] = swfcd["rmse"]
-            loss["loss"] += self.loss_fn_params.get("swfcd_beta", 1.0) * swfcd["rmse"]
-        return loss
+        return self.add_weighted_fc_and_std_losses(loss, x, x_hat)
     

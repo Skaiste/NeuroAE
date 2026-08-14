@@ -1,6 +1,7 @@
 from .adni import ADNI_B_N193_no_filt, get_data_dir, load_adni, load_adni_alt, load_adni_n193
 from .adni2 import ADNI2Loader, load_adni2
 from .adni3 import ADNI3Loader, load_adni3
+from .adni_long import ADNILongLoader, load_adni_long
 from .base import BaseTimeseriesDataset, BioLevelDataset, CachedDataset, SubjectRegionStandardScaler
 from .ebrains import EBRAINSBOLDLoader, load_ebrains, load_ebrains_bold
 from .hcp import HCP, load_hcp
