@@ -8,8 +8,35 @@ class ModelBase(nn.Module):
     def set_loss_fn_params(self, params):
         self.loss_fn_params = params or {}
 
+    @staticmethod
+    def windowed_fc_variability_loss(x, x_hat, window_size, step):
+        """Match the across-window variability of functional connectivity."""
+        if window_size <= 1:
+            raise ValueError("SWFC variability loss requires window_size > 1.")
+        if step <= 0:
+            raise ValueError("SWFC variability loss requires step > 0.")
+        if x.shape[-2] < window_size or x_hat.shape[-2] < window_size:
+            raise ValueError("SWFC variability loss window_size exceeds available timepoints.")
+
+        # unfold returns (..., windows, regions, window_size); move time before regions.
+        x_windows = x.unfold(-2, window_size, step).movedim(-1, -2)
+        x_hat_windows = x_hat.unfold(-2, window_size, step).movedim(-1, -2)
+        if x_windows.shape[-3] < 2 or x_hat_windows.shape[-3] < 2:
+            raise ValueError("SWFC variability loss requires at least two windows.")
+
+        def _windowed_fc(windows):
+            centered = windows - windows.mean(dim=-2, keepdim=True)
+            normalized = torch.nn.functional.normalize(centered, p=2, dim=-2, eps=1e-12)
+            return normalized.transpose(-1, -2) @ normalized
+
+        true_fc_windows = _windowed_fc(x_windows)
+        pred_fc_windows = _windowed_fc(x_hat_windows)
+        true_std = true_fc_windows.std(dim=-3, unbiased=False)
+        pred_std = pred_fc_windows.std(dim=-3, unbiased=False)
+        return torch.sqrt(torch.nn.functional.mse_loss(pred_std, true_std))
+
     def add_weighted_fc_and_std_losses(self, loss, x, x_hat):
-        """Add optional FC and temporal standard-deviation matching terms.
+        """Add optional FC, SWFC-variability, and temporal signal terms.
 
         Inputs are expected to have time on their penultimate axis and regions
         on their final axis, i.e. ``(batch, time, regions)``.  Both weights
@@ -19,8 +46,17 @@ class ModelBase(nn.Module):
         loss_params = getattr(self, "loss_fn_params", {}) or {}
         fc_weight = float(loss_params.get("fc_weight", 0.0))
         std_weight = float(loss_params.get("std_weight", 0.0))
+        derivative_weight = float(loss_params.get("derivative_weight", 0.0))
+        second_derivative_weight = float(loss_params.get("second_derivative_weight", 0.0))
+        swfc_variability_weight = float(loss_params.get("swfc_variability_weight", 0.0))
 
-        if fc_weight == 0.0 and std_weight == 0.0:
+        if (
+            fc_weight == 0.0
+            and std_weight == 0.0
+            and derivative_weight == 0.0
+            and second_derivative_weight == 0.0
+            and swfc_variability_weight == 0.0
+        ):
             return loss
         if x.ndim < 3 or x_hat.ndim < 3:
             raise ValueError(
@@ -40,6 +76,16 @@ class ModelBase(nn.Module):
             loss["fc_loss"] = fc_loss
             loss["loss"] = loss["loss"] + fc_weight * fc_loss
 
+        if swfc_variability_weight != 0.0:
+            swfc_variability_loss = ModelBase.windowed_fc_variability_loss(
+                x,
+                x_hat,
+                window_size=int(loss_params.get("swfc_window", 30)),
+                step=int(loss_params.get("swfc_step", 3)),
+            )
+            loss["swfc_variability_loss"] = swfc_variability_loss
+            loss["loss"] = loss["loss"] + swfc_variability_weight * swfc_variability_loss
+
         if std_weight != 0.0:
             std_loss = torch.nn.functional.mse_loss(
                 x.std(dim=-2, unbiased=False),
@@ -47,5 +93,25 @@ class ModelBase(nn.Module):
             )
             loss["std_loss"] = std_loss
             loss["loss"] = loss["loss"] + std_weight * std_loss
+
+        if derivative_weight != 0.0:
+            if x.shape[-2] < 2 or x_hat.shape[-2] < 2:
+                raise ValueError("Derivative loss requires at least two timepoints.")
+            derivative_loss = torch.nn.functional.mse_loss(
+                x.diff(dim=-2),
+                x_hat.diff(dim=-2),
+            )
+            loss["derivative_loss"] = derivative_loss
+            loss["loss"] = loss["loss"] + derivative_weight * derivative_loss
+
+        if second_derivative_weight != 0.0:
+            if x.shape[-2] < 3 or x_hat.shape[-2] < 3:
+                raise ValueError("Second-derivative loss requires at least three timepoints.")
+            second_derivative_loss = torch.nn.functional.mse_loss(
+                x.diff(n=2, dim=-2),
+                x_hat.diff(n=2, dim=-2),
+            )
+            loss["second_derivative_loss"] = second_derivative_loss
+            loss["loss"] = loss["loss"] + second_derivative_weight * second_derivative_loss
 
         return loss

@@ -215,8 +215,14 @@ def _should_display_loss(loss_name, loss_params):
         return float(loss_params.get("beta", 0.0)) != 0.0
     if loss_name == "fc_loss":
         return float(loss_params.get("fc_weight", 0.0)) != 0.0
+    if loss_name == "swfc_variability_loss":
+        return float(loss_params.get("swfc_variability_weight", 0.0)) != 0.0
     if loss_name == "std_loss":
         return float(loss_params.get("std_weight", 0.0)) != 0.0
+    if loss_name == "derivative_loss":
+        return float(loss_params.get("derivative_weight", 0.0)) != 0.0
+    if loss_name == "second_derivative_loss":
+        return float(loss_params.get("second_derivative_weight", 0.0)) != 0.0
     if loss_name == "cls_loss":
         return float(
             loss_params.get("cls_head_weight", loss_params.get("cls_head_delta", 1.0))
