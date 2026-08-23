@@ -217,12 +217,8 @@ def _should_display_loss(loss_name, loss_params):
         return float(loss_params.get("fc_weight", 0.0)) != 0.0
     if loss_name == "swfc_variability_loss":
         return float(loss_params.get("swfc_variability_weight", 0.0)) != 0.0
-    if loss_name == "std_loss":
-        return float(loss_params.get("std_weight", 0.0)) != 0.0
     if loss_name == "derivative_loss":
         return float(loss_params.get("derivative_weight", 0.0)) != 0.0
-    if loss_name == "second_derivative_loss":
-        return float(loss_params.get("second_derivative_weight", 0.0)) != 0.0
     if loss_name == "cls_loss":
         return float(
             loss_params.get("cls_head_weight", loss_params.get("cls_head_delta", 1.0))
@@ -331,7 +327,12 @@ def train_vae(
     }
     best_model_losses = None
     epochs_without_improvement = 0
-    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    requires_optimizer = bool(getattr(model, "requires_optimizer", True))
+    optimizer = (
+        optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        if requires_optimizer
+        else None
+    )
     train_valid_last_dim = _dataset_valid_last_dim(train_loader.dataset)
     val_valid_last_dim = _dataset_valid_last_dim(val_loader.dataset) if val_loader is not None else None
     selection_metric = str(checkpoint_selection_metric or "val_loss")
@@ -359,7 +360,14 @@ def train_vae(
     ):
         val_reference = torch.as_tensor(val_loader.dataset.data, dtype=torch.float32, device=device)
         val_reference_vec = val_swfcd.vectorize(val_reference, track_grad=False)
+    max_training_epochs = getattr(model, "max_training_epochs", None)
+    if max_training_epochs is not None:
+        num_epochs = min(int(num_epochs), int(max_training_epochs))
     for epoch in range(num_epochs):
+        # Non-gradient models (e.g. PCAAE) may prepare their closed-form fit
+        # from the whole training set before their first and only epoch.
+        if epoch == 0 and hasattr(model, "fit_train_loader"):
+            model.fit_train_loader(train_loader, device=device)
         train_loss_params = {}
         model.train()
         for batch_idx, (data, labels) in enumerate(train_loader):
@@ -374,7 +382,8 @@ def train_vae(
                     n = (torch.rand_like(x) > float(noise['ratio'])).float()
                     x *= n
 
-            optimizer.zero_grad()
+            if optimizer is not None:
+                optimizer.zero_grad()
 
             output = model(x)
             output = _apply_recon_mask(x, output, valid_mask)
@@ -392,8 +401,9 @@ def train_vae(
                     train_loss_params[p] = 0
                 train_loss_params[p] += loss[p]
 
-            loss['loss'].backward()
-            optimizer.step()
+            if optimizer is not None:
+                loss['loss'].backward()
+                optimizer.step()
 
         num_batches = batch_idx + 1
         for p in train_loss_params:

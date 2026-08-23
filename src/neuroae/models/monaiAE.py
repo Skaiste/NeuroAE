@@ -262,14 +262,9 @@ class MonaiAEKL(AutoencoderKL):
     def loss(self, x, model_output):
         x_hat, mu, log_var, _ = model_output
         loss_fn_params = getattr(self, "loss_fn_params", {})
-        error_per_feature = loss_fn_params.get("loss_per_feature", True)
         beta = float(loss_fn_params.get("beta", 1.0))
 
-        if error_per_feature:
-            recon = F.mse_loss(x_hat, x, reduction="mean")
-        else:
-            recon = F.mse_loss(x_hat, x, reduction="none")
-            recon = recon.flatten(1).sum(dim=1).mean()
+        recon = ModelBase.reconstruction_loss(self, x_hat, x)
 
         mu_flat = mu.reshape(mu.shape[0], -1)
         log_var_flat = log_var.reshape(log_var.shape[0], -1)
@@ -282,4 +277,4 @@ class MonaiAEKL(AutoencoderKL):
             "kld": kld,
         }
 
-        return ModelBase.add_weighted_fc_and_std_losses(self, loss, x, x_hat)
+        return ModelBase.add_weighted_reconstruction_losses(self, loss, x, x_hat)

@@ -240,15 +240,10 @@ class ConvAE(ModelBase):
 
     def loss(self, x, model_output):
         loss_fn_params = getattr(self, "loss_fn_params", {})
-        error_per_feature = loss_fn_params.get("loss_per_feature", True)
 
         if not self.variational:
             x_hat, _ = model_output
-            if error_per_feature:
-                recon = F.mse_loss(x_hat, x, reduction="mean")
-            else:
-                recon = F.mse_loss(x_hat, x, reduction="none")
-                recon = recon.flatten(1).sum(dim=1).mean()
+            recon = self.reconstruction_loss(x_hat, x)
 
             loss = {
                 "loss": recon,
@@ -257,11 +252,7 @@ class ConvAE(ModelBase):
         else:
             x_hat, mu, log_var, _ = model_output
             beta = float(loss_fn_params.get("beta", 1.0))
-            if error_per_feature:
-                recon = F.mse_loss(x_hat, x, reduction="mean")
-            else:
-                recon = F.mse_loss(x_hat, x, reduction="none")
-                recon = recon.flatten(1).sum(dim=1).mean()
+            recon = self.reconstruction_loss(x_hat, x)
 
             mu_flat = mu.reshape(mu.shape[0], -1)
             log_var_flat = log_var.reshape(log_var.shape[0], -1)
@@ -274,7 +265,7 @@ class ConvAE(ModelBase):
                 "kld": kld,
             }
 
-        return self.add_weighted_fc_and_std_losses(loss, x, model_output[0])
+        return self.add_weighted_reconstruction_losses(loss, x, model_output[0])
 
 
 class ConvVAE(ConvAE):
@@ -350,17 +341,9 @@ class ConvAEPredHeads(ConvAE):
         if self.variational:
             x_hat, mu, log_var, z_heads, _ = model_output
             beta = loss_fn_params.get("beta", 0.5)
-            error_per_feature = loss_fn_params.get("loss_per_feature", True)
-
-            if error_per_feature:
-                recon = F.mse_loss(x_hat, x, reduction="mean")
-                kld = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
-                kld = kld.sum(dim=(1, 2)).mean() / (log_var.size(1) * log_var.size(2))
-            else:
-                recon = F.mse_loss(x_hat, x, reduction="none")
-                recon = recon.flatten(1).sum(dim=1).mean()
-                kld = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
-                kld = kld.sum(dim=(1, 2)).mean() / (log_var.size(1) * log_var.size(2))
+            recon = self.reconstruction_loss(x_hat, x)
+            kld = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
+            kld = kld.sum(dim=(1, 2)).mean() / (log_var.size(1) * log_var.size(2))
 
             loss = {
                 "loss": recon + beta * kld,
@@ -369,7 +352,7 @@ class ConvAEPredHeads(ConvAE):
             }
         else:
             x_hat, z_heads, _ = model_output
-            recon = F.mse_loss(x_hat, x)
+            recon = self.reconstruction_loss(x_hat, x)
             loss = {
                 "loss": recon,
                 "recon": recon,
@@ -387,7 +370,7 @@ class ConvAEPredHeads(ConvAE):
         if pred_head_loss:
             loss["loss"] += pred_heads_delta * sum(pred_head_loss) / len(pred_head_loss)
 
-        return self.add_weighted_fc_and_std_losses(loss, x, x_hat)
+        return self.add_weighted_reconstruction_losses(loss, x, x_hat)
 
 
 class ConvVAEPredHeads(ConvAEPredHeads):

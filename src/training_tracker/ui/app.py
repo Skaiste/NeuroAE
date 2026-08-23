@@ -1788,7 +1788,7 @@ def _build_raincloud_spec(
 def _build_model_compare_raincloud_spec(
     grouped: dict[str, dict[str, list[float]]],
 ) -> dict[str, object]:
-    desired_titles = ("SWFCD Pearson", "FC Pearson")
+    desired_titles = ("SWFCD Pearson", "FC Pearson", "MSE")
     title_to_key = {
         metric_title: metric_key
         for metric_key, metric_title in _metric_specs_for_grouped(grouped)
@@ -1803,7 +1803,6 @@ def _build_model_compare_raincloud_spec(
         "type": payload["type"],
         "facetByLabel": False,
         "height": "250px",
-        "width": "450px",
         "labels": payload["labels"],
         "series": payload["series"],
     }

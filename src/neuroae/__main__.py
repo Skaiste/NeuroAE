@@ -811,6 +811,17 @@ def load_model_from_config(
             timepoint_dim=input_dim[0],
             latent_dim=latent_dim,
         )
+    elif model_name == "PCAAE":
+        from .models.pca import PCAAE
+        latent_dim = model_config['model']['latent_dim']
+        hidden_dim = None
+        model = PCAAE(
+            region_dim=input_dim[-1],
+            timepoint_dim=input_dim[0],
+            latent_dim=latent_dim,
+            whiten=model_config['model'].get("whiten", False),
+            random_state=model_config['model'].get("random_state"),
+        )
     elif model_name == "LAEPredHeads":
         from .models.linear import LAEPredHeads
         latent_dim = model_config['model']['latent_dim']

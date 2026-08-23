@@ -87,7 +87,6 @@ class LAE(ModelBase):
         return x_hat_time, z
 
     def loss(self, x, model_output):
-        error_per_feature = self.loss_fn_params.get("loss_per_feature", True)
         beta = self._beta()
 
         if len(model_output) == 4:
@@ -97,11 +96,7 @@ class LAE(ModelBase):
             mu = None
             log_var = None
 
-        if error_per_feature:
-            recon = F.mse_loss(x_hat, x, reduction="mean")
-        else:
-            recon = F.mse_loss(x_hat, x, reduction="none")
-            recon = recon.sum(dim=1).mean()
+        recon = self.reconstruction_loss(x_hat, x)
 
         loss = {"loss": recon, "recon": recon}
 
@@ -113,7 +108,7 @@ class LAE(ModelBase):
         else:
             loss["kld"] = torch.zeros((), device=x.device, dtype=x.dtype)
 
-        return self.add_weighted_fc_and_std_losses(loss, x, x_hat)
+        return self.add_weighted_reconstruction_losses(loss, x, x_hat)
 
     def freeze_encoder(self):
         for param in self.encoder.parameters():
@@ -184,7 +179,6 @@ class LAEPredHeads(LAE):
     
     def loss(self, x, x_heads, model_output):
         beta = self._beta()
-        error_per_feature = self.loss_fn_params.get("loss_per_feature", True)
         pred_heads_delta = float(self.loss_fn_params.get("pred_heads_delta", 0.0))
 
         if len(model_output) == 5:
@@ -194,11 +188,7 @@ class LAEPredHeads(LAE):
             mu = None
             log_var = None
 
-        if error_per_feature:
-            recon = F.mse_loss(x_hat, x, reduction="mean")
-        else:
-            recon = F.mse_loss(x_hat, x, reduction="none")
-            recon = recon.sum(dim=1).mean()
+        recon = self.reconstruction_loss(x_hat, x)
 
         loss = {
             "loss": recon,
@@ -224,7 +214,7 @@ class LAEPredHeads(LAE):
         if len(pred_head_loss) > 0:
             loss['loss'] += pred_heads_delta * sum(pred_head_loss) / len(pred_head_loss)
 
-        return self.add_weighted_fc_and_std_losses(loss, x, x_hat)
+        return self.add_weighted_reconstruction_losses(loss, x, x_hat)
 
 
 class LAEClsHead(LAE):
@@ -270,10 +260,7 @@ class LAEClsHead(LAE):
             x_hat, logits, _ = model_output
             mu = log_var = None
 
-        if self.loss_fn_params.get("loss_per_feature", True):
-            recon = F.mse_loss(x_hat, x, reduction="mean")
-        else:
-            recon = F.mse_loss(x_hat, x, reduction="none").sum(dim=1).mean()
+        recon = self.reconstruction_loss(x_hat, x)
         loss = {"loss": recon, "recon": recon}
         beta = self._beta()
         if beta != 0.0 and mu is not None and log_var is not None:
@@ -291,7 +278,7 @@ class LAEClsHead(LAE):
         )
         loss["loss"] += float(cls_weight) * cls_loss
 
-        return self.add_weighted_fc_and_std_losses(loss, x, x_hat)
+        return self.add_weighted_reconstruction_losses(loss, x, x_hat)
 
 
 class LAEPredClsHeads(LAEPredHeads):
@@ -364,10 +351,7 @@ class LAEPredClsHeads(LAEPredHeads):
             x_hat, z_heads, logits, _ = model_output
             mu = log_var = None
 
-        if self.loss_fn_params.get("loss_per_feature", True):
-            recon = F.mse_loss(x_hat, x, reduction="mean")
-        else:
-            recon = F.mse_loss(x_hat, x, reduction="none").sum(dim=1).mean()
+        recon = self.reconstruction_loss(x_hat, x)
         loss = {"loss": recon, "recon": recon}
 
         beta = self._beta()
@@ -400,5 +384,5 @@ class LAEPredClsHeads(LAEPredHeads):
         )
         loss["loss"] += float(cls_weight) * cls_loss
 
-        return self.add_weighted_fc_and_std_losses(loss, x, x_hat)
+        return self.add_weighted_reconstruction_losses(loss, x, x_hat)
     

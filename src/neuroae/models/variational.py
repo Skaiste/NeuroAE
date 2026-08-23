@@ -142,17 +142,10 @@ class VAE(ModelBase):
 
     def loss(self, x, model_output):
         x_hat, mu, log_var, _ = model_output
-        error_per_feature = self.loss_fn_params.get("loss_per_feature", True)
         beta = float(self.loss_fn_params.get("beta", 1.0))
-        if error_per_feature:
-            recon = F.mse_loss(x_hat, x, reduction="mean")
-            kld = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
-            kld = kld.sum(dim=1).mean() / log_var.size(1)
-        else:
-            recon = F.mse_loss(x_hat, x, reduction="none")
-            recon = recon.sum(dim=1).mean()
-            kld = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
-            kld = kld.sum(dim=1).mean() / log_var.size(1)
+        recon = self.reconstruction_loss(x_hat, x)
+        kld = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
+        kld = kld.sum(dim=1).mean() / log_var.size(1)
 
         loss = {
             'loss': recon + beta * kld,
@@ -160,7 +153,7 @@ class VAE(ModelBase):
             'kld': kld
         }
 
-        return self.add_weighted_fc_and_std_losses(loss, x, x_hat)
+        return self.add_weighted_reconstruction_losses(loss, x, x_hat)
 
 
 class VAEPredHeads(VAE):
@@ -211,27 +204,11 @@ class VAEPredHeads(VAE):
     def loss(self, x, x_heads, model_output):
         x_hat, mu, log_var, z_heads, _ = model_output
         beta = self.loss_fn_params.get("beta", 0.5)
-        error_per_feature = self.loss_fn_params.get("loss_per_feature", True)
         pred_heads_delta = float(self.loss_fn_params.get("pred_heads_delta", 0.0))
         
-        # if selected error per feature, we are averaging everything
-        if error_per_feature:
-            # recon: mean mse loss
-            recon = F.mse_loss(x_hat, x, reduction="mean")
-
-            # KL: mean over batch, then mean over latent dims
-            kld = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
-            kld = kld.sum(dim=1).mean() / log_var.size(1)
-
-        # if selected error per sample, we are summing everything
-        else:
-            # recon: sum over features per sample, then mean over batch
-            recon = F.mse_loss(x_hat, x, reduction="none")  # [B, D]
-            recon = recon.sum(dim=1).mean()
-
-            # kld: sum over latent dims per sample, then mean over batch
-            kld = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
-            kld = kld.sum(dim=1).mean() / log_var.size(1)
+        recon = self.reconstruction_loss(x_hat, x)
+        kld = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
+        kld = kld.sum(dim=1).mean() / log_var.size(1)
 
         loss = {
             'loss': recon + beta * kld,
@@ -250,4 +227,4 @@ class VAEPredHeads(VAE):
         if len(pred_head_loss) > 0:
             loss['loss'] += pred_heads_delta * sum(pred_head_loss) / len(pred_head_loss)
 
-        return self.add_weighted_fc_and_std_losses(loss, x, x_hat)
+        return self.add_weighted_reconstruction_losses(loss, x, x_hat)

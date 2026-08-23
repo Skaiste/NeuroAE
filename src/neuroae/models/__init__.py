@@ -8,6 +8,20 @@ class ModelBase(nn.Module):
     def set_loss_fn_params(self, params):
         self.loss_fn_params = params or {}
 
+    def reconstruction_loss(self, x_hat, x):
+        """Return the configured reconstruction objective (``mse`` by default).
+
+        Set ``loss_params.recon_loss`` to either ``"mse"`` or ``"rmse"``.
+        Reconstruction error is always the mean across all input elements.
+        """
+        loss_params = getattr(self, "loss_fn_params", {}) or {}
+        recon_loss = str(loss_params.get("recon_loss", "mse")).lower()
+        if recon_loss not in {"mse", "rmse"}:
+            raise ValueError("loss_params.recon_loss must be either 'mse' or 'rmse'.")
+
+        mse = torch.nn.functional.mse_loss(x_hat, x, reduction="mean")
+        return mse if recon_loss == "mse" else torch.sqrt(mse)
+
     @staticmethod
     def windowed_fc_variability_loss(x, x_hat, window_size, step):
         """Match the across-window variability of functional connectivity."""
@@ -35,8 +49,8 @@ class ModelBase(nn.Module):
         pred_std = pred_fc_windows.std(dim=-3, unbiased=False)
         return torch.sqrt(torch.nn.functional.mse_loss(pred_std, true_std))
 
-    def add_weighted_fc_and_std_losses(self, loss, x, x_hat):
-        """Add optional FC, SWFC-variability, and temporal signal terms.
+    def add_weighted_reconstruction_losses(self, loss, x, x_hat):
+        """Add optional FC, SWFC-variability, and first-derivative terms.
 
         Inputs are expected to have time on their penultimate axis and regions
         on their final axis, i.e. ``(batch, time, regions)``.  Both weights
@@ -45,22 +59,18 @@ class ModelBase(nn.Module):
         """
         loss_params = getattr(self, "loss_fn_params", {}) or {}
         fc_weight = float(loss_params.get("fc_weight", 0.0))
-        std_weight = float(loss_params.get("std_weight", 0.0))
         derivative_weight = float(loss_params.get("derivative_weight", 0.0))
-        second_derivative_weight = float(loss_params.get("second_derivative_weight", 0.0))
         swfc_variability_weight = float(loss_params.get("swfc_variability_weight", 0.0))
 
         if (
             fc_weight == 0.0
-            and std_weight == 0.0
             and derivative_weight == 0.0
-            and second_derivative_weight == 0.0
             and swfc_variability_weight == 0.0
         ):
             return loss
         if x.ndim < 3 or x_hat.ndim < 3:
             raise ValueError(
-                "FC and standard-deviation losses require inputs shaped "
+                "Reconstruction regularization losses require inputs shaped "
                 "(..., time, regions)."
             )
 
@@ -86,14 +96,6 @@ class ModelBase(nn.Module):
             loss["swfc_variability_loss"] = swfc_variability_loss
             loss["loss"] = loss["loss"] + swfc_variability_weight * swfc_variability_loss
 
-        if std_weight != 0.0:
-            std_loss = torch.nn.functional.mse_loss(
-                x.std(dim=-2, unbiased=False),
-                x_hat.std(dim=-2, unbiased=False),
-            )
-            loss["std_loss"] = std_loss
-            loss["loss"] = loss["loss"] + std_weight * std_loss
-
         if derivative_weight != 0.0:
             if x.shape[-2] < 2 or x_hat.shape[-2] < 2:
                 raise ValueError("Derivative loss requires at least two timepoints.")
@@ -103,15 +105,5 @@ class ModelBase(nn.Module):
             )
             loss["derivative_loss"] = derivative_loss
             loss["loss"] = loss["loss"] + derivative_weight * derivative_loss
-
-        if second_derivative_weight != 0.0:
-            if x.shape[-2] < 3 or x_hat.shape[-2] < 3:
-                raise ValueError("Second-derivative loss requires at least three timepoints.")
-            second_derivative_loss = torch.nn.functional.mse_loss(
-                x.diff(n=2, dim=-2),
-                x_hat.diff(n=2, dim=-2),
-            )
-            loss["second_derivative_loss"] = second_derivative_loss
-            loss["loss"] = loss["loss"] + second_derivative_weight * second_derivative_loss
 
         return loss
