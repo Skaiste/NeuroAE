@@ -1,0 +1,28 @@
+\section{Autoencoder Framework}
+\todo[inline]{
+    General encoder-latent-decoder formulation.
+    Input and output representation: regions by timepoints.
+    Latent-space dimensionality.
+    How the spatial/regional dimension is compressed while temporal structure is retained.
+}
+\subsection{Linear Autoencoder}
+\includesvg[width=\linewidth]{../figures/linearAEarchitecture_latex}
+
+Consists of one linear layer in both the encoder and decoder, reducing the input regions to latent dimension and from latent back to the same initial number of regions.
+
+This architecture has only one variable parameter which is the latent dimension.
+
+\todo[inline]{Reference architecture graphic}
+
+\subsection{Deep Autoencoder}
+
+
+
+\subsection{Convolutional Autoencoder}
+
+\subsection{Variational Autoencoder Extension}
+
+\todo[inline]{Talk about the KL-divergence regularisation term added to each of the architectures above, where the deterministic latent representation becomes a probabilistic latent distribution.}
+
+
+\includesvg[width=\linewidth]{../figures/variationalAEarchitecture_latex}

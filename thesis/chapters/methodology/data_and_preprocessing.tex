@@ -1,0 +1,39 @@
+\section{Data and Preprocessing}
+% Describe datasets, inclusion criteria, and preprocessing.
+\subsection{ADNI Dataset}
+
+\todo[inline]{Copy pasted from the longitudinal dataset description, since they stated it follows the same processing as ADNI-B. Needs to be heavily adjusted}
+
+We have preprocessed the functional MRI data following the standard volume-based pipeline implemented within the Matlab-based CONN toolbox (\url{http://www.nitrc.org/projects/conn}), version 22v2407. The following steps are included in the standard CONN pipeline: functional realignment and motion correction, slice-timing correction to account for differences in time of acquisition between slices, identification of outlier scans for subsequent regression by means of the quality assurance/artifact rejection software Artifact Detection Toolbox (ART, \url{http://www.nitrc.org/projects/artifact_detect}), coregistration with each participant's high-resolution T1-weighted image, spatial normalisation to MNI-152 standard space with 2mm isotropic resampling resolution and smoothing with a Gaussian kernel of 8mm FWHM.
+Denoising also follows CONN's denoising approach: to reduce noise due to cardiac and motion artifacts we applied the anatomical CompCor method (4) (also implemented within the CONN toolbox), by regressing out of the functional data the first five principal components attributable to each individual's white matter signal, the first five components attributable to individual cerebrospinal fluid (CSF) signal, six subject-specific realignment parameters (three translations and three rotations) as well as their first-order temporal derivatives, the artifacts identified by ATRT, and main effect of scanning condition (None in this case). In the same denoising step, each individual's denoised BOLD signal timeseries is band-pass filtered in the 0.008-0.08 Hz range, to eliminate both low-frequency drift effects and high-frequency noise.
+
+\todo[inline]{Talk about the actual format of the parcelated data, distribution of classes, other data used like the Amyloid Beta and Tau levels, how they were normalised and what was done for subjects that didn't have this data.}
+
+\subsection{Longitudinal ADNI Dataset}
+Although the longitudinal dataset was intended to undergo the same preprocessing
+pipeline as the ADNI dataset, practical differences remained between the two
+resulting datasets. Comparing the BOLD time series for sessions shared by the
+same subjects shows that the signals differ slightly, as illustrated in
+Figure~\ref{fig:adnib-vs-adni-long-signals}. The mean Pearson correlation for
+sliding-window functional connectivity dynamics (SwFCD) is $0.533$, while the
+corresponding functional connectivity (FC) Pearson correlation is $0.7019$.
+Consequently, model-evaluation results obtained with the longitudinal dataset
+should be expected to have similar values.
+
+\thesisfigure{ADNIBvsADNILong_signals.png}
+{Comparison of BOLD time series of selected regions 0, 50, 150, 250, 350 from a common session of subject 012\_S\_6073 in the ADNI and longitudinal ADNI datasets. Despite theoretically identical preprocessing, small practical differences are present.}
+{fig:adnib-vs-adni-long-signals}
+{0.82\textwidth}
+
+The SwFCD and FC matrices offer a complementary comparison of the two datasets displayed in Figure~\ref{fig:adnib-vs-adni-long-matrices}... \todo{finish}
+
+\thesisfigure{ADNIBvsADNILong_matrices.png}
+{Comparison of SwFCD and FC matrices for subject 012\_S\_6073 between the ADNI and longitudinal ADNI datasets.}
+{fig:adnib-vs-adni-long-matrices}
+{0.82\textwidth}
+
+\todo[inline]{Add more on how the dataset was split into pairs, i.e. prepared for evaluation.}
+
+\subsection{Additional data processing}
+
+\todo[inline]{Talk about how both of the datasets were normalised using z-score across subjects and regions, maybe move this section under the "ADNI Dataset" as it talks mostly about processing...}

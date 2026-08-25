@@ -1,0 +1,27 @@
+% Reusable figure template:
+% \thesisfigure{file-name}{caption text}{fig:label}{0.52\textwidth}
+\newcommand{\thesisfigure}[4]{%
+  \begin{figure}[htbp]
+    \centering
+    \includegraphics[width=#4]{#1}
+    \caption{#2}
+    \label{#3}
+  \end{figure}%
+  \FloatBarrier
+}
+
+% Figure and explanatory text displayed side by side:
+% \thesisfigurewithtext{file-name}{caption text}{fig:label}{explanatory text}
+\newcommand{\thesisfigurewithtext}[4]{%
+  \begin{figure}[htbp]
+    \begin{minipage}[t]{0.48\textwidth}
+      \vspace{0pt}\small #4
+    \end{minipage}\hfill
+    \begin{minipage}[t]{0.48\textwidth}
+      \centering
+      \includegraphics[width=\linewidth]{#1}
+    \end{minipage}
+    \caption{#2}
+    \label{#3}
+  \end{figure}%
+}

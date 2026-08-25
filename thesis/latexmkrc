@@ -1,0 +1,2 @@
+# SVG figures are exported by Inkscape during LaTeX compilation.
+$pdflatex = 'pdflatex -shell-escape %O %S';

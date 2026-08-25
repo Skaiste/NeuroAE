@@ -1,0 +1,52 @@
+\documentclass[12pt,a4paper,oneside]{report}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[english]{babel}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{geometry}
+\usepackage{graphicx}
+% Render native SVG text in the exported PDF; this preserves draw.io line breaks.
+\usepackage[inkscapeexe=/Applications/Inkscape.app/Contents/MacOS/inkscape,inkscapelatex=false]{svg}
+\usepackage{placeins}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb}
+\usepackage{titlesec}
+\usepackage{hyperref}
+\usepackage{csquotes}
+\usepackage[backend=biber,style=authoryear]{biblatex}
+\usepackage[colorinlistoftodos]{todonotes}
+
+\geometry{margin=2.5cm}
+\graphicspath{{../figures/}}
+\input{figure_template}
+% Keep numbered chapters, but show only their titles (without the word ``Chapter'').
+\titleformat{\chapter}[display]
+  {\normalfont\huge\bfseries}
+  {}
+  {0pt}
+  {\Huge}
+\addbibresource{references.bib}
+\hypersetup{colorlinks=true,linkcolor=black,citecolor=black,urlcolor=blue}
+
+\begin{document}
+
+\input{frontmatter/titlepage}
+\pagenumbering{roman}
+\input{frontmatter/abstract}
+\input{frontmatter/acknowledgements}
+\tableofcontents
+\clearpage
+\pagenumbering{arabic}
+
+\input{chapters/introduction}
+\input{chapters/state_of_the_art}
+\input{chapters/methodology}
+\input{chapters/experimentation_and_evaluation}
+\input{chapters/discussion}
+\input{chapters/conclusion}
+\input{backmatter/appendices}
+\input{backmatter/bibliography}
+
+\end{document}
