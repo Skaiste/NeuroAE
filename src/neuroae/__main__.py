@@ -420,7 +420,7 @@ def _validate_non_exp_pipeline_usage(mode, training_config):
 
 
 def _validate_group_transfer_matrix_config(model_config):
-    supported_models = {"LAE", "DAE", "VAE", "ConvAE", "ConvVAE", "MonaiAEKL"}
+    supported_models = {"LAE", "DAE", "VAE", "ConvAE", "Conv2dAE", "ConvVAE", "MonaiAEKL"}
     model_name = str(model_config["model"]["name"])
     if model_name.endswith("PredHeads"):
         raise ValueError("training.pipeline='group_transfer_matrix' does not support *PredHeads models.")
@@ -866,6 +866,19 @@ def load_model_from_config(
             latent_dim=latent_dim,
             hidden_channels=hidden_dim,
             kernel_size=kernel_size
+        )
+    elif model_name == "Conv2dAE":
+        from .models.conv2dAE import Conv2dAE
+        hidden_dim = model_config['model']['hidden_dims']
+        latent_dim = model_config['model']['latent_dim']
+        model = Conv2dAE(
+            regions=input_dim[-1],
+            timepoints=input_dim[0],
+            latent_dim=latent_dim,
+            hidden_channels=hidden_dim,
+            hidden_kernel_size=model_config['model'].get("hidden_kernel_size", (3, 3)),
+            hidden_stride=model_config['model'].get("hidden_stride", (1, 1)),
+            device=device,
         )
     elif model_name == "ConvAEPredHeads":
         from .models.convAE import ConvAEPredHeads
