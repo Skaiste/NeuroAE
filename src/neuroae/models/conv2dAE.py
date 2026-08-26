@@ -7,6 +7,10 @@ from . import ModelBase
 from .convAE import _region_reduction_params
 
 
+class Conv2dAEConfigurationError(ValueError):
+    """A Conv2dAE hyperparameter combination that cannot produce its requested latent shape."""
+
+
 class _Conv2dEncoder(nn.Module):
     def __init__(self, hidden_channels, hidden_kernel_size, hidden_stride, region_kernel_size, region_stride):
         super().__init__()
@@ -130,7 +134,9 @@ class Conv2dAE(ModelBase):
         if any(value % 2 == 0 for value in self.hidden_kernel_size):
             raise ValueError("hidden_kernel_size values must be odd to preserve dimensions predictably.")
         if self.hidden_stride[0] != 1:
-            raise ValueError("hidden_stride must have time stride 1 to retain a (T, L) latent space.")
+            raise Conv2dAEConfigurationError(
+                "hidden_stride must have time stride 1 to retain a (T, L) latent space."
+            )
 
         self.hidden_region_widths = [self.regions]
         padding_regions = (self.hidden_kernel_size[1] - 1) // 2
@@ -138,6 +144,13 @@ class Conv2dAE(ModelBase):
             current_width = self.hidden_region_widths[-1]
             width = (current_width + 2 * padding_regions - self.hidden_kernel_size[1]) // self.hidden_stride[1] + 1
             self.hidden_region_widths.append(width)
+
+        if self.hidden_region_widths[-1] < self.latent_dim:
+            raise Conv2dAEConfigurationError(
+                "Conv2dAE hidden-layer strides reduce the regional width to "
+                f"{self.hidden_region_widths[-1]}, which is smaller than "
+                f"latent_dim={self.latent_dim}."
+            )
 
         self.region_kernel_size, self.region_stride = _region_reduction_params(
             self.hidden_region_widths[-1], self.latent_dim

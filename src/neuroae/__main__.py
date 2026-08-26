@@ -419,6 +419,13 @@ def _validate_non_exp_pipeline_usage(mode, training_config):
         raise ValueError(f"training.pipeline={pipeline!r} is only supported in --mode exp.")
 
 
+def _is_skippable_experiment_configuration_error(exc):
+    """Return whether an experiment sweep should skip this invalid model combination."""
+    from .models.conv2dAE import Conv2dAEConfigurationError
+
+    return isinstance(exc, Conv2dAEConfigurationError)
+
+
 def _validate_group_transfer_matrix_config(model_config):
     supported_models = {"LAE", "DAE", "VAE", "ConvAE", "Conv2dAE", "ConvVAE", "MonaiAEKL"}
     model_name = str(model_config["model"]["name"])
@@ -2005,6 +2012,7 @@ def main():
         max_workers = min(args.num_parallel_experiments, total_experiments)
         if max_workers == 1:
             failed = []
+            skipped_incompatible = 0
             for i, (dc, mc, tc) in enumerate(experiment_specs, start=1):
 
                 # skip incompatible AutoencoderKL parameters
@@ -2036,8 +2044,14 @@ def main():
                     )
                     print(f"Experiment {i}/{total_experiments} completed: {exp_id}")
                 except Exception as exc:
+                    if _is_skippable_experiment_configuration_error(exc):
+                        skipped_incompatible += 1
+                        print(f"Experiment {i}/{total_experiments} skipped: {exc}")
+                        continue
                     failed.append((i, exc))
                     print(f"Experiment {i}/{total_experiments} failed: {exc}")
+            if skipped_incompatible:
+                print(f"Skipped {skipped_incompatible} incompatible Conv2dAE experiment(s)")
             if failed:
                 failed_indexes = ", ".join(str(idx) for idx, _ in failed)
                 raise RuntimeError(f"{len(failed)} experiment(s) failed: {failed_indexes}")
@@ -2067,15 +2081,22 @@ def main():
                     futures[future] = i
 
                 failed = []
+                skipped_incompatible = 0
                 for future in concurrent.futures.as_completed(futures):
                     idx = futures[future]
                     try:
                         exp_id = future.result()
                         print(f"Experiment {idx}/{total_experiments} completed: {exp_id}")
                     except Exception as exc:
+                        if _is_skippable_experiment_configuration_error(exc):
+                            skipped_incompatible += 1
+                            print(f"Experiment {idx}/{total_experiments} skipped: {exc}")
+                            continue
                         failed.append((idx, exc))
                         print(f"Experiment {idx}/{total_experiments} failed: {exc}")
 
+                if skipped_incompatible:
+                    print(f"Skipped {skipped_incompatible} incompatible Conv2dAE experiment(s)")
                 if failed:
                     failed_indexes = ", ".join(str(idx) for idx, _ in failed)
                     raise RuntimeError(f"{len(failed)} experiment(s) failed: {failed_indexes}")
