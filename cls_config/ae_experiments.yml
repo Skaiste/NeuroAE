@@ -1,0 +1,71 @@
+# This is the complete ae_exp configuration. Each candidate is evaluated with
+# the same fold-local LAE; AE test data are never encoded or evaluated.
+autoencoder:
+  data:
+    type: ADNI3
+    batch_size: 32
+    cache_file: data/ADNI2_preprocessed_cache_400.pt
+    cache_mode: load
+    normalize: true
+    transpose: false
+    flatten: false
+    fc_input: false
+    timepoints_as_samples: false
+    preserve_timepoints: false
+    random_seed: 42
+    parcelations: 400
+    parcellation_type: Schaefer
+    merge_groups: true
+    train_split: 0.8
+    val_split: 0.0
+    heldout_subject_target: test
+  model:
+    name: LAE
+    latent_dim: 32
+  training:
+    num_epochs: 1000
+    learning_rate: 0.001
+    weight_decay: 0.0001
+    checkpoint_selection_metric: swfcd_loss_joint
+    compute_swfcd_during_training: true
+    convergence_patience: 10
+    convergence_min_delta: 0.0001
+    convergence_warmup_epochs: 10
+    loss_params:
+      beta: 0
+      fc_weight: 1
+      recon_loss: mse
+    reproducibility:
+      enabled: true
+      seed: 1717
+      deterministic: true
+      warn_only: false
+      benchmark: false
+
+default:
+  cross_validation_folds: 5
+  classifier:
+    model:
+      name: braingnn
+      input_mode: graph
+    training:
+      batch_size: 16
+      num_epochs: 100
+      learning_rate: 0.001
+      weight_decay: 0.0001
+      convergence_patience: 10
+      convergence_min_delta: 0.0001
+      convergence_warmup_epochs: 5
+      classifier_metric: macro_f1
+      log_every_epochs: 1
+
+braingnn_latent_search:
+  static_params: {}
+  exp_params:
+    model:
+      hidden_dims: [[64, 32], [128, 64]]
+      pool_ratios: [[0.5, 0.5], [0.75, 0.5]]
+      dropout: [0.0, 0.2]
+      aux_loss_weight: [0.1, 0.5]
+    training:
+      learning_rate: [0.0001, 0.001]

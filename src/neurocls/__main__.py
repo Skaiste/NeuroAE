@@ -425,12 +425,13 @@ def _is_signature_in_shard(signature, shard_index, num_shards):
 
 def main():
     parser = argparse.ArgumentParser(description="Train classification models on ADNI3 data.")
-    parser.add_argument("-m", "--mode", type=str, default="train", choices=["train", "eval", "load", "exp"])
+    parser.add_argument("-m", "--mode", type=str, default="train", choices=["train", "eval", "load", "exp", "ae_exp"])
     parser.add_argument("-d", "--data-dir", type=pathlib.Path, default=project_path / "data")
     parser.add_argument("--data-config", type=pathlib.Path, default=project_path / "cls_config" / "data.yml")
     parser.add_argument("--model-config", type=pathlib.Path, default=project_path / "cls_config" / "model.yml")
     parser.add_argument("--training-config", type=pathlib.Path, default=project_path / "cls_config" / "training.yml")
     parser.add_argument("--experiment-config", type=pathlib.Path, default=project_path / "cls_config" / "experiments.yml")
+    parser.add_argument("--ae-experiment-config", type=pathlib.Path, default=project_path / "cls_config" / "ae_experiments.yml")
     parser.add_argument("--device", type=str, default="mps", choices=["cpu", "cuda", "mps"])
     parser.add_argument("--exp-name", type=str)
     parser.add_argument("--num-parallel-experiments", type=int, default=1)
@@ -490,6 +491,36 @@ def main():
             delete_model_after_eval=bool(training_config.get("training", {}).get("delete_model_after_eval", True)),
         )
         print(json.dumps(evaluation, sort_keys=True, default=str))
+        return
+
+    if args.mode == "ae_exp":
+        # Imported lazily so the standard classifier commands retain their
+        # lightweight startup path.
+        from .ae_exp import run_ae_experiment_sweep
+
+        ae_experiment_config = load_config(args.ae_experiment_config)
+        ae_config = ae_experiment_config.get("autoencoder")
+        if not isinstance(ae_config, dict):
+            raise ValueError(
+                "ae_exp configuration requires an 'autoencoder' section with data, model, and training entries."
+            )
+        ae_data_config = {"data": deepcopy(ae_config.get("data", {}))}
+        ae_model_config = {"model": deepcopy(ae_config.get("model", {}))}
+        ae_training_config = {"training": deepcopy(ae_config.get("training", {}))}
+        if not all((ae_data_config["data"], ae_model_config["model"], ae_training_config["training"])):
+            raise ValueError("ae_exp autoencoder.data, autoencoder.model, and autoencoder.training must be non-empty.")
+        _configure_logging(ae_training_config)
+        run_ae_experiment_sweep(
+            data_dir=args.data_dir,
+            device=args.device,
+            ae_data_config=ae_data_config,
+            ae_model_config=ae_model_config,
+            ae_training_config=ae_training_config,
+            experiment_config=ae_experiment_config,
+            results_dir=results_dir,
+            num_workers=args.num_workers,
+            dry_run=args.dry_run,
+        )
         return
 
     if args.mode == "exp":
