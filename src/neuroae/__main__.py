@@ -420,7 +420,7 @@ def _validate_non_exp_pipeline_usage(mode, training_config):
 
 
 def _validate_group_transfer_matrix_config(model_config):
-    supported_models = {"LAE", "VAE", "ConvAE", "ConvVAE", "MonaiAEKL"}
+    supported_models = {"LAE", "DAE", "VAE", "ConvAE", "ConvVAE", "MonaiAEKL"}
     model_name = str(model_config["model"]["name"])
     if model_name.endswith("PredHeads"):
         raise ValueError("training.pipeline='group_transfer_matrix' does not support *PredHeads models.")
@@ -775,25 +775,27 @@ def load_model_from_config(
     model_name = model_config['model']['name']
     latent_dim = 0
 
-    if model_name == "VAE":
-        from .models.variational import VAE
+    if model_name in {"DAE", "VAE"}:
+        from .models.deep import DAE, VAE
         hidden_dim = model_config['model']['hidden_dims']
         latent_dim = model_config['model']['latent_dim']
         # assuming the input is transposed
-        model = VAE(
+        model_class = DAE if model_name == "DAE" else VAE
+        model = model_class(
             region_dim=input_dim[-1],
             timepoint_dim=input_dim[0],
             hidden_dims=hidden_dim,
             latent_dim=latent_dim,
             device=device)
-    elif model_name == "VAEPredHeads":
-        from .models.variational import VAEPredHeads
+    elif model_name in {"DAEPredHeads", "VAEPredHeads"}:
+        from .models.deep import DAEPredHeads, VAEPredHeads
         hidden_dim = model_config['model']['hidden_dims']
         latent_dim = model_config['model']['latent_dim']
         pred_head_type = model_config['model'].get("pred_head_type", "avg")
         pred_head_num = len(data_config['data'].get('use_bio_levels', []))
         # assuming the input is transposed
-        model = VAEPredHeads(
+        model_class = DAEPredHeads if model_name == "DAEPredHeads" else VAEPredHeads
+        model = model_class(
             region_dim=input_dim[-1],
             timepoint_dim=input_dim[0],
             hidden_dims=hidden_dim,
