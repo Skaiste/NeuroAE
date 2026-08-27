@@ -489,63 +489,32 @@ def eval_vae(
     - MSE
     - FC preservation
     - Latent silhouette score
-    - Latent classifier accuracy via BrainGNN trained on AE latents from train and validated on val
+    - Latent classifier accuracy via BrainGNN trained on AE train latents and evaluated on test
     - PCA baseline comparison (if PCA object is provided)
     """
     device = torch.device(device)
     model = model.to(device)
     model.eval()
-    base_val_loader = val_loader
     classifier_train_loader = classifier_train_loader or train_loader
-    classifier_val_loader = classifier_val_loader or base_val_loader or classifier_train_loader
-    if base_val_loader is None:
-        print("Evaluation: validation loader missing, reusing the training loader where validation latents are required.", flush=True)
 
     print("Evaluation: collecting train split latents", flush=True)
     swfcd = SwFCD(data_loader.dataset, 30, 3)
     # swfcd = SwFCD(data_loader.dataset, 2, 1)
     train_outputs = _collect_split_outputs(model, train_loader, device, use_pred_heads=use_pred_heads, include_recons=False)
-    if base_val_loader is not None:
-        print("Evaluation: collecting validation split latents", flush=True)
-        val_outputs = _collect_split_outputs(model, base_val_loader, device, use_pred_heads=use_pred_heads, include_recons=False)
-    else:
-        val_outputs = train_outputs
     print("Evaluation: collecting evaluation split reconstructions and latents", flush=True)
     eval_outputs = _collect_split_outputs(model, data_loader, device, use_pred_heads=use_pred_heads, include_recons=True)
-    use_classifier_overrides = (
-        classifier_train_loader is not train_loader
-        or (base_val_loader is not None and classifier_val_loader is not base_val_loader)
-        or (base_val_loader is None and classifier_val_loader is not train_loader)
-    )
+    use_classifier_overrides = classifier_train_loader is not train_loader
     if use_classifier_overrides:
-        if classifier_train_loader is train_loader:
-            classifier_train_outputs = train_outputs
-        else:
-            print("Evaluation: collecting classifier train split latents from override loader", flush=True)
-            classifier_train_outputs = _collect_split_outputs(
-                model,
-                classifier_train_loader,
-                device,
-                use_pred_heads=use_pred_heads,
-                include_recons=False,
-            )
-
-        if classifier_val_loader is classifier_train_loader:
-            classifier_val_outputs = classifier_train_outputs
-        elif base_val_loader is not None and classifier_val_loader is base_val_loader:
-            classifier_val_outputs = val_outputs
-        else:
-            print("Evaluation: collecting classifier validation split latents from override loader", flush=True)
-            classifier_val_outputs = _collect_split_outputs(
-                model,
-                classifier_val_loader,
-                device,
-                use_pred_heads=use_pred_heads,
-                include_recons=False,
-            )
+        print("Evaluation: collecting classifier train split latents from override loader", flush=True)
+        classifier_train_outputs = _collect_split_outputs(
+            model,
+            classifier_train_loader,
+            device,
+            use_pred_heads=use_pred_heads,
+            include_recons=False,
+        )
     else:
         classifier_train_outputs = train_outputs
-        classifier_val_outputs = val_outputs
 
     x_all = eval_outputs["inputs"]
     x_hat_all = eval_outputs["recons"]
@@ -561,21 +530,14 @@ def eval_vae(
         classifier_train_outputs["latents"],
         split_name="classifier_train" if use_classifier_overrides else "train",
     )
-    val_classifier_latents = _prepare_classifier_latents(
-        model,
-        classifier_val_outputs["latents"],
-        split_name="classifier_val" if use_classifier_overrides else "val",
-    )
     eval_classifier_latents = _prepare_classifier_latents(model, eval_outputs["latents"], split_name="test")
 
     print("Evaluation: training latent classifier for model latents", flush=True)
     classifier_result = run_latent_braingnn_classifier(
         to_numpy(train_classifier_latents),
         classifier_train_outputs["labels"].tolist(),
-        to_numpy(val_classifier_latents),
-        classifier_val_outputs["labels"].tolist(),
-        test_latents=to_numpy(eval_classifier_latents),
-        test_labels=labels.tolist(),
+        to_numpy(eval_classifier_latents),
+        labels.tolist(),
         device=device,
     )
     print("Evaluation: latent classifier finished for model latents", flush=True)
@@ -608,15 +570,12 @@ def eval_vae(
         valid_mask_np = to_numpy(valid_mask_all) if valid_mask_all is not None else None
         z_pca = pca.transform(x_all_np)
         train_latents_pca = pca.transform(classifier_train_outputs["inputs"].detach().cpu().numpy())
-        val_latents_pca = pca.transform(classifier_val_outputs["inputs"].detach().cpu().numpy())
         print("Evaluation: training latent classifier for PCA latents", flush=True)
         pca_classifier_result = run_latent_braingnn_classifier(
             train_latents_pca,
             classifier_train_outputs["labels"].tolist(),
-            val_latents_pca,
-            classifier_val_outputs["labels"].tolist(),
-            test_latents=z_pca,
-            test_labels=labels.tolist(),
+            z_pca,
+            labels.tolist(),
             device=device,
         )
         print("Evaluation: latent classifier finished for PCA latents", flush=True)

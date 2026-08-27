@@ -9,14 +9,14 @@ from sklearn.preprocessing import StandardScaler
 
 from neurocls.eval import compute_classification_metrics
 from neurocls.models import create_model
-from neurocls.train import train_torch_model
+from neurocls.train import run_torch_cross_validation_epoch_search, train_torch_model
 
 
 LATENT_BRAINGNN_MODEL_CONFIG = {
     "model": {
         "name": "braingnn",
-        "hidden_dims": [128, 64],
-        "pool_ratios": [0.75, 0.5],
+        "hidden_dims": [256,128],
+        "pool_ratios": [0.5,0.5],
         "dropout": 0.2,
         "aux_loss_weight": 0.5,
     }
@@ -24,41 +24,17 @@ LATENT_BRAINGNN_MODEL_CONFIG = {
 LATENT_BRAINGNN_TRAINING_CONFIG = {
     "training": {
         "learning_rate": 0.005,
-        "convergence_patience": 10,
+        "cross_validation_folds": 5,
         "classifier_metric": "macro_f1",
         "batch_size": 16,
         "weight_decay": 0,
+        "convergence_patience": 10,
         "convergence_min_delta": 0,
         "convergence_warmup_epochs": 0,
-        "num_epochs": 50,
-        "reproducibility": {"seed": 42},
+        "num_epochs": 100,
+        "reproducibility": {"seed": 1717},
     }
 }
-
-# after rerunning braingnn parameter search on latent space of best LAE
-# LATENT_BRAINGNN_MODEL_CONFIG = {
-#     "model": {
-#         "name": "braingnn",
-#         "hidden_dims": [256, 128],
-#         "pool_ratios": [0.5, 0.5],
-#         "dropout": 0.0,
-#         "aux_loss_weight": 0.01,
-#     }
-# }
-
-# LATENT_BRAINGNN_TRAINING_CONFIG = {
-#     "training": {
-#         "learning_rate": 0.005,
-#         "convergence_patience": 10,
-#         "classifier_metric": "macro_f1",
-#         "batch_size": 32,
-#         "weight_decay": 0.0001,
-#         "convergence_min_delta": 0.0001,
-#         "convergence_warmup_epochs": 5,
-#         "num_epochs": 50,
-#         "reproducibility": {"seed": 751},
-#     }
-# }
 
 
 def _emit_classifier_progress(message):
@@ -207,6 +183,7 @@ def _encode_labels(train_labels, val_labels=None, test_labels=None):
 
     return {
         "classes": classes,
+        "class_to_index": class_to_index,
         "train": _encode(train_labels),
         "val": _encode(val_labels),
         "test": _encode(test_labels),
@@ -241,17 +218,21 @@ def _nan_metrics(label_classes):
 def run_latent_braingnn_classifier(
     train_latents,
     train_labels,
-    val_latents,
-    val_labels,
-    test_latents=None,
-    test_labels=None,
+    test_latents,
+    test_labels,
     device="cuda" if torch.cuda.is_available() else "cpu",
 ):
+    """Select epochs with 5-fold training-set CV, then evaluate once on test.
+
+    Convergence is evaluated only on temporary validation folds carved from
+    ``train_latents``.  ``test_latents`` are excluded from selection and are
+    used only after the final model has been trained on all training latents.
+    """
     _emit_classifier_progress(
-        f"Starting latent BrainGNN classifier: train={len(train_labels)} val={len(val_labels)} "
-        f"test={len(test_labels) if test_labels is not None else 0} device={device}"
+        f"Starting latent BrainGNN classifier: train={len(train_labels)} "
+        f"test={len(test_labels)} device={device}"
     )
-    label_payload = _encode_labels(train_labels, val_labels=val_labels, test_labels=test_labels)
+    label_payload = _encode_labels(train_labels, test_labels=test_labels)
     _emit_classifier_progress(f"Encoded labels: classes={label_payload['classes']}")
     if len(label_payload["classes"]) < 2 or len(train_labels) == 0:
         nan_metrics = _nan_metrics(label_payload["classes"])
@@ -260,8 +241,8 @@ def run_latent_braingnn_classifier(
             "model": None,
             "history": {"train": {}, "val": {}},
             "train_metrics": nan_metrics,
-            "val_metrics": nan_metrics,
-            "test_metrics": nan_metrics if test_labels is not None else None,
+            "val_metrics": None,
+            "test_metrics": nan_metrics,
             "test_predictions": None,
             "test_probabilities": None,
             "label_payload": label_payload,
@@ -269,28 +250,21 @@ def run_latent_braingnn_classifier(
 
     _emit_classifier_progress("Preparing train graph payload")
     train_split = _latent_graph_split(train_latents, train_labels)
-    _emit_classifier_progress("Preparing validation graph payload")
-    val_split = _latent_graph_split(val_latents, val_labels)
-    test_split = None
-    if test_latents is not None and test_labels is not None:
-        _emit_classifier_progress("Preparing test graph payload")
-        test_split = _latent_graph_split(test_latents, test_labels)
+    _emit_classifier_progress("Preparing test graph payload")
+    test_split = _latent_graph_split(test_latents, test_labels)
 
     _emit_classifier_progress("Scaling node features")
-    train_nodes, val_nodes, test_nodes = _fit_graph_scaler(
+    train_nodes, _, test_nodes = _fit_graph_scaler(
         train_split["node_features"],
-        val_split["node_features"],
-        test_split["node_features"] if test_split is not None else None,
+        test_nodes=test_split["node_features"],
     )
     train_split["node_features"] = train_nodes
-    val_split["node_features"] = val_nodes
-    if test_split is not None:
-        test_split["node_features"] = test_nodes
+    test_split["node_features"] = test_nodes
 
     feature_payload = {
         "input_mode": "graph",
         "train": train_split,
-        "val": val_split,
+        "val": None,
         "test": test_split,
         "scaler": None,
     }
@@ -302,13 +276,31 @@ def run_latent_braingnn_classifier(
     seed = int(training_config["training"]["reproducibility"]["seed"])
     _set_seed(seed)
 
-    _emit_classifier_progress("Creating BrainGNN classifier runtime")
+    _emit_classifier_progress("Selecting BrainGNN epochs with 5-fold training-set CV")
+    cv_feature_payload = dict(feature_payload)
+    cv_feature_payload["test"] = None
+    cv_summary = run_torch_cross_validation_epoch_search(
+        model_factory=lambda: create_model(
+            model_config,
+            feature_metadata["input_shape"],
+            len(label_payload["classes"]),
+        )["model"],
+        family="torch_graph",
+        feature_payload=cv_feature_payload,
+        label_payload=label_payload,
+        training_config=training_config,
+        device=torch.device(device),
+    )
+    training_config["training"]["num_epochs"] = int(cv_summary["selected_num_epochs"])
+    _set_seed(seed)
+
+    _emit_classifier_progress("Creating final BrainGNN classifier runtime")
     runtime = create_model(model_config, feature_metadata["input_shape"], len(label_payload["classes"]))
     _emit_classifier_progress(
         f"Created runtime: family={runtime['family']} classes={len(label_payload['classes'])}"
     )
     _emit_classifier_progress("Starting classifier optimization")
-    model, history, train_metrics, val_metrics = train_torch_model(
+    model, history, train_metrics, _ = train_torch_model(
         runtime["model"],
         runtime["family"],
         feature_payload,
@@ -317,27 +309,24 @@ def run_latent_braingnn_classifier(
         torch.device(device),
     )
 
-    test_metrics = None
-    test_predictions = None
-    test_probabilities = None
-    if test_split is not None and label_payload["test"] is not None and len(label_payload["test"]) > 0:
-        _emit_classifier_progress("Running classifier predictions on test split")
-        test_predictions, test_probabilities = _predict_graph_model(model, test_split, torch.device(device))
-        test_metrics = compute_classification_metrics(
-            label_payload["test"],
-            test_predictions,
-            label_payload["classes"],
-            y_proba=test_probabilities,
-        )
+    _emit_classifier_progress("Running classifier predictions on test split")
+    test_predictions, test_probabilities = _predict_graph_model(model, test_split, torch.device(device))
+    test_metrics = compute_classification_metrics(
+        label_payload["test"],
+        test_predictions,
+        label_payload["classes"],
+        y_proba=test_probabilities,
+    )
     _emit_classifier_progress("Latent BrainGNN classifier finished")
 
     return {
         "model": model,
         "history": history,
         "train_metrics": train_metrics,
-        "val_metrics": val_metrics,
+        "val_metrics": None,
         "test_metrics": test_metrics,
         "test_predictions": test_predictions,
         "test_probabilities": test_probabilities,
         "label_payload": label_payload,
+        "cross_validation": cv_summary,
     }
