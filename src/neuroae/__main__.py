@@ -722,6 +722,10 @@ def _run_cross_validation_epoch_search(loaders, data_config, model_config, train
             "best_epoch": int(best_epoch),
             "selected_val_loss": selection["loss"] if selection is not None else None,
             "selected_val_swfcd_pearson": selection["swfcd_pearson"] if selection is not None else None,
+            "selected_head_loss": selection.get("head_loss") if selection is not None else None,
+            # Retain the complete per-epoch train/validation metrics for this
+            # AE CV fold. These are copied into the experiment history below.
+            "history": deepcopy(history),
         }
         fold_summaries.append(fold_summary)
         print(
@@ -1206,6 +1210,16 @@ def run_training(
         vectorize_val_reference=training_config['training'].get('vectorize_val_reference', False),
         compute_swfcd_during_training=training_config['training'].get('compute_swfcd_during_training'),
     )
+    cross_validation = extra_metadata.get("cross_validation") if isinstance(extra_metadata, dict) else None
+    if isinstance(cross_validation, dict):
+        # Keep CV traces in history.json, rather than only as compact metadata,
+        # so every AE fold's per-epoch validation metrics remain inspectable.
+        history = deepcopy(history)
+        history["cross_validation"] = {
+            "selection_metric": cross_validation.get("selection_metric"),
+            "selected_num_epochs": cross_validation.get("selected_num_epochs"),
+            "folds": deepcopy(cross_validation.get("folds", [])),
+        }
     if dry_run:
         print(
             "Dry run training summary: "
@@ -1231,7 +1245,15 @@ def run_training(
         },
     }
     if isinstance(extra_metadata, dict):
-        experiment_metadata.update(deepcopy(extra_metadata))
+        metadata_extra = deepcopy(extra_metadata)
+        metadata_cv = metadata_extra.get("cross_validation")
+        if isinstance(metadata_cv, dict):
+            # Per-epoch fold traces belong exclusively in history.json. Keep
+            # metadata.json compact and limited to CV selection summaries.
+            for fold in metadata_cv.get("folds", []):
+                if isinstance(fold, dict):
+                    fold.pop("history", None)
+        experiment_metadata.update(metadata_extra)
     tracked_experiment_id = tracker.register_experiment(
         metadata=experiment_metadata,
         history=history,
