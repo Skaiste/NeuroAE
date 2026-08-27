@@ -160,6 +160,9 @@ def run_ae_experiment_sweep(data_dir, device, ae_data_config, ae_model_config, a
         raise ValueError("ae_exp needs at least two classes in the AE training split.")
     split_iter, stratified = _make_cross_validation_splits(train_dataset, folds, int(ae_training_config["training"].get("reproducibility", {}).get("seed", 42)))
     split_indices = list(split_iter)
+    # sklearn/NumPy may return np.bool_ here, which cannot be written by the
+    # training tracker JSON serializer.
+    stratified = bool(stratified)
     LOGGER.info("ae_exp: %d fold %s CV using only AE training samples", folds, "stratified" if stratified else "KFold")
 
     candidates = []
