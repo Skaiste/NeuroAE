@@ -3,7 +3,6 @@ import torch.optim as optim
 import torch.nn.functional as F
 import numpy as np
 
-from .metrics.classifier_accuracy import run_latent_braingnn_classifier
 from .metrics.swfcd_torch import SwFCD
 
 
@@ -151,6 +150,27 @@ def _joint_metric_score(swfcd, logreg, swfcd_weight=0.5, logreg_weight=0.5):
     return score / total_weight
 
 
+def _head_loss_from_metrics(metrics, configured_key=None):
+    """Return the validation loss produced by a supervised AE head.
+
+    A classification head takes precedence.  Prediction-head losses are
+    otherwise averaged so models with multiple biological targets use one
+    comparable checkpoint signal.
+    """
+    if configured_key:
+        value = metrics.get(configured_key)
+        return float(value) if _is_finite_number(value) else float("nan")
+    if _is_finite_number(metrics.get("cls_loss")):
+        return float(metrics["cls_loss"])
+    excluded = {"loss", "recon_loss", "fc_loss", "swfc_variability_loss", "derivative_loss"}
+    values = [
+        float(value)
+        for name, value in metrics.items()
+        if name.endswith("_loss") and name not in excluded and _is_finite_number(value)
+    ]
+    return float(np.mean(values)) if values else float("nan")
+
+
 def select_best_checkpoint(
     history,
     selection_metric="swfcd_loss_joint",
@@ -160,51 +180,54 @@ def select_best_checkpoint(
 ):
     val_losses = _metric_values(history, "val", "loss")
     val_swfcd = _metric_values(history, "val", "swfcd_pearson")
-    val_macro_f1 = _metric_values(history, "val", "macro_f1")
-    num_epochs = max(len(val_losses), len(val_swfcd), len(val_macro_f1))
+    val_head_loss = _metric_values(history, "val", "head_loss")
+    num_epochs = max(len(val_losses), len(val_swfcd), len(val_head_loss))
     if num_epochs == 0:
         return None
 
     def _epoch_metrics(idx):
         loss = float(val_losses[idx]) if idx < len(val_losses) else float("nan")
         swfcd = float(val_swfcd[idx]) if idx < len(val_swfcd) else float("nan")
-        macro_f1 = float(val_macro_f1[idx]) if idx < len(val_macro_f1) else float("nan")
+        head_loss = float(val_head_loss[idx]) if idx < len(val_head_loss) else float("nan")
         joint_score = _joint_metric_score(swfcd, float("nan"), swfcd_weight=swfcd_weight, logreg_weight=classifier_weight)
-        return loss, swfcd, macro_f1, joint_score
+        return loss, swfcd, head_loss, joint_score
 
     best_idx = 0
-    best_loss, best_swfcd, best_macro_f1, best_joint_score = _epoch_metrics(0)
+    best_loss, best_swfcd, best_head_loss, best_joint_score = _epoch_metrics(0)
 
-    if selection_metric == "swfcd_macro_f1_guarded":
-        # This is deliberately sequential: a drop of >0.01 in SwFCD or a
-        # failure to improve macro-F1 selects the *previous* epoch.  The
-        # training loop still applies patience/warmup before it stops.
+    if selection_metric == "swfcd_head_loss_guarded":
+        # This is deliberately sequential. SwFCD is the primary signal: an
+        # improvement accepts the epoch regardless of head loss. Head loss is
+        # used only when SwFCD is flat (inside its 0.01 guard band). A larger
+        # SwFCD drop selects the preceding epoch.
         for idx in range(1, num_epochs):
-            _, previous_swfcd, previous_macro_f1, _ = _epoch_metrics(idx - 1)
-            loss, swfcd, macro_f1, joint_score = _epoch_metrics(idx)
+            _, previous_swfcd, previous_head_loss, _ = _epoch_metrics(idx - 1)
+            loss, swfcd, head_loss, joint_score = _epoch_metrics(idx)
             swfcd_dropped = (
                 _is_finite_number(swfcd)
                 and _is_finite_number(previous_swfcd)
                 and swfcd < (previous_swfcd - 0.01)
             )
-            macro_f1_improved = _compare_higher(macro_f1, previous_macro_f1, min_delta=min_delta) > 0
-            if swfcd_dropped or not macro_f1_improved:
+            swfcd_improved = _compare_higher(swfcd, previous_swfcd, min_delta=min_delta) > 0
+            head_loss_improved = _compare_lower(head_loss, previous_head_loss, min_delta=min_delta) > 0
+            if swfcd_dropped:
                 break
-            best_idx = idx
-            best_loss, best_swfcd, best_macro_f1, best_joint_score = loss, swfcd, macro_f1, joint_score
+            if swfcd_improved or head_loss_improved:
+                best_idx = idx
+                best_loss, best_swfcd, best_head_loss, best_joint_score = loss, swfcd, head_loss, joint_score
 
         return {
             "best_index": best_idx,
             "best_epoch": best_idx + 1,
             "loss": best_loss,
             "swfcd_pearson": best_swfcd,
-            "macro_f1": best_macro_f1,
+            "head_loss": best_head_loss,
             "joint_score": best_joint_score,
             "selection_metric": selection_metric,
         }
 
     for idx in range(1, num_epochs):
-        loss, swfcd, macro_f1, joint_score = _epoch_metrics(idx)
+        loss, swfcd, head_loss, joint_score = _epoch_metrics(idx)
 
         if selection_metric in {"swfcd_classifier_joint", "swfcd_logreg_joint"}:
             comparisons = (
@@ -226,14 +249,14 @@ def select_best_checkpoint(
 
         if is_better:
             best_idx = idx
-            best_loss, best_swfcd, best_macro_f1, best_joint_score = loss, swfcd, macro_f1, joint_score
+            best_loss, best_swfcd, best_head_loss, best_joint_score = loss, swfcd, head_loss, joint_score
 
     return {
         "best_index": best_idx,
         "best_epoch": best_idx + 1,
         "loss": best_loss,
         "swfcd_pearson": best_swfcd,
-        "macro_f1": best_macro_f1,
+        "head_loss": best_head_loss,
         "joint_score": best_joint_score,
         "selection_metric": selection_metric,
     }
@@ -375,10 +398,10 @@ def train_vae(
             "because classifier metrics are evaluation-only. Use 'swfcd_loss_joint', "
             "'swfcd', or 'val_loss' instead."
         )
-    compute_macro_f1_during_training = selection_metric == "swfcd_macro_f1_guarded"
+    compute_head_loss_during_training = selection_metric == "swfcd_head_loss_guarded"
     if compute_swfcd_during_training is None:
         compute_swfcd_during_training = selection_metric in {
-            "swfcd_loss_joint", "swfcd_joint", "swfcd", "swfcd_pearson", "swfcd_macro_f1_guarded"
+            "swfcd_loss_joint", "swfcd_joint", "swfcd", "swfcd_pearson", "swfcd_head_loss_guarded"
         }
     if val_loader is None:
         compute_swfcd_during_training = False
@@ -508,7 +531,7 @@ def train_vae(
             current_metrics["val"] = {p: val_loss_params[p] / num_val_batches for p in val_loss_params}
             current_metrics["val"]["swfcd_pearson"] = history["val"]["swfcd_pearson"][-1]
 
-            if compute_macro_f1_during_training:
+            if compute_head_loss_during_training:
                 previous_swfcd = (
                     history["val"]["swfcd_pearson"][-2]
                     if len(history["val"]["swfcd_pearson"]) > 1
@@ -520,22 +543,22 @@ def train_vae(
                     and swfcd_pearson < (previous_swfcd - 0.01)
                 )
                 if swfcd_dropped:
-                    macro_f1 = float("nan")
-                    val_metric_str += " | Val macro_f1: skipped (SwFCD drop > 0.01)"
+                    head_loss = float("nan")
+                    val_metric_str += " | Val head_loss: skipped (SwFCD drop > 0.01)"
                 else:
-                    train_latents, train_labels = _collect_latents_and_labels(
-                        model, train_loader, device, use_pred_heads, train_valid_last_dim
+                    head_loss = _head_loss_from_metrics(
+                        current_metrics["val"],
+                        configured_key=getattr(model, "loss_fn_params", {}).get("checkpoint_head_loss_key"),
                     )
-                    val_latents, val_labels = _collect_latents_and_labels(
-                        model, val_loader, device, use_pred_heads, val_valid_last_dim
-                    )
-                    classifier_result = run_latent_braingnn_classifier(
-                        train_latents, train_labels, val_latents, val_labels, device=device
-                    )
-                    macro_f1 = float(classifier_result["test_metrics"].get("macro_f1", float("nan")))
-                    val_metric_str += f" | Val macro_f1: {macro_f1:.4f}"
-                _append_history_metric(history, "val", "macro_f1", macro_f1)
-                current_metrics["val"]["macro_f1"] = macro_f1
+                    if not _is_finite_number(head_loss):
+                        raise ValueError(
+                            "swfcd_head_loss_guarded requires a supervised head loss in validation metrics. "
+                            "Use a model with cls_loss or prediction-head losses, or set "
+                            "loss_params.checkpoint_head_loss_key."
+                        )
+                    val_metric_str += f" | Val head_loss: {head_loss:.4f}"
+                _append_history_metric(history, "val", "head_loss", head_loss)
+                current_metrics["val"]["head_loss"] = head_loss
 
         print(
             f"Epoch {epoch}/{num_epochs} | "
@@ -551,7 +574,7 @@ def train_vae(
             # The guarded metric is chronological: it must compare the
             # current epoch to the actual preceding epoch, not only to the
             # best checkpoint seen so far.
-            tmp_history = history if selection_metric == "swfcd_macro_f1_guarded" else {
+            tmp_history = history if selection_metric == "swfcd_head_loss_guarded" else {
                 "val": {
                     "loss": [
                         best_model_losses["val"].get("loss", float("nan")),
@@ -561,9 +584,9 @@ def train_vae(
                         best_model_losses["val"].get("swfcd_pearson", float("nan")),
                         current_metrics["val"].get("swfcd_pearson", float("nan")),
                     ],
-                    "macro_f1": [
-                        best_model_losses["val"].get("macro_f1", float("nan")),
-                        current_metrics["val"].get("macro_f1", float("nan")),
+                    "head_loss": [
+                        best_model_losses["val"].get("head_loss", float("nan")),
+                        current_metrics["val"].get("head_loss", float("nan")),
                     ],
                 }
             }
@@ -574,7 +597,7 @@ def train_vae(
             )
             latest_index = len(history["val"].get("loss", [])) - 1
             improved = selection is not None and selection["best_index"] == (
-                latest_index if selection_metric == "swfcd_macro_f1_guarded" else 1
+                latest_index if selection_metric == "swfcd_head_loss_guarded" else 1
             )
 
         if improved:
