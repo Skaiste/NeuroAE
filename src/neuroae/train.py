@@ -2,6 +2,7 @@ import torch
 import torch.optim as optim
 import torch.nn.functional as F
 import numpy as np
+from sklearn.metrics import f1_score
 
 from .metrics.swfcd_torch import SwFCD
 
@@ -171,6 +172,15 @@ def _head_loss_from_metrics(metrics, configured_key=None):
     return float(np.mean(values)) if values else float("nan")
 
 
+def _extract_cls_logits(model_out):
+    """Extract logits from LAEClsHead/LAEPredClsHeads output tuples."""
+    if isinstance(model_out, (tuple, list)) and len(model_out) >= 3:
+        candidate = model_out[-2]
+        if torch.is_tensor(candidate) and candidate.ndim == 2:
+            return candidate
+    return None
+
+
 def select_best_checkpoint(
     history,
     selection_metric="swfcd_loss_joint",
@@ -181,7 +191,8 @@ def select_best_checkpoint(
     val_losses = _metric_values(history, "val", "loss")
     val_swfcd = _metric_values(history, "val", "swfcd_pearson")
     val_head_loss = _metric_values(history, "val", "head_loss")
-    num_epochs = max(len(val_losses), len(val_swfcd), len(val_head_loss))
+    val_cls_macro_f1 = _metric_values(history, "val", "cls_macro_f1")
+    num_epochs = max(len(val_losses), len(val_swfcd), len(val_head_loss), len(val_cls_macro_f1))
     if num_epochs == 0:
         return None
 
@@ -189,11 +200,34 @@ def select_best_checkpoint(
         loss = float(val_losses[idx]) if idx < len(val_losses) else float("nan")
         swfcd = float(val_swfcd[idx]) if idx < len(val_swfcd) else float("nan")
         head_loss = float(val_head_loss[idx]) if idx < len(val_head_loss) else float("nan")
-        joint_score = _joint_metric_score(swfcd, float("nan"), swfcd_weight=swfcd_weight, logreg_weight=classifier_weight)
-        return loss, swfcd, head_loss, joint_score
+        cls_macro_f1 = float(val_cls_macro_f1[idx]) if idx < len(val_cls_macro_f1) else float("nan")
+        joint_score = (
+            swfcd + cls_macro_f1
+            if _is_finite_number(swfcd) and _is_finite_number(cls_macro_f1)
+            else float("nan")
+        )
+        return loss, swfcd, head_loss, cls_macro_f1, joint_score
 
     best_idx = 0
-    best_loss, best_swfcd, best_head_loss, best_joint_score = _epoch_metrics(0)
+    best_loss, best_swfcd, best_head_loss, best_cls_macro_f1, best_joint_score = _epoch_metrics(0)
+
+    if selection_metric == "swfcd_cls_macro_f1_joint":
+        for idx in range(1, num_epochs):
+            loss, swfcd, head_loss, cls_macro_f1, joint_score = _epoch_metrics(idx)
+            if _compare_higher(joint_score, best_joint_score, min_delta=min_delta) > 0:
+                best_idx = idx
+                best_loss, best_swfcd = loss, swfcd
+                best_head_loss, best_cls_macro_f1, best_joint_score = head_loss, cls_macro_f1, joint_score
+        return {
+            "best_index": best_idx,
+            "best_epoch": best_idx + 1,
+            "loss": best_loss,
+            "swfcd_pearson": best_swfcd,
+            "head_loss": best_head_loss,
+            "cls_macro_f1": best_cls_macro_f1,
+            "joint_score": best_joint_score,
+            "selection_metric": selection_metric,
+        }
 
     if selection_metric == "swfcd_head_loss_guarded":
         # This is deliberately sequential. SwFCD is the primary signal: an
@@ -201,8 +235,8 @@ def select_best_checkpoint(
         # used only when SwFCD is flat (inside its 0.01 guard band). A larger
         # SwFCD drop selects the preceding epoch.
         for idx in range(1, num_epochs):
-            _, previous_swfcd, previous_head_loss, _ = _epoch_metrics(idx - 1)
-            loss, swfcd, head_loss, joint_score = _epoch_metrics(idx)
+            _, previous_swfcd, previous_head_loss, _, _ = _epoch_metrics(idx - 1)
+            loss, swfcd, head_loss, _, joint_score = _epoch_metrics(idx)
             swfcd_dropped = (
                 _is_finite_number(swfcd)
                 and _is_finite_number(previous_swfcd)
@@ -222,12 +256,13 @@ def select_best_checkpoint(
             "loss": best_loss,
             "swfcd_pearson": best_swfcd,
             "head_loss": best_head_loss,
+            "cls_macro_f1": best_cls_macro_f1,
             "joint_score": best_joint_score,
             "selection_metric": selection_metric,
         }
 
     for idx in range(1, num_epochs):
-        loss, swfcd, head_loss, joint_score = _epoch_metrics(idx)
+        loss, swfcd, head_loss, cls_macro_f1, joint_score = _epoch_metrics(idx)
 
         if selection_metric in {"swfcd_classifier_joint", "swfcd_logreg_joint"}:
             comparisons = (
@@ -249,7 +284,7 @@ def select_best_checkpoint(
 
         if is_better:
             best_idx = idx
-            best_loss, best_swfcd, best_head_loss, best_joint_score = loss, swfcd, head_loss, joint_score
+            best_loss, best_swfcd, best_head_loss, best_cls_macro_f1, best_joint_score = loss, swfcd, head_loss, cls_macro_f1, joint_score
 
     return {
         "best_index": best_idx,
@@ -257,6 +292,7 @@ def select_best_checkpoint(
         "loss": best_loss,
         "swfcd_pearson": best_swfcd,
         "head_loss": best_head_loss,
+        "cls_macro_f1": best_cls_macro_f1,
         "joint_score": best_joint_score,
         "selection_metric": selection_metric,
     }
@@ -399,9 +435,12 @@ def train_vae(
             "'swfcd', or 'val_loss' instead."
         )
     compute_head_loss_during_training = selection_metric == "swfcd_head_loss_guarded"
+    compute_cls_macro_f1_during_training = selection_metric == "swfcd_cls_macro_f1_joint"
+    if compute_cls_macro_f1_during_training and not use_cls_head:
+        raise ValueError("swfcd_cls_macro_f1_joint requires a model with a classification auxiliary head.")
     if compute_swfcd_during_training is None:
         compute_swfcd_during_training = selection_metric in {
-            "swfcd_loss_joint", "swfcd_joint", "swfcd", "swfcd_pearson", "swfcd_head_loss_guarded"
+            "swfcd_loss_joint", "swfcd_joint", "swfcd", "swfcd_pearson", "swfcd_head_loss_guarded", "swfcd_cls_macro_f1_joint"
         }
     if val_loader is None:
         compute_swfcd_during_training = False
@@ -480,6 +519,8 @@ def train_vae(
             val_recons = [] if val_reference_vec is not None else None
             swfcd_pearson_sum = 0.0
             swfcd_pearson_count = 0
+            val_cls_targets = []
+            val_cls_predictions = []
             with torch.no_grad():
                 for batch_idx, (data, labels) in enumerate(val_loader):
                     x = data.to(device)
@@ -499,6 +540,14 @@ def train_vae(
                         if p not in val_loss_params:
                             val_loss_params[p] = 0
                         val_loss_params[p] += loss[p]
+
+                    if compute_cls_macro_f1_during_training:
+                        logits = _extract_cls_logits(output)
+                        if logits is None:
+                            raise ValueError("Could not extract classification logits from the auxiliary-head model output.")
+                        targets = _class_targets(labels)
+                        val_cls_targets.extend(targets.detach().cpu().tolist())
+                        val_cls_predictions.extend(torch.argmax(logits, dim=1).detach().cpu().tolist())
 
                     recon_x, _ = _extract_model_outputs(output)
                     recon_x_detached = recon_x.detach()
@@ -530,6 +579,21 @@ def train_vae(
             )
             current_metrics["val"] = {p: val_loss_params[p] / num_val_batches for p in val_loss_params}
             current_metrics["val"]["swfcd_pearson"] = history["val"]["swfcd_pearson"][-1]
+
+            if compute_cls_macro_f1_during_training:
+                cls_macro_f1 = float(f1_score(
+                    val_cls_targets,
+                    val_cls_predictions,
+                    labels=list(range(len(class_to_idx))),
+                    average="macro",
+                    zero_division=0,
+                ))
+                joint_score = swfcd_pearson + cls_macro_f1 if _is_finite_number(swfcd_pearson) else float("nan")
+                _append_history_metric(history, "val", "cls_macro_f1", cls_macro_f1)
+                _append_history_metric(history, "val", "swfcd_cls_macro_f1_joint", joint_score)
+                current_metrics["val"]["cls_macro_f1"] = cls_macro_f1
+                current_metrics["val"]["swfcd_cls_macro_f1_joint"] = joint_score
+                val_metric_str += f" | Val cls_macro_f1: {cls_macro_f1:.4f} | Val joint: {joint_score:.4f}"
 
             if compute_head_loss_during_training:
                 previous_swfcd = (
@@ -587,6 +651,10 @@ def train_vae(
                     "head_loss": [
                         best_model_losses["val"].get("head_loss", float("nan")),
                         current_metrics["val"].get("head_loss", float("nan")),
+                    ],
+                    "cls_macro_f1": [
+                        best_model_losses["val"].get("cls_macro_f1", float("nan")),
+                        current_metrics["val"].get("cls_macro_f1", float("nan")),
                     ],
                 }
             }

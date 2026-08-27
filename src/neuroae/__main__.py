@@ -553,6 +553,7 @@ def _build_training_summary(history, mse_pca, checkpoint_selection_metric="val_l
     selected_val_loss = None
     selected_swfcd_pearson = None
     selected_head_loss = None
+    selected_cls_macro_f1 = None
     selected_joint_score = None
     best_val = None
     significance = None
@@ -563,6 +564,7 @@ def _build_training_summary(history, mse_pca, checkpoint_selection_metric="val_l
         selected_val_loss = selection["loss"]
         selected_swfcd_pearson = selection["swfcd_pearson"]
         selected_head_loss = selection.get("head_loss")
+        selected_cls_macro_f1 = selection.get("cls_macro_f1")
         selected_joint_score = selection.get("joint_score")
 
     if val_losses:
@@ -581,6 +583,7 @@ def _build_training_summary(history, mse_pca, checkpoint_selection_metric="val_l
         'selected_val_loss': selected_val_loss,
         'selected_swfcd_pearson': selected_swfcd_pearson,
         'selected_head_loss': selected_head_loss,
+        'selected_cls_macro_f1': selected_cls_macro_f1,
         'selected_joint_score': selected_joint_score,
         'checkpoint_selection_metric': checkpoint_selection_metric,
         'val_pca_mse': mse_pca,
