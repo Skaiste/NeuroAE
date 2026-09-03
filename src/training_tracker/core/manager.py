@@ -132,7 +132,6 @@ class TrainingResultsManager:
         self,
         experiment_id: str,
         model_metrics: Optional[dict] = None,
-        pca_metrics: Optional[dict] = None,
         evaluation: Optional[dict] = None,
     ) -> None:
         """Store evaluation metrics on an existing experiment metadata record."""
@@ -144,7 +143,6 @@ class TrainingResultsManager:
         else:
             evaluation_payload = {
                 "model": deepcopy(model_metrics) if isinstance(model_metrics, dict) else {},
-                "pca": deepcopy(pca_metrics) if isinstance(pca_metrics, dict) else None,
             }
         evaluation_payload["updated_at"] = self._now_iso()
         metadata["evaluation"] = evaluation_payload

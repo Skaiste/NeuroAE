@@ -554,7 +554,6 @@ def _build_training_summary(history, mse_pca, checkpoint_selection_metric="val_l
     selected_swfcd_pearson = None
     selected_head_loss = None
     selected_cls_macro_f1 = None
-    selected_joint_score = None
     best_val = None
     significance = None
     from .train import select_best_checkpoint
@@ -565,7 +564,6 @@ def _build_training_summary(history, mse_pca, checkpoint_selection_metric="val_l
         selected_swfcd_pearson = selection["swfcd_pearson"]
         selected_head_loss = selection.get("head_loss")
         selected_cls_macro_f1 = selection.get("cls_macro_f1")
-        selected_joint_score = selection.get("joint_score")
 
     if val_losses:
         best_index = min(range(len(val_losses)), key=lambda idx: val_losses[idx])
@@ -577,22 +575,23 @@ def _build_training_summary(history, mse_pca, checkpoint_selection_metric="val_l
         else:
             significance = None
 
-    return {
+    summary = {
         'num_epochs': max(len(train_losses), len(val_losses)),
         'best_epoch': selected_epoch,
         'selected_val_loss': selected_val_loss,
-        'selected_swfcd_pearson': selected_swfcd_pearson,
         'selected_head_loss': selected_head_loss,
         'selected_cls_macro_f1': selected_cls_macro_f1,
-        'selected_joint_score': selected_joint_score,
         'checkpoint_selection_metric': checkpoint_selection_metric,
         'val_pca_mse': mse_pca,
         'best_val_loss': best_val,
-        'best_val_swfcd_pearson': _best_finite(val_swfcd, maximize=True),
         'significance': significance,
         'final_train_loss': float(train_losses[-1]) if train_losses else None,
         'final_val_loss': float(val_losses[-1]) if val_losses else None,
     }
+    if val_swfcd:
+        summary['selected_swfcd_pearson'] = selected_swfcd_pearson
+        summary['best_val_swfcd_pearson'] = _best_finite(val_swfcd, maximize=True)
+    return summary
 
 
 def _seed_everything(seed):
@@ -724,17 +723,24 @@ def _run_cross_validation_epoch_search(loaders, data_config, model_config, train
             "val_samples": int(len(val_indices)),
             "best_epoch": int(best_epoch),
             "selected_val_loss": selection["loss"] if selection is not None else None,
-            "selected_val_swfcd_pearson": selection["swfcd_pearson"] if selection is not None else None,
             "selected_head_loss": selection.get("head_loss") if selection is not None else None,
             # Retain the complete per-epoch train/validation metrics for this
             # AE CV fold. These are copied into the experiment history below.
             "history": deepcopy(history),
         }
+        if history.get("val", {}).get("swfcd_pearson"):
+            fold_summary["selected_val_swfcd_pearson"] = (
+                selection["swfcd_pearson"] if selection is not None else None
+            )
         fold_summaries.append(fold_summary)
+        swfcd_summary = (
+            f", val_swfcd_pearson={fold_summary['selected_val_swfcd_pearson']}"
+            if "selected_val_swfcd_pearson" in fold_summary
+            else ""
+        )
         print(
             f"Cross-validation fold {fold_idx} selected epoch {best_epoch} "
-            f"(val_loss={fold_summary['selected_val_loss']}, "
-            f"val_swfcd_pearson={fold_summary['selected_val_swfcd_pearson']})",
+            f"(val_loss={fold_summary['selected_val_loss']}{swfcd_summary})",
             flush=True,
         )
 
@@ -1201,7 +1207,6 @@ def run_training(
         device=device,
         save_dir=training_config['training']['save_dir'],
         name=experiment_id or f"dry_run_{model_name.lower()}",
-        pca=pca,
         noise=training_config['training'].get("noise", None),
         use_pred_heads=use_pred_heads,
         use_cls_head=use_cls_head,

@@ -225,7 +225,6 @@ def select_best_checkpoint(
             "swfcd_pearson": best_swfcd,
             "head_loss": best_head_loss,
             "cls_macro_f1": best_cls_macro_f1,
-            "joint_score": best_joint_score,
             "selection_metric": selection_metric,
         }
 
@@ -257,7 +256,6 @@ def select_best_checkpoint(
             "swfcd_pearson": best_swfcd,
             "head_loss": best_head_loss,
             "cls_macro_f1": best_cls_macro_f1,
-            "joint_score": best_joint_score,
             "selection_metric": selection_metric,
         }
 
@@ -293,7 +291,6 @@ def select_best_checkpoint(
         "swfcd_pearson": best_swfcd,
         "head_loss": best_head_loss,
         "cls_macro_f1": best_cls_macro_f1,
-        "joint_score": best_joint_score,
         "selection_metric": selection_metric,
     }
 
@@ -565,20 +562,22 @@ def train_vae(
                 _append_history_metric(history, 'val', p, val_loss_params[p] / num_val_batches)
 
             swfcd_pearson = float("nan")
-            if val_reference_vec is not None and val_recons:
-                swfcd_results = val_swfcd.apply(None, torch.cat(val_recons, dim=0), x_vec=val_reference_vec)
-                if swfcd_results is not None:
-                    swfcd_pearson = float(swfcd_results["pearson"].detach().cpu().item())
-            elif swfcd_pearson_count > 0:
-                swfcd_pearson = swfcd_pearson_sum / swfcd_pearson_count
-            _append_history_metric(history, 'val', 'swfcd_pearson', swfcd_pearson)
-            val_metric_str += (
-                f" | Val swfcd_pearson: {swfcd_pearson:.4f}"
-                if np.isfinite(swfcd_pearson)
-                else " | Val swfcd_pearson: nan"
-            )
+            if compute_swfcd_during_training:
+                if val_reference_vec is not None and val_recons:
+                    swfcd_results = val_swfcd.apply(None, torch.cat(val_recons, dim=0), x_vec=val_reference_vec)
+                    if swfcd_results is not None:
+                        swfcd_pearson = float(swfcd_results["pearson"].detach().cpu().item())
+                elif swfcd_pearson_count > 0:
+                    swfcd_pearson = swfcd_pearson_sum / swfcd_pearson_count
+                _append_history_metric(history, 'val', 'swfcd_pearson', swfcd_pearson)
+                val_metric_str += (
+                    f" | Val swfcd_pearson: {swfcd_pearson:.4f}"
+                    if np.isfinite(swfcd_pearson)
+                    else " | Val swfcd_pearson: nan"
+                )
             current_metrics["val"] = {p: val_loss_params[p] / num_val_batches for p in val_loss_params}
-            current_metrics["val"]["swfcd_pearson"] = history["val"]["swfcd_pearson"][-1]
+            if compute_swfcd_during_training:
+                current_metrics["val"]["swfcd_pearson"] = history["val"]["swfcd_pearson"][-1]
 
             if compute_cls_macro_f1_during_training:
                 cls_macro_f1 = float(f1_score(
@@ -590,10 +589,8 @@ def train_vae(
                 ))
                 joint_score = swfcd_pearson + cls_macro_f1 if _is_finite_number(swfcd_pearson) else float("nan")
                 _append_history_metric(history, "val", "cls_macro_f1", cls_macro_f1)
-                _append_history_metric(history, "val", "swfcd_cls_macro_f1_joint", joint_score)
                 current_metrics["val"]["cls_macro_f1"] = cls_macro_f1
-                current_metrics["val"]["swfcd_cls_macro_f1_joint"] = joint_score
-                val_metric_str += f" | Val cls_macro_f1: {cls_macro_f1:.4f} | Val joint: {joint_score:.4f}"
+                val_metric_str += f" | Val cls_macro_f1: {cls_macro_f1:.4f}"
 
             if compute_head_loss_during_training:
                 previous_swfcd = (

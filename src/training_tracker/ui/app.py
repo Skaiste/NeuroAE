@@ -144,6 +144,41 @@ def _history_to_frame(history: dict) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _cross_validation_metrics(history: dict) -> dict[str, dict[str, dict[str, list]]]:
+    """Return per-fold training and validation traces keyed by metric name.
+
+    Cross-validation epoch selection stores each fold's complete history below
+    ``cross_validation.folds[*].history``.  Keeping this extraction separate
+    from the top-level history lets final-training traces and CV validation
+    traces be plotted together without treating folds as consecutive epochs.
+    """
+    cross_validation = history.get("cross_validation")
+    if not isinstance(cross_validation, dict):
+        return {}
+
+    fold_metrics: dict[str, dict[str, dict[str, list]]] = {}
+    folds = cross_validation.get("folds")
+    if not isinstance(folds, list):
+        return fold_metrics
+
+    for fold_index, fold_payload in enumerate(folds, start=1):
+        if not isinstance(fold_payload, dict):
+            continue
+        fold_number = fold_payload.get("fold", fold_index)
+        fold_history = fold_payload.get("history")
+        if not isinstance(fold_history, dict):
+            continue
+        fold_label = f"Fold {fold_number}"
+        for split, split_label in (("train", "Training"), ("val", "Validation")):
+            split_metrics = fold_history.get(split)
+            if not isinstance(split_metrics, dict):
+                continue
+            for metric_name, values in split_metrics.items():
+                if isinstance(values, list):
+                    fold_metrics.setdefault(str(metric_name), {}).setdefault(fold_label, {})[split_label] = values
+    return fold_metrics
+
+
 def _first_existing(columns: list[str], candidates: list[str]) -> str | None:
     for candidate in candidates:
         if candidate in columns:
@@ -170,6 +205,7 @@ def _render_pair_plot(
     train_candidates: list[str],
     val_candidates: list[str],
     pca_reference: float | None = None,
+    cross_validation_values: dict[str, dict[str, list]] | None = None,
 ) -> None:
     cols = list(history_df.columns)
     train_col = _first_existing(cols, train_candidates)
@@ -179,24 +215,59 @@ def _render_pair_plot(
         st.markdown(f"**{title}**")
         train_available = _column_has_available_values(history_df, train_col)
         val_available = _column_has_available_values(history_df, val_col)
-        if not train_available and not val_available:
+        available_cross_validation = {
+            fold: {
+                split: values
+                for split, values in split_values.items()
+                if any(_to_float(value) is not None for value in values)
+            }
+            for fold, split_values in (cross_validation_values or {}).items()
+        }
+        available_cross_validation = {
+            fold: split_values for fold, split_values in available_cross_validation.items() if split_values
+        }
+        if not train_available and not val_available and not available_cross_validation:
             st.info("Metric not available.")
             return
 
-        chart_df = pd.DataFrame({"epoch": history_df["epoch"]})
-        colors: list[str] = []
+        plot_rows = []
         if train_available and train_col is not None:
-            chart_df["train"] = history_df[train_col].map(_to_float)
-            colors.append("#1f77b4")
+            plot_rows.extend(
+                {"epoch": epoch, "value": _to_float(value), "run": "Final run", "split": "Training"}
+                for epoch, value in enumerate(history_df[train_col], start=1)
+                if _to_float(value) is not None
+            )
         if val_available and val_col is not None:
-            chart_df["val"] = history_df[val_col].map(_to_float)
-            colors.append("#ff7f0e")
+            plot_rows.extend(
+                {"epoch": epoch, "value": _to_float(value), "run": "Final run", "split": "Validation"}
+                for epoch, value in enumerate(history_df[val_col], start=1)
+                if _to_float(value) is not None
+            )
+        for fold, split_values in available_cross_validation.items():
+            for split, values in split_values.items():
+                plot_rows.extend(
+                    {"epoch": epoch, "value": _to_float(value), "run": fold, "split": split}
+                    for epoch, value in enumerate(values, start=1)
+                    if _to_float(value) is not None
+                )
 
-        chart_df = chart_df.set_index("epoch")
-        if pca_reference is not None and val_available:
-            chart_df["PCA MSE"] = float(pca_reference)
-            colors.append("#d62728")
-        st.line_chart(chart_df, color=colors)
+        chart_df = pd.DataFrame(plot_rows)
+        color_domain = list(dict.fromkeys(chart_df["run"].tolist()))
+        colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f"]
+        chart = alt.Chart(chart_df).mark_line().encode(
+            x=alt.X("epoch:Q", title="Epoch"),
+            y=alt.Y("value:Q", title=title),
+            color=alt.Color("run:N", title="Run", scale=alt.Scale(domain=color_domain, range=colors[:len(color_domain)])),
+            strokeDash=alt.StrokeDash("split:N", title="Split", scale=alt.Scale(domain=["Training", "Validation"], range=[[1, 0], [5, 3]])),
+            tooltip=["run:N", "split:N", "epoch:Q", alt.Tooltip("value:Q", format=".6f")],
+        )
+        if pca_reference is not None and (val_available or available_cross_validation):
+            reference = alt.Chart(pd.DataFrame({"value": [float(pca_reference)]})).mark_rule(color="#111111", strokeDash=[4, 4]).encode(
+                y="value:Q",
+                tooltip=[alt.Tooltip("value:Q", title="PCA RMSE", format=".6f")],
+            )
+            chart = chart + reference
+        st.altair_chart(chart, use_container_width=True)
 
 
 def _available_metric_suffixes(history_df: pd.DataFrame) -> list[str]:
@@ -211,6 +282,16 @@ def _available_metric_suffixes(history_df: pd.DataFrame) -> list[str]:
             if _column_has_available_values(history_df, col) or _column_has_available_values(history_df, f"train_{suffix}"):
                 suffixes.add(suffix)
     return sorted(suffixes, key=lambda metric: (metric != "loss", metric))
+
+
+def _final_training_metric_is_all_zero(history_df: pd.DataFrame, metric_suffix: str) -> bool:
+    """Whether a final-training metric has only finite zero values."""
+    column_name = f"train_{metric_suffix}"
+    if not _column_has_available_values(history_df, column_name):
+        return False
+    values = [_to_float(value) for value in history_df[column_name].tolist()]
+    numeric_values = [value for value in values if value is not None]
+    return bool(numeric_values) and all(value == 0 for value in numeric_values)
 
 
 def _metric_title(metric_suffix: str) -> str:
@@ -374,7 +455,8 @@ EVALUATION_METRIC_SPECS = [
     {"sources": ("classifier_macro_f1", "macro_f1"), "row": "test_macro_f1", "title": "CLS Macro F1"},
     {"sources": ("roc_auc",), "row": "test_roc_auc", "title": "ROC AUC"},
     {"sources": ("roc_auc_ovr_macro",), "row": "test_roc_auc_ovr_macro", "title": "ROC AUC OVR Macro"},
-    {"sources": ("mse",), "row": "test_mse", "title": "MSE"},
+    {"sources": ("rmse",), "row": "test_rmse", "title": "RMSE"},
+    {"sources": ("recon_pearson",), "row": "test_recon_pearson", "title": "Reconstruction Pearson"},
     {"sources": ("fc_preservation",), "row": "test_fc_preservation", "title": "FC Pearson"},
     {"sources": ("silhouette",), "row": "test_silhouette", "title": "Silhouette"},
     {"sources": ("swfcd_pearson",), "row": "test_swfcd_pearson", "title": "SWFCD Pearson"},
@@ -636,7 +718,8 @@ def _all_experiments_table_specs(table_df: pd.DataFrame) -> tuple[list[str], dic
         ("swfcd_macro_f1_score", "SWFCD+Macro F1 score", True),
         ("fc_macro_f1_score", "FC+Macro F1 score", True),
         ("best_val_loss", "best_val_loss", True),
-        ("test_mse", "test_mse", True),
+        ("test_rmse", "test_rmse", True),
+        ("test_recon_pearson", "test_recon_pearson", True),
         ("test_accuracy", "test_accuracy", True),
         ("test_balanced_accuracy", "test_balanced_accuracy", True),
         ("test_macro_f1", "test_macro_f1", True),
@@ -710,14 +793,16 @@ def _apply_metric_bundle_to_row(
             row[_per_class_metric_row_key(str(class_label), metric_name)] = _to_float(class_metrics.get(metric_name))
 
     if isinstance(pca_eval, dict):
-        row["pca_mse"] = _to_float(pca_eval.get("mse"))
+        row["pca_rmse"] = _to_float(pca_eval.get("rmse"))
+        row["pca_recon_pearson"] = _to_float(pca_eval.get("recon_pearson"))
         row["pca_fc_preservation"] = _to_float(pca_eval.get("fc_preservation"))
         row["pca_silhouette"] = _to_float(pca_eval.get("silhouette"))
         row["pca_logreg_accuracy"] = _to_float(pca_eval.get("logreg_accuracy"))
         row["pca_swfcd_pearson"] = _to_float(pca_eval.get("swfcd_pearson"))
         row["pca_swfcd_rmse"] = _to_float(pca_eval.get("swfcd_rmse"))
     else:
-        row["pca_mse"] = None
+        row["pca_rmse"] = None
+        row["pca_recon_pearson"] = None
         row["pca_fc_preservation"] = None
         row["pca_silhouette"] = None
         row["pca_logreg_accuracy"] = None
@@ -725,18 +810,22 @@ def _apply_metric_bundle_to_row(
         row["pca_swfcd_rmse"] = None
 
     if isinstance(comparison_eval, dict):
-        row["delta_mse"] = _to_float(comparison_eval.get("mse_delta_model_minus_pca"))
+        row["delta_rmse"] = _to_float(comparison_eval.get("rmse_delta_model_minus_pca"))
+        row["delta_recon_pearson"] = _to_float(comparison_eval.get("recon_pearson_delta_model_minus_pca"))
         row["delta_fc_preservation"] = _to_float(comparison_eval.get("fc_delta_model_minus_pca"))
         row["delta_silhouette"] = _to_float(comparison_eval.get("silhouette_delta_model_minus_pca"))
         row["delta_logreg_accuracy"] = _to_float(comparison_eval.get("logreg_delta_model_minus_pca"))
     else:
-        row["delta_mse"] = None
+        row["delta_rmse"] = None
+        row["delta_recon_pearson"] = None
         row["delta_fc_preservation"] = None
         row["delta_silhouette"] = None
         row["delta_logreg_accuracy"] = None
 
-    if row["delta_mse"] is None and row["test_mse"] is not None and row["pca_mse"] is not None:
-        row["delta_mse"] = row["test_mse"] - row["pca_mse"]
+    if row["delta_rmse"] is None and row["test_rmse"] is not None and row["pca_rmse"] is not None:
+        row["delta_rmse"] = row["test_rmse"] - row["pca_rmse"]
+    if row["delta_recon_pearson"] is None and row["test_recon_pearson"] is not None and row["pca_recon_pearson"] is not None:
+        row["delta_recon_pearson"] = row["test_recon_pearson"] - row["pca_recon_pearson"]
     if row["delta_fc_preservation"] is None and row["test_fc_preservation"] is not None and row["pca_fc_preservation"] is not None:
         row["delta_fc_preservation"] = row["test_fc_preservation"] - row["pca_fc_preservation"]
     if row["delta_silhouette"] is None and row["test_silhouette"] is not None and row["pca_silhouette"] is not None:
@@ -871,9 +960,12 @@ def _attach_significance(
         needs_metadata = any(
             key not in row_copy
             for key in (
-                "test_mse",
-                "pca_mse",
-                "delta_mse",
+                "test_rmse",
+                "pca_rmse",
+                "delta_rmse",
+                "test_recon_pearson",
+                "pca_recon_pearson",
+                "delta_recon_pearson",
                 "target_group",
                 "model_hidden_dim",
                 "training_beta",
@@ -958,20 +1050,23 @@ def _attach_significance(
                 "test_macro_f1",
                 "test_roc_auc",
                 "test_roc_auc_ovr_macro",
-                "test_mse",
+                "test_rmse",
+                "test_recon_pearson",
                 "test_fc_preservation",
                 "test_silhouette",
                 "test_logreg_accuracy",
                 "test_swfcd_pearson",
                 "test_swfcd_mad",
                 "test_swfcd_rmse",
-                "pca_mse",
+                "pca_rmse",
+                "pca_recon_pearson",
                 "pca_fc_preservation",
                 "pca_silhouette",
                 "pca_logreg_accuracy",
                 "pca_swfcd_pearson",
                 "pca_swfcd_rmse",
-                "delta_mse",
+                "delta_rmse",
+                "delta_recon_pearson",
                 "delta_fc_preservation",
                 "delta_silhouette",
                 "delta_logreg_accuracy",
@@ -1121,7 +1216,7 @@ def _metric_outcome(model_value: float | None, pca_value: float | None, lower_is
 
 def _classify_vs_pca(row: dict) -> str | None:
     outcomes = [
-        _metric_outcome(row.get("test_mse"), row.get("pca_mse"), lower_is_better=True),
+        _metric_outcome(row.get("test_rmse"), row.get("pca_rmse"), lower_is_better=True),
         _metric_outcome(row.get("test_fc_preservation"), row.get("pca_fc_preservation"), lower_is_better=False),
         _metric_outcome(row.get("test_silhouette"), row.get("pca_silhouette"), lower_is_better=False),
         _metric_outcome(row.get("test_logreg_accuracy"), row.get("pca_logreg_accuracy"), lower_is_better=False),
@@ -1158,12 +1253,12 @@ def _minmax_normalize(values: list[float | None]) -> list[float | None]:
 
 def _add_scores(rows: list[dict]) -> None:
     """Compute aggregate score columns used by the tracker UI."""
-    mse_deltas = [_to_float(row.get("delta_mse")) for row in rows]
+    rmse_deltas = [_to_float(row.get("delta_rmse")) for row in rows]
     fc_deltas = [_to_float(row.get("delta_fc_preservation")) for row in rows]
     sil_deltas = [_to_float(row.get("delta_silhouette")) for row in rows]
     logreg_deltas = [_to_float(row.get("delta_logreg_accuracy")) for row in rows]
 
-    mse_norm = _minmax_normalize(mse_deltas)
+    rmse_norm = _minmax_normalize(rmse_deltas)
     fc_norm = _minmax_normalize(fc_deltas)
     sil_norm = _minmax_normalize(sil_deltas)
     logreg_norm = _minmax_normalize(logreg_deltas)
@@ -1175,21 +1270,21 @@ def _add_scores(rows: list[dict]) -> None:
         fc_component = 0.5 if fc_input_enabled else fc_norm[idx]
         silhouette_component = 0.0
         if (
-            mse_norm[idx] is None
+            rmse_norm[idx] is None
             or fc_component is None
             or logreg_norm[idx] is None
         ):
             row["pca_score"] = None
             continue
-        row["pca_score"] = (1.0 - mse_norm[idx]) + fc_component + silhouette_component + logreg_norm[idx]
+        row["pca_score"] = (1.0 - rmse_norm[idx]) + fc_component + silhouette_component + logreg_norm[idx]
 
-    test_mse = [_to_float(row.get("test_mse")) for row in rows]
+    test_rmse = [_to_float(row.get("test_rmse")) for row in rows]
     test_fc = [_to_float(row.get("test_fc_preservation")) for row in rows]
     test_sil = [_to_float(row.get("test_silhouette")) for row in rows]
     test_macro_f1 = [_to_float(row.get("test_macro_f1")) for row in rows]
     test_swfcd_pearson = [_to_float(row.get("test_swfcd_pearson")) for row in rows]
 
-    test_mse_norm = _minmax_normalize(test_mse)
+    test_rmse_norm = _minmax_normalize(test_rmse)
     test_fc_norm = _minmax_normalize(test_fc)
     test_sil_norm = _minmax_normalize(test_sil)
     test_macro_f1_norm = _minmax_normalize(test_macro_f1)
@@ -1199,7 +1294,7 @@ def _add_scores(rows: list[dict]) -> None:
         fc_input_enabled = row.get("data_fc_input")
         if isinstance(fc_input_enabled, str):
             fc_input_enabled = fc_input_enabled.strip().lower() == "true"
-        mse_component = 0.5 if test_mse_norm[idx] is None else (1.0 - test_mse_norm[idx])
+        rmse_component = 0.5 if test_rmse_norm[idx] is None else (1.0 - test_rmse_norm[idx])
         fc_component = 0.5 if fc_input_enabled else test_fc_norm[idx]
         if fc_component is None:
             fc_component = 0.5
@@ -1209,7 +1304,7 @@ def _add_scores(rows: list[dict]) -> None:
         if test_swfcd_pearson_norm[idx] is not None:
             swfcd_component = test_swfcd_pearson_norm[idx]
         row["score"] = (
-            mse_component
+            rmse_component
             + fc_component
             + silhouette_component
             + macro_f1_component
@@ -1788,7 +1883,7 @@ def _build_raincloud_spec(
 def _build_model_compare_raincloud_spec(
     grouped: dict[str, dict[str, list[float]]],
 ) -> dict[str, object]:
-    desired_titles = ("SWFCD Pearson", "FC Pearson", "MSE")
+    desired_titles = ("SWFCD Pearson", "FC Pearson", "RMSE")
     title_to_key = {
         metric_title: metric_key
         for metric_key, metric_title in _metric_specs_for_grouped(grouped)
@@ -1835,6 +1930,60 @@ def _build_model_compare_classifier_f1_raincloud_spec(
         "height": "250px",
         "labels": payload["labels"],
         "series": payload["series"],
+    }
+
+
+def _metric_specs_for_titles(
+    grouped: dict[str, dict[str, list[float]]],
+    titles: tuple[str, ...],
+) -> list[tuple[str, str]]:
+    title_to_key = {
+        metric_title: metric_key
+        for metric_key, metric_title in _metric_specs_for_grouped(grouped)
+    }
+    return [
+        (title_to_key[metric_title], metric_title)
+        for metric_title in titles
+        if metric_title in title_to_key
+    ]
+
+
+def _build_pvalue_table_spec(
+    paired_grouped: dict[str, dict[str, dict[object, float]]],
+    metric_specs: list[tuple[str, str]],
+) -> dict[str, object]:
+    """Build a paired t-test table from seed-level mean outcomes."""
+    parameter_values = _ordered_parameter_values(paired_grouped)
+    parameters = []
+    for metric_key, metric_title in metric_specs:
+        comparisons = []
+        for left_index, left_label in enumerate(parameter_values):
+            left_values = paired_grouped[left_label].get(metric_key, {})
+            for right_label in parameter_values[left_index + 1:]:
+                right_values = paired_grouped[right_label].get(metric_key, {})
+                shared_seeds = sorted(
+                    set(left_values).intersection(right_values), key=repr
+                )
+                if not shared_seeds:
+                    continue
+                comparisons.append(
+                    {
+                        "left": {
+                            "name": str(left_label),
+                            "data": [float(left_values[seed]) for seed in shared_seeds],
+                        },
+                        "right": {
+                            "name": str(right_label),
+                            "data": [float(right_values[seed]) for seed in shared_seeds],
+                        },
+                    }
+                )
+        parameters.append({"name": metric_title, "comparisons": comparisons})
+    return {
+        "type": "p-value-table",
+        "test": "paired-t",
+        "pValueAdjustment": "holm",
+        "parameters": parameters,
     }
 
 
@@ -1913,52 +2062,296 @@ def _save_model_compare_raincloud_spec(
     )
 
 
+def _save_pvalue_table_spec(
+    paired_grouped: dict[str, dict[str, dict[object, float]]],
+    metric_specs: list[tuple[str, str]],
+    results_dir: Path,
+    tab_name: str,
+) -> Path:
+    return _save_plot_spec(
+        _build_pvalue_table_spec(paired_grouped, metric_specs),
+        results_dir=results_dir,
+        tab_name=tab_name,
+    )
+
+
 def _save_plot_spec(
     payload: dict[str, object],
     results_dir: Path,
     tab_name: str,
 ) -> Path:
     plot_data_dir = Path("plot_data")
-    plot_data_dir.mkdir(parents=True, exist_ok=True)
     tab_slug = "".join(ch.lower() if ch.isalnum() else "_" for ch in tab_name).strip("_")
     if results_dir.name == "results":
         run_name = results_dir.parent.name or "current"
     else:
         run_name = results_dir.name or "current"
-    output_path = plot_data_dir / f"{run_name}_{tab_slug}.yml"
+    output_dir = plot_data_dir / run_name
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"{tab_slug}.yml"
     _write_yaml(output_path, payload)
     return output_path
 
 
+def _comparison_seed(row: dict) -> str | None:
+    """Return the reproducibility seed used to pair parameter-sweep runs."""
+    training_params = row.get("_training_params")
+    if not isinstance(training_params, dict):
+        return None
+    reproducibility = training_params.get("reproducibility")
+    if not isinstance(reproducibility, dict):
+        return None
+    seed = reproducibility.get("seed")
+    if seed is None or isinstance(seed, (dict, list, tuple)):
+        return None
+    return str(seed)
+
+
+def _comparison_context_paths(
+    rows: list[dict],
+    target_path: tuple[str, ...],
+    excluded_context_paths: set[tuple[str, ...]] | None = None,
+) -> list[tuple[str, ...]]:
+    """Return every varying experiment-setting path except the tested setting.
+
+    ``training.num_epochs`` is excluded because cross-validation replaces the
+    configured epoch cap with a selected value; it is an outcome of fitting,
+    not a controlled setting.  The seed is represented separately.
+    """
+    paths: set[tuple[str, ...]] = set()
+    for row in rows:
+        for root, row_key in (
+            ("model", "_model_params"),
+            ("training", "_training_params"),
+            ("data", "_data_params"),
+            ("experiment", "_experiment_params"),
+        ):
+            params = row.get(row_key)
+            if isinstance(params, dict):
+                paths |= {(root,) + path for path in _collect_leaf_paths_from_dict(params)}
+
+    excluded_paths = {
+        target_path,
+        ("training", "reproducibility", "seed"),
+        ("training", "num_epochs"),
+    }
+    excluded_paths.update(excluded_context_paths or set())
+    context_paths = []
+    for path in paths - excluded_paths:
+        values = {
+            _encode_group_value(_get_param_value_from_row(row, path))
+            for row in rows
+        }
+        if len(values) > 1:
+            context_paths.append(path)
+    return sorted(context_paths)
+
+
+def _comparison_pair_key(row: dict, context_paths: list[tuple[str, ...]]) -> tuple[object, ...] | None:
+    """Create a seed-plus-settings key for an unambiguous paired comparison."""
+    seed = _comparison_seed(row)
+    if seed is None:
+        return None
+    context = tuple(
+        (path, _encode_group_value(_get_param_value_from_row(row, path)))
+        for path in context_paths
+    )
+    return seed, context
+
+
+def _average_paired_outcomes_by_seed(
+    paired_grouped: dict[object, dict[str, dict[object, float]]],
+) -> dict[object, dict[str, dict[str, float]]]:
+    """Collapse matched parameter contexts into one mean outcome per seed.
+
+    A parameter sweep can contain several matched runs for the same seed, one
+    for each combination of the *other* parameters.  Those runs are useful for
+    estimating that seed's marginal outcome, but they are not independent
+    t-test observations.  This function averages them within seed so that a
+    paired t-test compares one value per seed for each parameter level.
+    """
+    seed_means: dict[object, dict[str, dict[str, float]]] = {}
+    for parameter_value, metrics in paired_grouped.items():
+        seed_means[parameter_value] = {}
+        for metric_key, values_by_context in metrics.items():
+            values_by_seed: dict[str, list[float]] = {}
+            for pair_key, value in values_by_context.items():
+                if not isinstance(pair_key, tuple) or not pair_key:
+                    continue
+                seed = str(pair_key[0])
+                values_by_seed.setdefault(seed, []).append(float(value))
+            seed_means[parameter_value][metric_key] = {
+                seed: sum(values) / len(values)
+                for seed, values in values_by_seed.items()
+                if values
+            }
+    return seed_means
+
+
+def _group_model_comparison_outcomes_by_seed(
+    rows: list[dict],
+    model_order: list[str],
+    metric_specs: list[tuple[str, str]],
+) -> dict[str, dict[str, dict[str, float]]]:
+    """Index model-comparison outcomes by seed for direct paired tests.
+
+    Model architectures intentionally have different model parameters, so the
+    only matching criterion here is the reproducibility seed.  Multiple runs
+    for one model/seed/metric are ambiguous and excluded rather than selected
+    arbitrarily.
+    """
+    grouped = {
+        model_name: {metric_key: {} for metric_key, _ in metric_specs}
+        for model_name in model_order
+    }
+    ambiguous: set[tuple[str, str, str]] = set()
+    for row in rows:
+        model_name = str(row.get("model_type", "unknown"))
+        seed = _comparison_seed(row)
+        if seed is None or model_name not in grouped:
+            continue
+        for metric_key, _ in metric_specs:
+            metric_value = _to_float(row.get(metric_key))
+            if metric_value is None:
+                continue
+            pair_id = (model_name, metric_key, seed)
+            values_by_seed = grouped[model_name][metric_key]
+            if pair_id in ambiguous:
+                continue
+            if seed in values_by_seed:
+                del values_by_seed[seed]
+                ambiguous.add(pair_id)
+            else:
+                values_by_seed[seed] = metric_value
+    return grouped
+
+
+def _group_parameter_comparison_rows(
+    comparison_rows: list[dict],
+    parameter_path: tuple[str, ...],
+    metric_specs: list[tuple[str, str]],
+    excluded_context_paths: set[tuple[str, ...]] | None = None,
+    aggregate_duplicate_pair_keys: bool = False,
+) -> tuple[
+    dict[object, dict[str, list[float]]],
+    dict[object, dict[str, dict[object, float]]],
+]:
+    """Aggregate plot values and setting-indexed values for paired comparisons.
+
+    Runs are paired only when their seed and every other varying experiment
+    setting match. A duplicated pairing key within one parameter value is
+    normally ambiguous, so it is excluded rather than paired arbitrarily.
+    ``aggregate_duplicate_pair_keys`` instead averages such duplicates within
+    their matched context before the returned values are collapsed to one mean
+    per seed. This is used for conditional parameters such as an MLP-only
+    hidden width when comparing head types.
+    """
+    grouped: dict[object, dict[str, list[float]]] = {}
+    paired_grouped: dict[object, dict[str, dict[object, float]]] = {}
+    ambiguous_pairs: set[tuple[object, str, object]] = set()
+    duplicate_pair_values: dict[tuple[object, str, object], list[float]] = {}
+    context_paths = _comparison_context_paths(
+        comparison_rows, parameter_path, excluded_context_paths
+    )
+
+    for row in comparison_rows:
+        parameter_value = row.get("_comparison_parameter_value")
+        if parameter_value is None:
+            parameter_value = _get_param_value_from_row(row, parameter_path)
+        encoded_value = _encode_group_value(parameter_value)
+        if encoded_value not in grouped:
+            grouped[encoded_value] = {metric_key: [] for metric_key, _ in metric_specs}
+            paired_grouped[encoded_value] = {metric_key: {} for metric_key, _ in metric_specs}
+
+        pair_key = _comparison_pair_key(row, context_paths)
+        for metric_key, _ in metric_specs:
+            metric_value = _to_float(row.get(metric_key))
+            if metric_value is None:
+                continue
+            grouped[encoded_value][metric_key].append(metric_value)
+            if pair_key is None:
+                continue
+            pair_id = (encoded_value, metric_key, pair_key)
+            paired_values = paired_grouped[encoded_value][metric_key]
+            if aggregate_duplicate_pair_keys:
+                values = duplicate_pair_values.setdefault(pair_id, [])
+                values.append(metric_value)
+                paired_values[pair_key] = sum(values) / len(values)
+                continue
+            if pair_id in ambiguous_pairs:
+                continue
+            if pair_key in paired_values:
+                # Multiple runs for the same pairing context are ambiguous.
+                del paired_values[pair_key]
+                ambiguous_pairs.add(pair_id)
+            else:
+                paired_values[pair_key] = metric_value
+
+    return grouped, paired_grouped
+
+
+def _holm_adjust_pvalues(
+    raw_p_values: dict[tuple[object, object], float],
+) -> dict[tuple[object, object], float]:
+    """Apply the Holm step-down correction to one family of raw p-values."""
+    ordered = sorted(raw_p_values.items(), key=lambda item: (item[1], repr(item[0])))
+    family_size = len(ordered)
+    adjusted: dict[tuple[object, object], float] = {}
+    previous_adjusted = 0.0
+    for rank, (pair, p_value) in enumerate(ordered):
+        corrected = min(1.0, (family_size - rank) * p_value)
+        corrected = max(previous_adjusted, corrected)
+        adjusted[pair] = corrected
+        previous_adjusted = corrected
+    return adjusted
+
+
 def _pairwise_pvalue_matrix(
     grouped: dict[str, dict[str, list[float]]],
+    paired_grouped: dict[str, dict[str, dict[object, float]]],
     metric_key: str,
 ) -> pd.DataFrame:
+    """Return a symmetric matrix of Holm-adjusted paired t-test p-values."""
     labels = _ordered_parameter_values(grouped)
+    raw_p_values: dict[tuple[object, object], float] = {}
+
+    if scipy_stats is not None:
+        for left_index, left_label in enumerate(labels):
+            left_by_seed = paired_grouped.get(left_label, {}).get(metric_key, {})
+            for right_label in labels[left_index + 1:]:
+                right_by_seed = paired_grouped.get(right_label, {}).get(metric_key, {})
+                shared_seeds = sorted(set(left_by_seed).intersection(right_by_seed))
+                if len(shared_seeds) < 2:
+                    continue
+                left_values = [left_by_seed[seed] for seed in shared_seeds]
+                right_values = [right_by_seed[seed] for seed in shared_seeds]
+                p_value = _to_float(
+                    scipy_stats.ttest_rel(
+                        left_values, right_values, nan_policy="omit"
+                    ).pvalue
+                )
+                if p_value is None:
+                    if all(left == right for left, right in zip(left_values, right_values)):
+                        p_value = 1.0
+                    else:
+                        continue
+                raw_p_values[(left_label, right_label)] = p_value
+
+    adjusted_p_values = _holm_adjust_pvalues(raw_p_values)
     matrix_rows: list[list[str]] = []
-    for left_label in labels:
-        left_values = [_to_float(value) for value in grouped[left_label].get(metric_key, [])]
-        left_values = [value for value in left_values if value is not None]
+    for left_index, left_label in enumerate(labels):
         row_values: list[str] = []
-        for right_label in labels:
-            right_values = [_to_float(value) for value in grouped[right_label].get(metric_key, [])]
-            right_values = [value for value in right_values if value is not None]
+        for right_index, right_label in enumerate(labels):
             if left_label == right_label:
                 row_values.append("1.0000")
-            elif len(left_values) < 2 or len(right_values) < 2 or scipy_stats is None:
-                row_values.append("N/A")
             else:
-                p_value = scipy_stats.ttest_ind(left_values, right_values, equal_var=False, nan_policy="omit").pvalue
-                p_value = _to_float(p_value)
-                if p_value is None:
-                    left_unique = {value for value in left_values}
-                    right_unique = {value for value in right_values}
-                    if len(left_unique) == 1 and len(right_unique) == 1 and left_unique == right_unique:
-                        row_values.append("1.0000")
-                    else:
-                        row_values.append("N/A")
-                else:
-                    row_values.append(f"{p_value:.4f}")
+                pair = (
+                    (left_label, right_label)
+                    if left_index < right_index
+                    else (right_label, left_label)
+                )
+                p_value = adjusted_p_values.get(pair)
+                row_values.append("N/A" if p_value is None else f"{p_value:.4f}")
         matrix_rows.append(row_values)
     return pd.DataFrame(matrix_rows, index=labels, columns=labels)
 
@@ -1983,8 +2376,17 @@ def _style_pvalue_matrix(matrix_df: pd.DataFrame):
     return matrix_df.style.applymap(_cell_style)
 
 
-def _render_pvalue_matrices(grouped: dict[str, dict[str, list[float]]]) -> None:
-    st.markdown("**P-value Matrices**")
+def _render_pvalue_matrices(
+    grouped: dict[str, dict[str, list[float]]],
+    paired_grouped: dict[str, dict[str, dict[object, float]]] | None = None,
+    pairing_caption: str | None = None,
+) -> None:
+    st.markdown("**Paired t-test p-value matrices**")
+    st.caption(
+        (pairing_caption or "For each parameter value, matched runs are averaged over the other varying settings within each seed. Paired t-tests therefore use one outcome per shared seed; comparisons with fewer than two shared seeds are shown as N/A.")
+        + " Values are Holm-adjusted within each metric across its valid unique pairwise comparisons."
+    )
+    paired_grouped = paired_grouped or {}
     metric_specs = _metric_specs_for_grouped(grouped)
     if not metric_specs:
         st.info("No numeric metrics available for p-value comparison.")
@@ -1995,7 +2397,7 @@ def _render_pvalue_matrices(grouped: dict[str, dict[str, list[float]]]) -> None:
         for col, (metric_key, metric_title) in zip(row_cols, row_metrics):
             with col:
                 st.markdown(f"**{metric_title}**")
-                matrix_df = _pairwise_pvalue_matrix(grouped, metric_key)
+                matrix_df = _pairwise_pvalue_matrix(grouped, paired_grouped, metric_key)
                 st.dataframe(_style_pvalue_matrix(matrix_df), width="stretch")
 
 
@@ -2095,7 +2497,6 @@ def main() -> None:
         st.info("No experiments available.")
         return
 
-    table_df = pd.DataFrame(rows)
     view_options = [
         "All Experiments",
         "Experiment Details",
@@ -2125,36 +2526,66 @@ def main() -> None:
 
     if active_view == "All Experiments":
         st.subheader("Experiments")
-        st.caption("Data filters")
-        filter_cols = st.columns(4)
-        with filter_cols[0]:
-            st.markdown("**Flatten**")
-            flatten_true = st.checkbox("True", value=False, key="allf_flatten_true")
-            flatten_false = st.checkbox("False", value=False, key="allf_flatten_false")
-        with filter_cols[1]:
-            st.markdown("**Transpose**")
-            transpose_true = st.checkbox("True", value=False, key="allf_transpose_true")
-            transpose_false = st.checkbox("False", value=False, key="allf_transpose_false")
-        with filter_cols[2]:
-            st.markdown("**Timepoints as samples**")
-            tas_true = st.checkbox("True", value=False, key="allf_tas_true")
-            tas_false = st.checkbox("False", value=False, key="allf_tas_false")
-        with filter_cols[3]:
-            st.markdown("**FC input**")
-            fc_input_true = st.checkbox("True", value=False, key="allf_fc_input_true")
-            fc_input_false = st.checkbox("False", value=False, key="allf_fc_input_false")
+        st.caption("Filters")
+        hydrated_rows = _hydrate_rows_with_metadata(
+            rows,
+            manager,
+            progress_label="Loading metadata for experiment filters",
+        )
+        current_rows = hydrated_rows
+        used_parameter_keys: set[str] = set()
+        for filter_idx in range(1, 6):
+            filter_options = _parameter_options_for_rows(current_rows, exclude_keys=used_parameter_keys)
+            if not filter_options:
+                break
 
-        filtered_table_df = table_df[
-            table_df.apply(
-                lambda row: _bool_match(bool(row.get("data_flatten", False)), flatten_true, flatten_false)
-                and _bool_match(bool(row.get("data_transpose", False)), transpose_true, transpose_false)
-                and _bool_match(bool(row.get("data_timepoints_as_samples", False)), tas_true, tas_false)
-                and _bool_match(bool(row.get("data_fc_input", False)), fc_input_true, fc_input_false),
-                axis=1,
-            )
-        ]
+            filter_key_state = f"all_experiments_filter_key_{filter_idx}"
+            filter_value_state = f"all_experiments_filter_value_{filter_idx}"
+            if (
+                filter_key_state in st.session_state
+                and st.session_state[filter_key_state] not in filter_options
+            ):
+                del st.session_state[filter_key_state]
+            if (
+                filter_value_state in st.session_state
+                and filter_key_state not in st.session_state
+            ):
+                del st.session_state[filter_value_state]
+
+            filter_columns = st.columns(2)
+            with filter_columns[0]:
+                selected_key = st.selectbox(
+                    f"Parameter {filter_idx}",
+                    options=[""] + list(filter_options),
+                    format_func=lambda key: "Select parameter" if key == "" else filter_options.get(key, key),
+                    key=filter_key_state,
+                )
+            with filter_columns[1]:
+                if selected_key:
+                    value_options = _parameter_value_options(current_rows, tuple(selected_key.split(".")))
+                    if (
+                        filter_value_state in st.session_state
+                        and st.session_state[filter_value_state] not in value_options
+                    ):
+                        del st.session_state[filter_value_state]
+                    selected_value = st.selectbox(
+                        f"Value {filter_idx}",
+                        options=value_options,
+                        format_func=_display_group_value,
+                        key=filter_value_state,
+                    )
+                else:
+                    selected_value = None
+                    st.empty()
+
+            if not selected_key or selected_value is None:
+                break
+            used_parameter_keys.add(selected_key)
+            current_rows = _rows_matching_param_filters(current_rows, [(selected_key, selected_value)])
+
+        filtered_table_df = pd.DataFrame(current_rows)
         if filtered_table_df.empty:
-            st.info("No experiments match the selected data filters.")
+            st.info("No experiments match the selected parameter filters.")
             return
 
         present_cols, column_config = _all_experiments_table_specs(filtered_table_df)
@@ -2202,13 +2633,20 @@ def main() -> None:
 
         with tabs[1]:
             history_df = _history_to_frame(history)
-            if history_df.empty:
+            cross_validation_metrics = _cross_validation_metrics(history)
+            if history_df.empty and not cross_validation_metrics:
                 st.warning("No history metrics available.")
             else:
-                metric_suffixes = _available_metric_suffixes(history_df)
-                visible_metrics = metric_suffixes if metric_suffixes else []
+                metric_suffixes = set(_available_metric_suffixes(history_df))
+                metric_suffixes.update(cross_validation_metrics)
+                metric_suffixes = sorted(metric_suffixes, key=lambda metric: (metric != "loss", metric))
+                visible_metrics = [
+                    metric
+                    for metric in metric_suffixes
+                    if metric != "kld" or not _final_training_metric_is_all_zero(history_df, metric)
+                ]
                 if not visible_metrics:
-                    st.warning("No train/val metrics available.")
+                    st.warning("No train or validation metrics available.")
                 else:
                     summary = metadata.get("summary", {})
                     val_pca_mse = _to_float(summary.get("val_pca_mse"))
@@ -2220,9 +2658,9 @@ def main() -> None:
                     else:
                         pca_target_metrics = set()
 
-                    for idx in range(0, len(visible_metrics), 4):
-                        row_metrics = visible_metrics[idx:idx + 4]
-                        plot_columns = st.columns(4)
+                    for idx in range(0, len(visible_metrics), 3):
+                        row_metrics = visible_metrics[idx:idx + 3]
+                        plot_columns = st.columns(3)
                         for container, metric_suffix in zip(plot_columns, row_metrics):
                             _render_pair_plot(
                                 container,
@@ -2231,6 +2669,7 @@ def main() -> None:
                                 train_candidates=[f"train_{metric_suffix}"],
                                 val_candidates=[f"val_{metric_suffix}"],
                                 pca_reference=val_pca_mse if metric_suffix in pca_target_metrics else None,
+                                cross_validation_values=cross_validation_metrics.get(metric_suffix),
                             )
 
         with tabs[2]:
@@ -2380,6 +2819,7 @@ def main() -> None:
         filter_col, charts_col = st.columns([1, 3], gap="large")
         param_compare_grouped = None
         param_compare_display_grouped = None
+        param_compare_paired_display_grouped = None
 
         with filter_col:
             st.markdown("**Filters**")
@@ -2537,24 +2977,23 @@ def main() -> None:
             )
 
             # Aggregate each metric by parameter value.
-            grouped: dict[object, dict[str, list[float]]] = {}
             loaded_param_path = tuple(loaded_param_key.split("."))
             comparison_rows = _expand_rows_for_parameter(selected_rows, loaded_param_path)
             metric_specs = _metric_specs_for_rows(comparison_rows)
             if not metric_specs:
                 st.info("No numeric evaluation metrics available for the loaded selection.")
                 return
-            for row in comparison_rows:
-                param_value = row.get("_comparison_parameter_value")
-                if param_value is None:
-                    param_value = _get_param_value_from_row(row, loaded_param_path)
-                encoded_param_value = _encode_group_value(param_value)
-                if encoded_param_value not in grouped:
-                    grouped[encoded_param_value] = {metric_key: [] for metric_key, _ in metric_specs}
-                for metric_key, _ in metric_specs:
-                    metric_value = _to_float(row.get(metric_key))
-                    if metric_value is not None:
-                        grouped[encoded_param_value][metric_key].append(metric_value)
+            is_head_type_comparison = loaded_param_key == "model.cls_head_type"
+            grouped, context_paired_grouped = _group_parameter_comparison_rows(
+                comparison_rows,
+                loaded_param_path,
+                metric_specs,
+                excluded_context_paths={
+                    ("model", "cls_head_hidden_dim")
+                } if is_head_type_comparison else None,
+                aggregate_duplicate_pair_keys=is_head_type_comparison,
+            )
+            paired_grouped = _average_paired_outcomes_by_seed(context_paired_grouped)
 
             sorted_param_values = _ordered_parameter_values(grouped)
             display_grouped = {
@@ -2615,10 +3054,22 @@ def main() -> None:
 
             param_compare_grouped = grouped
             param_compare_display_grouped = display_grouped
+            param_compare_paired_display_grouped = {
+                _display_group_value(param_value): paired_grouped[param_value]
+                for param_value in sorted_param_values
+            }
 
-        if param_compare_grouped is not None and param_compare_display_grouped is not None:
-            _render_pvalue_matrices(param_compare_display_grouped)
+        if (
+            param_compare_grouped is not None
+            and param_compare_display_grouped is not None
+            and param_compare_paired_display_grouped is not None
+        ):
+            _render_pvalue_matrices(param_compare_display_grouped, param_compare_paired_display_grouped)
             st.markdown("---")
+            selected_parameter_token = loaded_param_key.rsplit(".", 1)[-1].split("_", 1)[0]
+            model_parameter_export_name = (
+                f"model_parameters_{loaded_model_type}_{selected_parameter_token}"
+            )
             has_classifier_f1_export = bool(_classifier_f1_specs_for_grouped(param_compare_display_grouped))
             has_classifier_per_class_f1_raincloud = bool(_classifier_per_class_f1_specs_for_grouped(param_compare_display_grouped))
             if has_classifier_f1_export and has_classifier_per_class_f1_raincloud:
@@ -2652,7 +3103,7 @@ def main() -> None:
                         output_path = _save_model_compare_classifier_f1_raincloud_spec(
                             param_compare_display_grouped,
                             results_dir=results_dir,
-                            tab_name=f"model_parameters_{loaded_model_type}_cls_f1",
+                            tab_name=f"{model_parameter_export_name}_cls_f1",
                         )
                         st.success(f"Classifier classwise F1 raincloud spec saved to {output_path}")
             with raincloud_col:
@@ -2660,7 +3111,7 @@ def main() -> None:
                     output_path = _save_model_compare_raincloud_spec(
                         param_compare_display_grouped,
                         results_dir=results_dir,
-                        tab_name=f"model_parameters_{loaded_model_type}",
+                        tab_name=model_parameter_export_name,
                     )
                     st.success(f"Raincloud plot spec saved to {output_path}")
             with export_cols[0]:
@@ -2696,11 +3147,46 @@ def main() -> None:
                     st.success("Boxplot spec copied to clipboard.")
                     st.code(boxplot_spec, language="yaml")
 
+            pvalue_metric_specs = _metric_specs_for_titles(
+                param_compare_display_grouped,
+                ("SWFCD Pearson", "FC Pearson", "RMSE"),
+            )
+            pvalue_cls_metric_specs = _metric_specs_for_titles(
+                param_compare_display_grouped,
+                ("CLS Macro F1", "CLS HC F1", "CLS MCI F1", "CLS AD F1"),
+            )
+            pvalue_cols = st.columns(2)
+            with pvalue_cols[0]:
+                if pvalue_metric_specs and st.button(
+                    "Save reconstruction p-value data",
+                    key="param_compare_save_pvalue_data",
+                ):
+                    output_path = _save_pvalue_table_spec(
+                        param_compare_paired_display_grouped,
+                        pvalue_metric_specs,
+                        results_dir=results_dir,
+                        tab_name=f"{model_parameter_export_name}_pvalue",
+                    )
+                    st.success(f"Reconstruction p-value data saved to {output_path}")
+            with pvalue_cols[1]:
+                if pvalue_cls_metric_specs and st.button(
+                    "Save CLS classwise F1 p-value data",
+                    key="param_compare_save_cls_f1_pvalue_data",
+                ):
+                    output_path = _save_pvalue_table_spec(
+                        param_compare_paired_display_grouped,
+                        pvalue_cls_metric_specs,
+                        results_dir=results_dir,
+                        tab_name=f"{model_parameter_export_name}_cls_f1_pvalue",
+                    )
+                    st.success(f"CLS classwise F1 p-value data saved to {output_path}")
+
     elif active_view == "Parameter Comparison":
         st.subheader("Parameter Comparison")
         filter_col, charts_col = st.columns([1, 3], gap="large")
         allparam_compare_grouped = None
         allparam_compare_display_grouped = None
+        allparam_compare_paired_display_grouped = None
         hydrated_rows = _hydrate_rows_with_metadata(
             rows,
             manager,
@@ -2819,24 +3305,16 @@ def main() -> None:
                 + (f" | filters: {loaded_filter_text}" if loaded_filter_text else "")
             )
 
-            grouped: dict[object, dict[str, list[float]]] = {}
             loaded_param_path = tuple(loaded_param_key.split("."))
             comparison_rows = _expand_rows_for_parameter(selected_rows, loaded_param_path)
             metric_specs = _metric_specs_for_rows(comparison_rows)
             if not metric_specs:
                 st.info("No numeric evaluation metrics available for the loaded selection.")
                 return
-            for row in comparison_rows:
-                param_value = row.get("_comparison_parameter_value")
-                if param_value is None:
-                    param_value = _get_param_value_from_row(row, loaded_param_path)
-                encoded_param_value = _encode_group_value(param_value)
-                if encoded_param_value not in grouped:
-                    grouped[encoded_param_value] = {metric_key: [] for metric_key, _ in metric_specs}
-                for metric_key, _ in metric_specs:
-                    metric_value = _to_float(row.get(metric_key))
-                    if metric_value is not None:
-                        grouped[encoded_param_value][metric_key].append(metric_value)
+            grouped, context_paired_grouped = _group_parameter_comparison_rows(
+                comparison_rows, loaded_param_path, metric_specs
+            )
+            paired_grouped = _average_paired_outcomes_by_seed(context_paired_grouped)
 
             sorted_param_values = _ordered_parameter_values(grouped)
             display_grouped = {
@@ -2897,9 +3375,17 @@ def main() -> None:
 
             allparam_compare_grouped = grouped
             allparam_compare_display_grouped = display_grouped
+            allparam_compare_paired_display_grouped = {
+                _display_group_value(param_value): paired_grouped[param_value]
+                for param_value in sorted_param_values
+            }
 
-        if allparam_compare_grouped is not None and allparam_compare_display_grouped is not None:
-            _render_pvalue_matrices(allparam_compare_display_grouped)
+        if (
+            allparam_compare_grouped is not None
+            and allparam_compare_display_grouped is not None
+            and allparam_compare_paired_display_grouped is not None
+        ):
+            _render_pvalue_matrices(allparam_compare_display_grouped, allparam_compare_paired_display_grouped)
             st.markdown("---")
             has_classifier_f1_export = bool(_classifier_f1_specs_for_grouped(allparam_compare_display_grouped))
             has_classifier_per_class_f1_raincloud = bool(_classifier_per_class_f1_specs_for_grouped(allparam_compare_display_grouped))
@@ -3040,6 +3526,9 @@ def main() -> None:
                 metric_value = _to_float(row.get(metric_key))
                 if metric_value is not None:
                     export_grouped[model_name][metric_key].append(metric_value)
+        paired_export_grouped = _group_model_comparison_outcomes_by_seed(
+            filtered_model_rows, model_order, metric_specs
+        )
         st.caption("Box plots show metric distributions across all runs for each model type.")
 
         for idx in range(0, len(metric_specs), 3):
@@ -3087,7 +3576,14 @@ def main() -> None:
                             use_container_width=True,
                         )
 
-        _render_pvalue_matrices(export_grouped)
+        _render_pvalue_matrices(
+            export_grouped,
+            paired_export_grouped,
+            pairing_caption=(
+                "Models are paired by reproducibility seed. Comparisons with "
+                "fewer than two shared seeds are shown as N/A."
+            ),
+        )
         st.markdown("---")
         has_f1_bar_export = bool(_classifier_f1_specs_for_grouped(export_grouped))
         has_classifier_per_class_f1_raincloud = bool(_classifier_per_class_f1_specs_for_grouped(export_grouped))
@@ -3147,6 +3643,40 @@ def main() -> None:
                     tab_name="model_comparison",
                 )
                 st.success(f"Raincloud plot spec saved to {output_path}")
+
+        pvalue_metric_specs = _metric_specs_for_titles(
+            export_grouped,
+            ("SWFCD Pearson", "FC Pearson", "RMSE"),
+        )
+        pvalue_cls_metric_specs = _metric_specs_for_titles(
+            export_grouped,
+            ("CLS Macro F1", "CLS HC F1", "CLS MCI F1", "CLS AD F1"),
+        )
+        pvalue_cols = st.columns(2)
+        with pvalue_cols[0]:
+            if pvalue_metric_specs and st.button(
+                "Save reconstruction p-value data",
+                key="model_compare_save_pvalue_data",
+            ):
+                output_path = _save_pvalue_table_spec(
+                    paired_export_grouped,
+                    pvalue_metric_specs,
+                    results_dir=results_dir,
+                    tab_name="model_comparison_pvalue",
+                )
+                st.success(f"Reconstruction p-value data saved to {output_path}")
+        with pvalue_cols[1]:
+            if pvalue_cls_metric_specs and st.button(
+                "Save CLS classwise F1 p-value data",
+                key="model_compare_save_cls_f1_pvalue_data",
+            ):
+                output_path = _save_pvalue_table_spec(
+                    paired_export_grouped,
+                    pvalue_cls_metric_specs,
+                    results_dir=results_dir,
+                    tab_name="model_comparison_cls_f1_pvalue",
+                )
+                st.success(f"CLS classwise F1 p-value data saved to {output_path}")
 
     elif active_view == "Data Comparison":
         st.subheader("Data Comparison")
