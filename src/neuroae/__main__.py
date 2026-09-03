@@ -429,7 +429,10 @@ def _is_skippable_experiment_configuration_error(exc):
 
 
 def _validate_group_transfer_matrix_config(model_config):
-    supported_models = {"LAE", "DAE", "VAE", "ConvAE", "Conv2dAE", "ConvVAE", "MonaiAEKL"}
+    supported_models = {
+        "LAE", "VLAE", "DAE", "VDAE", "VAE", "ConvAE", "VConvAE",
+        "ConvVAE", "Conv2dAE", "VConv2dAE", "MonaiAEKL",
+    }
     model_name = str(model_config["model"]["name"])
     if model_name.endswith("PredHeads"):
         raise ValueError("training.pipeline='group_transfer_matrix' does not support *PredHeads models.")
@@ -800,12 +803,12 @@ def load_model_from_config(
     model_name = model_config['model']['name']
     latent_dim = 0
 
-    if model_name in {"DAE", "VAE"}:
-        from .models.deep import DAE, VAE
+    if model_name in {"DAE", "VDAE", "VAE"}:
+        from .models.deep import DAE, VDAE
         hidden_dim = model_config['model']['hidden_dims']
         latent_dim = model_config['model']['latent_dim']
         # assuming the input is transposed
-        model_class = DAE if model_name == "DAE" else VAE
+        model_class = DAE if model_name == "DAE" else VDAE
         model = model_class(
             region_dim=input_dim[-1],
             timepoint_dim=input_dim[0],
@@ -829,11 +832,12 @@ def load_model_from_config(
             pred_head_type=pred_head_type,
             pred_head_num=pred_head_num
         )
-    elif model_name == "LAE":
-        from .models.linear import LAE
+    elif model_name in {"LAE", "VLAE"}:
+        from .models.linear import LAE, VLAE
         latent_dim = model_config['model']['latent_dim']
         hidden_dim = None
-        model = LAE(
+        model_class = LAE if model_name == "LAE" else VLAE
+        model = model_class(
             region_dim=input_dim[-1],
             timepoint_dim=input_dim[0],
             latent_dim=latent_dim,
@@ -892,11 +896,12 @@ def load_model_from_config(
             hidden_channels=hidden_dim,
             kernel_size=kernel_size
         )
-    elif model_name == "Conv2dAE":
-        from .models.conv2dAE import Conv2dAE
+    elif model_name in {"Conv2dAE", "VConv2dAE"}:
+        from .models.conv2dAE import Conv2dAE, VConv2dAE
         hidden_dim = model_config['model']['hidden_dims']
         latent_dim = model_config['model']['latent_dim']
-        model = Conv2dAE(
+        model_class = Conv2dAE if model_name == "Conv2dAE" else VConv2dAE
+        model = model_class(
             regions=input_dim[-1],
             timepoints=input_dim[0],
             latent_dim=latent_dim,
@@ -921,12 +926,12 @@ def load_model_from_config(
             pred_head_type=pred_head_type,
             pred_head_num=pred_head_num
         )
-    elif model_name == "ConvVAE":
-        from .models.convAE import ConvVAE
+    elif model_name in {"VConvAE", "ConvVAE"}:
+        from .models.convAE import VConvAE
         hidden_dim = model_config['model']['hidden_dims']
         latent_dim = model_config['model']['latent_dim']
         kernel_size = model_config['model'].get("kernel_size", 3)
-        model = ConvVAE(
+        model = VConvAE(
             regions=input_dim[-1],
             timepoints=input_dim[0],
             latent_dim=latent_dim,

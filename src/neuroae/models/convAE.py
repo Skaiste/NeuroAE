@@ -268,10 +268,16 @@ class ConvAE(ModelBase):
         return self.add_weighted_reconstruction_losses(loss, x, model_output[0])
 
 
-class ConvVAE(ConvAE):
+class VConvAE(ConvAE):
+    """Variational ConvAE with a default KL weight of one."""
+
     def __init__(self, *args, **kwargs):
         kwargs["variational"] = True
         super().__init__(*args, **kwargs)
+
+
+# Backwards-compatible name for saved configurations and external imports.
+ConvVAE = VConvAE
 
 
 

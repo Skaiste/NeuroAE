@@ -163,11 +163,15 @@ class DAEPredHeads(DAE):
         return self.add_weighted_reconstruction_losses(loss, x, x_hat)
 
 
-class VAE(DAE):
-    """Legacy variational name, preserving its historical default ``beta=1``."""
+class VDAE(DAE):
+    """Variational DAE with a default KL weight of one."""
 
     def _beta(self):
         return float(getattr(self, "loss_fn_params", {}).get("beta", 1.0))
+
+
+class VAE(VDAE):
+    """Legacy alias for :class:`VDAE`."""
 
 
 class VAEPredHeads(DAEPredHeads):

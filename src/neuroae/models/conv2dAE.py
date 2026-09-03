@@ -210,3 +210,30 @@ class Conv2dAE(ModelBase):
             self.hidden_channels, self.hidden_kernel_size, self.hidden_stride,
             self.hidden_region_widths, self.region_kernel_size, self.region_stride,
         ).to(self.device)
+
+
+class VConv2dAE(Conv2dAE):
+    """Variational Conv2dAE with a default KL weight of one."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.mu_head = nn.Conv2d(1, 1, kernel_size=1).to(self.device)
+        self.logvar_head = nn.Conv2d(1, 1, kernel_size=1).to(self.device)
+
+    def forward(self, x):
+        self._check_input(x)
+        latent_base = self.encoder(x.unsqueeze(1))
+        mu = self.mu_head(latent_base).squeeze(1)
+        log_var = torch.clamp(self.logvar_head(latent_base).squeeze(1), -10.0, 10.0)
+        z = mu + torch.exp(0.5 * log_var) * torch.randn_like(mu) if self.training else mu
+        return self.decode(z), mu, log_var, z
+
+    def loss(self, x, model_output):
+        x_hat, mu, log_var, _ = model_output
+        recon = self.reconstruction_loss(x_hat, x)
+        kld = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
+        kld = kld.sum(dim=(1, 2)).mean() / (log_var.size(1) * log_var.size(2))
+        beta = float(getattr(self, "loss_fn_params", {}).get("beta", 1.0))
+        return self.add_weighted_reconstruction_losses(
+            {"loss": recon + beta * kld, "recon": recon, "kld": kld}, x, x_hat
+        )

@@ -121,6 +121,13 @@ class LAE(ModelBase):
         self.decoder = nn.Linear(self.latent_dim, self.region_dim, bias=True).to(device)
 
 
+class VLAE(LAE):
+    """Variational LAE with a default KL weight of one."""
+
+    def _beta(self):
+        return float(getattr(self, "loss_fn_params", {}).get("beta", 1.0))
+
+
 
 class LAEPredHeads(LAE):
     """ LAE + linear temporal models for ABeta and Tau level prediction 
