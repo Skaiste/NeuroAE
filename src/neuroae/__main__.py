@@ -1005,8 +1005,8 @@ def load_model_from_config(
         if model_config['model']['reset_decoder']:
             model.reset_decoder()
 
-    summary(model, (197, 400))
-    breakpoint()
+    # summary(model, (197, 400))
+    # breakpoint()
     model = model.to(torch_device)
     return model, model_name, latent_dim
 
