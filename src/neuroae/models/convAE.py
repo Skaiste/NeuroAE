@@ -23,8 +23,6 @@ class _ConvEncoder(nn.Module):
         super().__init__()
         if isinstance(hidden_channels, int):
             hidden_channels = [hidden_channels]
-        if len(hidden_channels) == 0:
-            hidden_channels = [32, 64]
 
         padding = kernel_size // 2
         layers = []
@@ -60,11 +58,9 @@ class _ConvDecoder(nn.Module):
         super().__init__()
         if isinstance(hidden_channels, int):
             hidden_channels = [hidden_channels]
-        if len(hidden_channels) == 0:
-            hidden_channels = [32, 64]
 
         padding = kernel_size // 2
-        decoder_channels = list(hidden_channels[::-1])
+        decoder_channels = list(hidden_channels[::-1]) or [1]
 
         self.expand = nn.Conv1d(1, decoder_channels[0], kernel_size=1)
         # Restore the encoder's regional length exactly:
@@ -80,14 +76,17 @@ class _ConvDecoder(nn.Module):
             nn.GELU(),
         )
 
-        layers = []
-        in_channels = decoder_channels[0]
-        for channels in decoder_channels[1:]:
-            layers.append(nn.Conv1d(in_channels, channels, kernel_size=kernel_size, padding=padding))
-            layers.append(nn.GELU())
-            in_channels = channels
-        layers.append(nn.Conv1d(in_channels, 1, kernel_size=kernel_size, padding=padding))
-        self.reconstruction = nn.Sequential(*layers)
+        if hidden_channels:
+            layers = []
+            in_channels = decoder_channels[0]
+            for channels in decoder_channels[1:]:
+                layers.append(nn.Conv1d(in_channels, channels, kernel_size=kernel_size, padding=padding))
+                layers.append(nn.GELU())
+                in_channels = channels
+            layers.append(nn.Conv1d(in_channels, 1, kernel_size=kernel_size, padding=padding))
+            self.reconstruction = nn.Sequential(*layers)
+        else:
+            self.reconstruction = nn.Identity()
 
     def forward(self, z):
         h = self.expand(z)
@@ -104,7 +103,8 @@ class ConvAE(ModelBase):
     latent : (B, T, L)
     recon  : (B, T, R)
 
-    If ``variational=True``, ``forward`` returns ``(x_hat, mu, log_var, z)``.
+    Pass ``hidden_channels=[]`` to omit hidden convolutions. If
+    ``variational=True``, ``forward`` returns ``(x_hat, mu, log_var, z)``.
     Otherwise it returns ``(x_hat, z)``.
     """
 
