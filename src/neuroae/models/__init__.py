@@ -11,13 +11,29 @@ class ModelBase(nn.Module):
     def reconstruction_loss(self, x_hat, x):
         """Return the configured reconstruction objective (``mse`` by default).
 
-        Set ``loss_params.recon_loss`` to either ``"mse"`` or ``"rmse"``.
-        Reconstruction error is always the mean across all input elements.
+        Set ``loss_params.recon_loss`` to ``"mse"``, ``"rmse"``, ``"mae"``,
+        or ``"huber"``. Reconstruction error is always the mean across all
+        input elements. Huber loss uses ``loss_params.huber_delta`` (default
+        ``1.0``) as its transition point.
         """
         loss_params = getattr(self, "loss_fn_params", {}) or {}
         recon_loss = str(loss_params.get("recon_loss", "mse")).lower()
-        if recon_loss not in {"mse", "rmse"}:
-            raise ValueError("loss_params.recon_loss must be either 'mse' or 'rmse'.")
+        valid_losses = {"mse", "rmse", "mae", "huber"}
+        if recon_loss not in valid_losses:
+            raise ValueError(
+                "loss_params.recon_loss must be one of: "
+                "'mse', 'rmse', 'mae', or 'huber'."
+            )
+
+        if recon_loss == "mae":
+            return torch.nn.functional.l1_loss(x_hat, x, reduction="mean")
+        if recon_loss == "huber":
+            delta = float(loss_params.get("huber_delta", 1.0))
+            if delta <= 0:
+                raise ValueError("loss_params.huber_delta must be greater than zero.")
+            return torch.nn.functional.huber_loss(
+                x_hat, x, reduction="mean", delta=delta
+            )
 
         mse = torch.nn.functional.mse_loss(x_hat, x, reduction="mean")
         return mse if recon_loss == "mse" else torch.sqrt(mse)

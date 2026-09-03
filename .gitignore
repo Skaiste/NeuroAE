@@ -217,11 +217,35 @@ checkpoints/
 results/
 results_*/
 archive/
+plot_data/
+
+*.tar.gz
 
 .DS_Store
 
 .cursorignore
 .codexignore
+
+# LaTeX thesis build artefacts
+thesis/*.aux
+thesis/*.bbl
+thesis/*.bcf
+thesis/*.blg
+thesis/*.fdb_latexmk
+thesis/*.fls
+thesis/*.log
+thesis/*.out
+thesis/*.pdf
+thesis/*.run.xml
+thesis/*.synctex.gz
+thesis/*.toc
+thesis/*.lof
+thesis/*.lot
+thesis/*.nav
+thesis/*.snm
+thesis/*.vrb
+thesis/*-blx.bib
+thesis/svg-inkscape/
 
 # exporting sample data to visualise using pyVisfMRI tool uses csv files -> ignore them
 *.csv
