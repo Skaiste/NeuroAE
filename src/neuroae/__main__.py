@@ -24,6 +24,8 @@ from copy import deepcopy
 from neuronumba.tools.filters import BandPassFilter
 from sklearn.model_selection import KFold, StratifiedKFold
 
+from torchsummary import summary
+
 from .utils import *
 from .utils.dict_utils import deepupdate
 from .data import (
@@ -998,6 +1000,8 @@ def load_model_from_config(
         if model_config['model']['reset_decoder']:
             model.reset_decoder()
 
+    summary(model, (197, 400))
+    breakpoint()
     model = model.to(torch_device)
     return model, model_name, latent_dim
 
@@ -1318,7 +1322,6 @@ def run_evaluation(
         loaders['train_loader'],
         loaders.get('val_loader'),
         loaders['test_loader'],
-        pca=pca,
         use_pred_heads=len(data_config["data"].get("use_bio_levels", [])) > 0,
         evaluation_scope=evaluation_scope_override or training_config["training"].get("evaluation_scope", "combined"),
         classifier_train_loader=(
