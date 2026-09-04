@@ -27,10 +27,16 @@ def select_best_epoch(history, metric_name="macro_f1", min_delta=0.0):
         return None
 
     best_index = 0
+    minimize = metric_name == "loss"
     best_score = float(metric_values[0])
     for idx in range(1, len(metric_values)):
         score = float(metric_values[idx])
-        if score > (best_score + float(min_delta)):
+        is_better = (
+            score < (best_score - float(min_delta))
+            if minimize
+            else score > (best_score + float(min_delta))
+        )
+        if is_better:
             best_score = score
             best_index = idx
 
@@ -355,7 +361,8 @@ def train_torch_model(model, family, feature_payload, label_payload, training_co
     )
     history = {"train": {"loss": [], "accuracy": [], "macro_f1": []}, "val": {"loss": [], "accuracy": [], "macro_f1": []}}
     best_state = deepcopy(model.state_dict())
-    best_score = float("-inf")
+    select_by_loss = metric_name == "loss"
+    best_score = float("inf") if select_by_loss else float("-inf")
     best_val_metrics = None
     epochs_without_improvement = 0
 
@@ -380,7 +387,7 @@ def train_torch_model(model, family, feature_payload, label_payload, training_co
             history["val"]["loss"].append(val_loss)
             history["val"]["accuracy"].append(val_metrics["accuracy"])
             history["val"]["macro_f1"].append(val_metrics["macro_f1"])
-            score = val_metrics.get(metric_name, val_metrics["macro_f1"])
+            score = val_loss if select_by_loss else val_metrics.get(metric_name, val_metrics["macro_f1"])
             if (epoch_idx + 1) % log_every_epochs == 0:
                 LOGGER.info(
                     "Epoch %d/%d: train_loss=%.4f train_accuracy=%.4f train_macro_f1=%.4f val_loss=%.4f val_accuracy=%.4f val_macro_f1=%.4f %s=%.4f",
@@ -402,7 +409,12 @@ def train_torch_model(model, family, feature_payload, label_payload, training_co
                     f"val_loss={val_loss:.4f} val_accuracy={val_metrics['accuracy']:.4f} "
                     f"val_macro_f1={val_metrics['macro_f1']:.4f} {metric_name}={score:.4f}"
                 )
-            if score > (best_score + min_delta):
+            is_better = (
+                score < (best_score - min_delta)
+                if select_by_loss
+                else score > (best_score + min_delta)
+            )
+            if is_better:
                 best_score = score
                 best_state = deepcopy(model.state_dict())
                 best_val_metrics = val_metrics

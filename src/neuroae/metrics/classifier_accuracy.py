@@ -25,7 +25,7 @@ LATENT_BRAINGNN_TRAINING_CONFIG = {
     "training": {
         "learning_rate": 0.005,
         "cross_validation_folds": 5,
-        "classifier_metric": "macro_f1",
+        "classifier_metric": "loss",
         "batch_size": 16,
         "weight_decay": 0,
         "convergence_patience": 10,
