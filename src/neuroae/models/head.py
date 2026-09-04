@@ -65,26 +65,30 @@ class PredHeadConv(nn.Module):
         - temporal conv model with average pooling
         - linear layer for level prediction
     """
-    def __init__(self, latent_dim, output_dim, with_hidden=True):
+    def __init__(self, latent_dim, output_dim, with_hidden=True, hidden_dim=None):
         super().__init__()
         # since selected latent dimension is usually a small number
         # we can double it, another suggestion would be to get the middle number
         # in between latent and output dimensions, but that would bloat the model
         last_dim = latent_dim
         if with_hidden:
-            self.hidden_dim = latent_dim * 2
+            if hidden_dim is not None and (isinstance(hidden_dim, bool) or not isinstance(hidden_dim, int)):
+                raise TypeError("hidden_dim must be an integer when with_hidden=True.")
+            self.hidden_dim = latent_dim * 2 if hidden_dim is None else hidden_dim
+            if self.hidden_dim <= 0:
+                raise ValueError("hidden_dim must be greater than zero when with_hidden=True.")
             self.temporal = nn.Sequential(
                 nn.Conv1d(latent_dim, self.hidden_dim, kernel_size=3, padding=1),
-                nn.ReLU(),
+                nn.GELU(),
                 nn.Conv1d(self.hidden_dim, self.hidden_dim, kernel_size=3, padding=1),
-                nn.ReLU(),
+                nn.GELU(),
                 nn.AdaptiveAvgPool1d(1)
             )
             last_dim = self.hidden_dim
         else:
             self.temporal = nn.Sequential(
                 nn.Conv1d(latent_dim, latent_dim, kernel_size=3, padding=1),
-                nn.ReLU(),
+                nn.GELU(),
                 nn.AdaptiveAvgPool1d(1)
             )
         self.head = nn.Sequential(
@@ -145,7 +149,7 @@ class ClsHeadMLP(nn.Module):
         hidden_dim = int(hidden_dim or max(latent_dim, num_classes * 2))
         self.head = nn.Sequential(
             nn.Linear(latent_dim, hidden_dim),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(hidden_dim, num_classes),
         )
 
