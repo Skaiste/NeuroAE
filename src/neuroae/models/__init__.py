@@ -63,7 +63,7 @@ class ModelBase(nn.Module):
         pred_fc_windows = _windowed_fc(x_hat_windows)
         true_std = true_fc_windows.std(dim=-3, unbiased=False)
         pred_std = pred_fc_windows.std(dim=-3, unbiased=False)
-        return torch.sqrt(torch.nn.functional.mse_loss(pred_std, true_std))
+        return torch.nn.functional.mse_loss(pred_std, true_std)
 
     def add_weighted_reconstruction_losses(self, loss, x, x_hat):
         """Add optional FC, SWFC-variability, and first-derivative terms.
