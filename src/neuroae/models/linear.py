@@ -110,6 +110,12 @@ class LAE(ModelBase):
 
         return self.add_weighted_reconstruction_losses(loss, x, x_hat)
 
+    def _classification_logits(self, z):
+        if isinstance(self.cls_head, ClsHeadLinear):
+            # Flattening preserves (time, latent); pool over time, not latent.
+            z = z.reshape(z.shape[0], self.timepoint_dim, self.latent_dim).transpose(1, 2)
+        return self.cls_head(z)
+
     def classification_loss(self, logits, classes):
         """Cross-entropy using class weights fitted on the training split."""
         weights = self.cls_class_weights.to(device=logits.device, dtype=logits.dtype)
@@ -264,10 +270,9 @@ class LAEClsHead(LAE):
         output = super().forward(x)
         if len(output) == 4:
             x_hat, mu, log_var, z = output
-            return x_hat, mu, log_var, self.cls_head(z), z
+            return x_hat, mu, log_var, self._classification_logits(z), z
         x_hat, z = output
-        z_2d = z.reshape(z.shape[0], -1, self.timepoint_dim)
-        return x_hat, self.cls_head(z_2d), z
+        return x_hat, self._classification_logits(z), z
 
     def loss(self, x, classes, model_output):
         if len(model_output) == 5:
@@ -347,16 +352,16 @@ class LAEPredClsHeads(LAEPredHeads):
         self.cls_head = (
             head_types[cls_head_type](self.latent_flat_dim, int(num_classes), cls_head_hidden_dim, dropout=cls_head_dropout)
             if cls_head_type == "mlp"
-            else head_types[cls_head_type](self.latent_flat_dim, int(num_classes), dropout=cls_head_dropout)
+            else head_types[cls_head_type](self.latent_dim, int(num_classes), dropout=cls_head_dropout)
         )
 
     def forward(self, x):
         output = super().forward(x)
         if len(output) == 5:
             x_hat, mu, log_var, z_heads, z = output
-            return x_hat, mu, log_var, z_heads, self.cls_head(z), z
+            return x_hat, mu, log_var, z_heads, self._classification_logits(z), z
         x_hat, z_heads, z = output
-        return x_hat, z_heads, self.cls_head(z), z
+        return x_hat, z_heads, self._classification_logits(z), z
 
     def loss(self, x, x_heads, classes, model_output):
         """Return the joint loss for regression targets and class indices.

@@ -163,7 +163,7 @@ def _head_loss_from_metrics(metrics, configured_key=None):
         return float(value) if _is_finite_number(value) else float("nan")
     if _is_finite_number(metrics.get("cls_loss")):
         return float(metrics["cls_loss"])
-    excluded = {"loss", "raw_loss", "recon_loss", "fc_loss", "swfc_variability_loss", "derivative_loss"}
+    excluded = {"loss", "recon_loss", "fc_loss", "swfc_variability_loss", "derivative_loss"}
     values = [
         float(value)
         for name, value in metrics.items()
@@ -217,7 +217,7 @@ def select_best_checkpoint(
         )
         return loss, swfcd, head_loss, cls_macro_f1, joint_score
 
-    # Once joint training starts, warmup checkpoints are no longer candidates.
+    # Once full auxiliary weight is reached, exclude warmup and ramp checkpoints.
     active = _metric_values(history, "val", "auxiliary_active")
     start_idx = next((idx for idx, value in enumerate(active) if value), 0)
     best_idx = start_idx
@@ -304,8 +304,6 @@ def select_best_checkpoint(
 def _should_display_loss(loss_name, loss_params):
     """Return whether a loss component contributes to the configured objective."""
     loss_params = loss_params or {}
-    if loss_name == "raw_loss":
-        return True
     if loss_name == "kld":
         return float(loss_params.get("beta", 0.0)) != 0.0
     if loss_name == "fc_loss":
@@ -408,7 +406,6 @@ def _get_aux_loss(loss, use_pred_heads=False, use_cls_head=False):
     if use_pred_heads:
         excluded = {
             "loss",
-            "raw_loss",
             "recon",
             "recon_loss",
             "kld",
@@ -448,27 +445,36 @@ def _mean_loss_metrics(totals, cls_weight=0.0):
         cls_mean = totals["_cls_sum"] / totals["_cls_mass"]
         correction = cls_weight * (cls_mean - metrics["cls_loss"])
         metrics["cls_loss"] = cls_mean
-        for key in ("loss", "raw_loss"):
-            if key in metrics:
-                metrics[key] += correction
+        metrics["loss"] += correction
     return metrics
 
 
-def _training_loss(model, *args, auxiliary_warmup=False):
-    """Temporarily suppress auxiliary objectives without changing saved settings."""
-    if not auxiliary_warmup:
+def _auxiliary_weight_scale(epoch, warmup_epochs, ramp_epochs):
+    if epoch < warmup_epochs:
+        return 0.0
+    if ramp_epochs == 0:
+        return 1.0
+    return min(1.0, (epoch - warmup_epochs + 1) / ramp_epochs)
+
+
+def _training_loss(model, *args, auxiliary_warmup=False, auxiliary_scale=1.0):
+    """Scale auxiliary objectives while preserving configured target weights."""
+    scale = 0.0 if auxiliary_warmup else auxiliary_scale
+    if scale == 1.0:
         return model.loss(*args)
     original_params = model.loss_fn_params
+    params = original_params or {}
     model.loss_fn_params = {
-        **(original_params or {}),
-        "pred_heads_delta": 0.0,
-        "cls_head_weight": 0.0,
-        "cls_head_delta": 0.0,
+        **params,
+        "pred_heads_delta": scale * float(params.get("pred_heads_delta", 0.0)),
+        "cls_head_weight": scale * float(params.get("cls_head_weight", params.get("cls_head_delta", 1.0))),
+        "cls_head_delta": scale * float(params.get("cls_head_delta", 1.0)),
     }
     try:
         return model.loss(*args)
     finally:
         model.loss_fn_params = original_params
+
 
 
 def _dataset_class_labels(dataset):
@@ -534,9 +540,13 @@ def train_vae(
     compute_swfcd_during_training=None,
     aux_head_warmup_epochs=0,
     aux_learning_rate=None,
+    aux_head_ramp_epochs=20,
 ):
     if isinstance(aux_head_warmup_epochs, bool) or not isinstance(aux_head_warmup_epochs, int) or aux_head_warmup_epochs < 0:
         raise ValueError("aux_head_warmup_epochs must be a non-negative integer.")
+
+    if isinstance(aux_head_ramp_epochs, bool) or not isinstance(aux_head_ramp_epochs, int) or aux_head_ramp_epochs < 0:
+        raise ValueError("aux_head_ramp_epochs must be a non-negative integer.")
 
     auxiliary_modules = [
         module
@@ -547,6 +557,7 @@ def train_vae(
 
     if not (use_pred_heads or use_cls_head):
         aux_head_warmup_epochs = 0
+        aux_head_ramp_epochs = 0
 
     device = torch.device(device)
     model = model.to(device)
@@ -634,14 +645,16 @@ def train_vae(
         num_epochs = min(int(num_epochs), int(max_training_epochs))
 
     # Center validation only against its fixed warmup baseline. Training uses
-    # the unshifted objective; compare raw_loss across splits, not centered loss.
+    # the unshifted objective. Validation subtracts the scaled baseline.
     val_aux_delta = None
+    full_aux_epoch = aux_head_warmup_epochs + max(aux_head_ramp_epochs - 1, 0)
 
     for epoch in range(num_epochs):
         auxiliary_warmup = epoch < aux_head_warmup_epochs
+        auxiliary_scale = _auxiliary_weight_scale(epoch, aux_head_warmup_epochs, aux_head_ramp_epochs)
         capture_aux_delta = aux_head_warmup_epochs > 0 and epoch == aux_head_warmup_epochs - 1
 
-        if aux_head_warmup_epochs and epoch == aux_head_warmup_epochs:
+        if full_aux_epoch and epoch == full_aux_epoch:
             best_model_losses = None
             epochs_without_improvement = 0
 
@@ -652,7 +665,7 @@ def train_vae(
         # Training
         # =========================
         train_loss_params = {}
-        cls_weight = 0.0 if auxiliary_warmup or not use_cls_head else float(
+        cls_weight = 0.0 if not use_cls_head else auxiliary_scale * float(
             model.loss_fn_params.get("cls_head_weight", model.loss_fn_params.get("cls_head_delta", 1.0))
         )
 
@@ -679,13 +692,11 @@ def train_vae(
 
             if use_pred_heads:
                 heads = {bl: h.to(device) for bl, h in labels[1].items()}
-                loss = _training_loss(model, x, heads, output, auxiliary_warmup=auxiliary_warmup)
+                loss = _training_loss(model, x, heads, output, auxiliary_warmup=auxiliary_warmup, auxiliary_scale=auxiliary_scale)
             elif use_cls_head:
-                loss = _training_loss(model, x, _class_targets(labels), output, auxiliary_warmup=auxiliary_warmup)
+                loss = _training_loss(model, x, _class_targets(labels), output, auxiliary_warmup=auxiliary_warmup, auxiliary_scale=auxiliary_scale)
             else:
                 loss = model.loss(x, output)
-
-            loss["raw_loss"] = loss["loss"]
 
             cls_mass = float(model.cls_class_weights[_class_targets(labels)].sum()) if use_cls_head else None
             _accumulate_loss_metrics(train_loss_params, loss, x.shape[0], cls_mass)
@@ -735,15 +746,13 @@ def train_vae(
 
                     if use_pred_heads:
                         heads = {bl: h.to(device) for bl, h in labels[1].items()}
-                        loss = _training_loss(model, x, heads, output, auxiliary_warmup=auxiliary_warmup)
+                        loss = _training_loss(model, x, heads, output, auxiliary_warmup=auxiliary_warmup, auxiliary_scale=auxiliary_scale)
                     elif use_cls_head:
-                        loss = _training_loss(model, x, _class_targets(labels), output, auxiliary_warmup=auxiliary_warmup)
+                        loss = _training_loss(model, x, _class_targets(labels), output, auxiliary_warmup=auxiliary_warmup, auxiliary_scale=auxiliary_scale)
                     else:
                         loss = model.loss(x, output)
 
                     val_aux_loss = _get_aux_loss(loss, use_pred_heads=use_pred_heads, use_cls_head=use_cls_head)
-
-                    loss["raw_loss"] = loss["loss"]
 
                     if not auxiliary_warmup and val_aux_delta is not None and val_aux_loss is not None:
                         if use_cls_head:
@@ -751,7 +760,7 @@ def train_vae(
                         else:
                             aux_weight = float(model.loss_fn_params.get("pred_heads_delta", 0.0))
 
-                        loss["loss"] = loss["loss"] - aux_weight * val_aux_delta
+                        loss["loss"] = loss["loss"] - auxiliary_scale * aux_weight * val_aux_delta
 
                     cls_mass = float(model.cls_class_weights[_class_targets(labels)].sum()) if use_cls_head else None
                     _accumulate_loss_metrics(val_loss_params, loss, x.shape[0], cls_mass)
@@ -785,8 +794,8 @@ def train_vae(
                     print(f"Captured val auxiliary baseline: {val_aux_delta:.6f}", flush=True)
             for key, value in val_loss_params.items():
                 _append_history_metric(history, "val", key, value)
-            if aux_head_warmup_epochs:
-                _append_history_metric(history, "val", "auxiliary_active", not auxiliary_warmup)
+            if aux_head_warmup_epochs or aux_head_ramp_epochs:
+                _append_history_metric(history, "val", "auxiliary_active", auxiliary_scale == 1.0)
 
             swfcd_pearson = float("nan")
 
@@ -831,7 +840,7 @@ def train_vae(
             if compute_head_loss_during_training:
                 previous_swfcd = (
                     history["val"]["swfcd_pearson"][-2]
-                    if len(history["val"]["swfcd_pearson"]) > 1 and epoch != aux_head_warmup_epochs
+                    if len(history["val"]["swfcd_pearson"]) > 1 and epoch != full_aux_epoch
                     else None
                 )
 
@@ -933,7 +942,7 @@ def train_vae(
             val_loader is not None
             and convergence_patience is not None
             and convergence_patience > 0
-            and epoch + 1 > max(convergence_warmup_epochs, aux_head_warmup_epochs)
+            and epoch + 1 > max(convergence_warmup_epochs, full_aux_epoch)
             and epochs_without_improvement >= convergence_patience
         ):
             print(
