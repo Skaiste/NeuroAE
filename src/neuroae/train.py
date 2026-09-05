@@ -366,11 +366,8 @@ def _collect_latents_and_labels(model, data_loader, device, use_pred_heads, vali
         return None, []
     return torch.cat(latents, dim=0).numpy(), labels
 
-def _optimizer_param_groups(model, weight_decay, aux_weight_decay=None):
-    """Separate auxiliary heads from AE parameters; None preserves shared decay."""
-    aux_weight_decay = weight_decay if aux_weight_decay is None else aux_weight_decay
-    if not 0 <= aux_weight_decay:
-        raise ValueError("aux_weight_decay must be non-negative.")
+def _optimizer_param_groups(model, weight_decay):
+    """Apply weight decay to the autoencoder only, exempting auxiliary heads."""
     auxiliary_ids = {
         id(param)
         for name in ("heads", "cls_head")
@@ -383,9 +380,26 @@ def _optimizer_param_groups(model, weight_decay, aux_weight_decay=None):
         (aux_params if id(param) in auxiliary_ids else ae_params).append(param)
     return [
         {"params": params, "weight_decay": decay}
-        for params, decay in ((ae_params, weight_decay), (aux_params, aux_weight_decay))
+        for params, decay in ((ae_params, weight_decay), (aux_params, 0.0))
         if params
     ]
+
+
+def _training_loss(model, *args, auxiliary_warmup=False):
+    """Temporarily suppress auxiliary objectives without changing saved settings."""
+    if not auxiliary_warmup:
+        return model.loss(*args)
+    original_params = model.loss_fn_params
+    model.loss_fn_params = {
+        **(original_params or {}),
+        "pred_heads_delta": 0.0,
+        "cls_head_weight": 0.0,
+        "cls_head_delta": 0.0,
+    }
+    try:
+        return model.loss(*args)
+    finally:
+        model.loss_fn_params = original_params
 
 
 def train_vae(
@@ -409,8 +423,16 @@ def train_vae(
     save_checkpoint=True,
     vectorize_val_reference=False,
     compute_swfcd_during_training=None,
-    aux_weight_decay=None,
+    aux_head_warmup_epochs=0,
 ):
+    if isinstance(aux_head_warmup_epochs, bool) or not isinstance(aux_head_warmup_epochs, int) or aux_head_warmup_epochs < 0:
+        raise ValueError("aux_head_warmup_epochs must be a non-negative integer.")
+    auxiliary_modules = [
+        module for name in ("heads", "cls_head")
+        for module in [getattr(model, name, None)] if module is not None
+    ]
+    if not (use_pred_heads or use_cls_head):
+        aux_head_warmup_epochs = 0
     device = torch.device(device)
     model = model.to(device)
 
@@ -440,7 +462,7 @@ def train_vae(
     requires_optimizer = bool(getattr(model, "requires_optimizer", True))
     optimizer = (
         optim.AdamW(
-            _optimizer_param_groups(model, weight_decay, aux_weight_decay),
+            _optimizer_param_groups(model, weight_decay),
             lr=learning_rate,
             weight_decay=weight_decay,
         )
@@ -484,12 +506,19 @@ def train_vae(
     if max_training_epochs is not None:
         num_epochs = min(int(num_epochs), int(max_training_epochs))
     for epoch in range(num_epochs):
+        auxiliary_warmup = epoch < aux_head_warmup_epochs
+        if aux_head_warmup_epochs and epoch == aux_head_warmup_epochs:
+            best_model_losses = None
+            epochs_without_improvement = 0
         # Non-gradient models (e.g. PCAAE) may prepare their closed-form fit
         # from the whole training set before their first and only epoch.
         if epoch == 0 and hasattr(model, "fit_train_loader"):
             model.fit_train_loader(train_loader, device=device)
         train_loss_params = {}
         model.train()
+        if auxiliary_warmup:
+            for module in auxiliary_modules:
+                module.eval()
         for batch_idx, (data, labels) in enumerate(train_loader):
             x = data.to(device)
             valid_mask = _build_valid_mask(x, train_valid_last_dim)
@@ -510,9 +539,9 @@ def train_vae(
 
             if use_pred_heads:
                 heads = {bl:h.to(device) for bl,h in labels[1].items()}
-                loss = model.loss(x, heads, output)
+                loss = _training_loss(model, x, heads, output, auxiliary_warmup=auxiliary_warmup)
             elif use_cls_head:
-                loss = model.loss(x, _class_targets(labels), output)
+                loss = _training_loss(model, x, _class_targets(labels), output, auxiliary_warmup=auxiliary_warmup)
             else:
                 loss = model.loss(x, output)
 
@@ -523,6 +552,10 @@ def train_vae(
 
             if optimizer is not None:
                 loss['loss'].backward()
+                if auxiliary_warmup:
+                    for module in auxiliary_modules:
+                        for param in module.parameters():
+                            param.grad = None
                 optimizer.step()
 
         num_batches = batch_idx + 1
@@ -705,7 +738,7 @@ def train_vae(
             and
             convergence_patience is not None
             and convergence_patience > 0
-            and (epoch + 1) > convergence_warmup_epochs
+            and (epoch + 1) > max(convergence_warmup_epochs, aux_head_warmup_epochs)
             and epochs_without_improvement >= convergence_patience
         ):
             print(
