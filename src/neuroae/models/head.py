@@ -140,7 +140,9 @@ class ClsHeadLinear(nn.Module):
         self.head = nn.Linear(latent_dim, num_classes)
 
     def forward(self, z):
-        return self.head(self.dropout(z))
+        z_pooled = z.mean(dim=2)
+        x = self.head(self.dropout(z_pooled))
+        return x
 
 
 class ClsHeadMLP(nn.Module):
