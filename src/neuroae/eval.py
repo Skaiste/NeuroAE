@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 from neurocls.eval import compute_classification_metrics
 
-from .metrics.classifier_accuracy import run_latent_braingnn_classifier
+from .metrics.classifier_accuracy import run_latent_svm_classifier
 from .utils.np_utils import to_numpy
 from .metrics.fc_preservation import fc_preservation_score
 from .metrics.silhouette import silhouette
@@ -494,7 +494,7 @@ def eval_vae(
     eval_classifier_latents = _prepare_classifier_latents(model, eval_outputs["latents"], split_name="test")
 
     print("Evaluation: training latent classifier for model latents", flush=True)
-    classifier_result = run_latent_braingnn_classifier(
+    classifier_result = run_latent_svm_classifier(
         to_numpy(train_classifier_latents),
         classifier_train_outputs["labels"].tolist(),
         to_numpy(eval_classifier_latents),

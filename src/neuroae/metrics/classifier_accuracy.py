@@ -9,7 +9,7 @@ from sklearn.preprocessing import StandardScaler
 
 from neurocls.eval import compute_classification_metrics
 from neurocls.models import create_model
-from neurocls.train import run_torch_cross_validation_epoch_search, train_torch_model
+from neurocls.train import run_torch_cross_validation_epoch_search, train_sklearn_model, train_torch_model
 
 
 LATENT_BRAINGNN_MODEL_CONFIG = {
@@ -33,6 +33,20 @@ LATENT_BRAINGNN_TRAINING_CONFIG = {
         "convergence_warmup_epochs": 0,
         "num_epochs": 100,
         "reproducibility": {"seed": 1717},
+    }
+}
+
+# Classifier used by NeuroAE's standard reconstruction/latent evaluation.
+# Keep this configuration here rather than in neurocls: it evaluates an AE's
+# latent representation, whereas neurocls is a separate classifier workflow.
+LATENT_SVM_MODEL_CONFIG = {
+    "model": {
+        "name": "svm",
+        "input_mode": "latent_flat",
+        "kernel": "sigmoid",
+        "C": 1.0,
+        "class_weight": "balanced",
+        "probability": True,
     }
 }
 
@@ -159,6 +173,16 @@ def _latent_graph_split(latents, labels):
     }
 
 
+def _latent_vector_split(latents, labels):
+    latent_matrix = _to_matrix(latents)
+    labels = list(labels)
+    if latent_matrix.shape[0] != len(labels):
+        raise ValueError(
+            f"Latent sample count {latent_matrix.shape[0]} does not match label count {len(labels)}."
+        )
+    return {"X": latent_matrix, "labels": labels}
+
+
 def _fit_graph_scaler(train_nodes, val_nodes=None, test_nodes=None):
     scaler = StandardScaler()
     train_shape = train_nodes.shape
@@ -215,21 +239,16 @@ def _nan_metrics(label_classes):
     }
 
 
-def run_latent_braingnn_classifier(
+def run_latent_svm_classifier(
     train_latents,
     train_labels,
     test_latents,
     test_labels,
     device="cuda" if torch.cuda.is_available() else "cpu",
 ):
-    """Select epochs with 5-fold training-set CV, then evaluate once on test.
-
-    Convergence is evaluated only on temporary validation folds carved from
-    ``train_latents``.  ``test_latents`` are excluded from selection and are
-    used only after the final model has been trained on all training latents.
-    """
+    """Fit the configured SVM on AE training latents and evaluate AE test latents."""
     _emit_classifier_progress(
-        f"Starting latent BrainGNN classifier: train={len(train_labels)} "
+        f"Starting latent SVM classifier: train={len(train_labels)} "
         f"test={len(test_labels)} device={device}"
     )
     label_payload = _encode_labels(train_labels, test_labels=test_labels)
@@ -248,76 +267,41 @@ def run_latent_braingnn_classifier(
             "label_payload": label_payload,
         }
 
-    _emit_classifier_progress("Preparing train graph payload")
-    train_split = _latent_graph_split(train_latents, train_labels)
-    _emit_classifier_progress("Preparing test graph payload")
-    test_split = _latent_graph_split(test_latents, test_labels)
-
-    _emit_classifier_progress("Scaling node features")
-    train_nodes, _, test_nodes = _fit_graph_scaler(
-        train_split["node_features"],
-        test_nodes=test_split["node_features"],
-    )
-    train_split["node_features"] = train_nodes
-    test_split["node_features"] = test_nodes
+    _emit_classifier_progress("Preparing flattened latent feature vectors")
+    train_split = _latent_vector_split(train_latents, train_labels)
+    test_split = _latent_vector_split(test_latents, test_labels)
+    scaler = StandardScaler()
+    train_split["X"] = scaler.fit_transform(train_split["X"]).astype(np.float32)
+    test_split["X"] = scaler.transform(test_split["X"]).astype(np.float32)
 
     feature_payload = {
-        "input_mode": "graph",
+        "input_mode": "latent_flat",
         "train": train_split,
         "val": None,
         "test": test_split,
-        "scaler": None,
+        "scaler": scaler,
     }
-    feature_metadata = {"input_shape": tuple(train_split["node_features"].shape[1:])}
+    feature_metadata = {"input_shape": tuple(train_split["X"].shape[1:])}
     _emit_classifier_progress(f"Feature metadata prepared: input_shape={feature_metadata['input_shape']}")
 
-    model_config = deepcopy(LATENT_BRAINGNN_MODEL_CONFIG)
-    training_config = deepcopy(LATENT_BRAINGNN_TRAINING_CONFIG)
-    seed = int(training_config["training"]["reproducibility"]["seed"])
-    _set_seed(seed)
-
-    _emit_classifier_progress("Selecting BrainGNN epochs with 5-fold training-set CV")
-    cv_feature_payload = dict(feature_payload)
-    cv_feature_payload["test"] = None
-    cv_summary = run_torch_cross_validation_epoch_search(
-        model_factory=lambda: create_model(
-            model_config,
-            feature_metadata["input_shape"],
-            len(label_payload["classes"]),
-        )["model"],
-        family="torch_graph",
-        feature_payload=cv_feature_payload,
-        label_payload=label_payload,
-        training_config=training_config,
-        device=torch.device(device),
-    )
-    training_config["training"]["num_epochs"] = int(cv_summary["selected_num_epochs"])
-    _set_seed(seed)
-
-    _emit_classifier_progress("Creating final BrainGNN classifier runtime")
+    model_config = deepcopy(LATENT_SVM_MODEL_CONFIG)
+    _emit_classifier_progress("Creating configured SVM runtime")
     runtime = create_model(model_config, feature_metadata["input_shape"], len(label_payload["classes"]))
     _emit_classifier_progress(
         f"Created runtime: family={runtime['family']} classes={len(label_payload['classes'])}"
     )
-    _emit_classifier_progress("Starting classifier optimization")
-    model, history, train_metrics, _ = train_torch_model(
-        runtime["model"],
-        runtime["family"],
-        feature_payload,
-        label_payload,
-        training_config,
-        torch.device(device),
-    )
+    model, history, train_metrics, _ = train_sklearn_model(runtime["model"], feature_payload, label_payload)
 
     _emit_classifier_progress("Running classifier predictions on test split")
-    test_predictions, test_probabilities = _predict_graph_model(model, test_split, torch.device(device))
+    test_predictions = model.predict(test_split["X"])
+    test_probabilities = model.predict_proba(test_split["X"])
     test_metrics = compute_classification_metrics(
         label_payload["test"],
         test_predictions,
         label_payload["classes"],
         y_proba=test_probabilities,
     )
-    _emit_classifier_progress("Latent BrainGNN classifier finished")
+    _emit_classifier_progress("Latent SVM classifier finished")
 
     return {
         "model": model,
@@ -328,5 +312,5 @@ def run_latent_braingnn_classifier(
         "test_predictions": test_predictions,
         "test_probabilities": test_probabilities,
         "label_payload": label_payload,
-        "cross_validation": cv_summary,
+        "cross_validation": None,
     }
