@@ -159,7 +159,7 @@ class DAEPredHeads(DAE):
             head_losses.append(head_loss)
             loss[f"{label}_loss"] = head_loss
         if head_losses:
-            loss["loss"] += float(getattr(self, "loss_fn_params", {}).get("pred_heads_delta", 0.0)) * sum(head_losses) / len(head_losses)
+            loss["loss"] = loss["loss"] + float(getattr(self, "loss_fn_params", {}).get("pred_heads_delta", 0.0)) * sum(head_losses) / len(head_losses)
         return self.add_weighted_reconstruction_losses(loss, x, x_hat)
 
 

@@ -700,6 +700,7 @@ def _run_cross_validation_epoch_search(loaders, data_config, model_config, train
             fold_loaders["val_loader"],
             num_epochs=max_epochs,
             learning_rate=training_config["training"].get("learning_rate", 1e-3),
+            aux_learning_rate=training_config["training"].get("aux_learning_rate"),
             weight_decay=training_config["training"].get("weight_decay", 1e-4),
             device=device,
             save_dir=training_config["training"].get("save_dir", "./models"),
@@ -712,14 +713,14 @@ def _run_cross_validation_epoch_search(loaders, data_config, model_config, train
             convergence_min_delta=training_config["training"].get("convergence_min_delta", 0.0),
             convergence_warmup_epochs=training_config["training"].get("convergence_warmup_epochs", 0),
             aux_head_warmup_epochs=training_config["training"].get("aux_head_warmup_epochs", 0),
-            checkpoint_selection_metric=training_config["training"].get("checkpoint_selection_metric", "swfcd_loss_joint"),
+            checkpoint_selection_metric=training_config["training"].get("checkpoint_selection_metric", "val_loss"),
             save_checkpoint=False,
             vectorize_val_reference=training_config["training"].get("vectorize_val_reference", False),
             compute_swfcd_during_training=training_config["training"].get("compute_swfcd_during_training"),
         )
         selection = select_best_checkpoint(
             history,
-            selection_metric=training_config["training"].get("checkpoint_selection_metric", "swfcd_loss_joint"),
+            selection_metric=training_config["training"].get("checkpoint_selection_metric", "val_loss"),
             min_delta=training_config["training"].get("convergence_min_delta", 0.0),
         )
         best_epoch = selection["best_epoch"] if selection is not None else max(len(history.get("train", {}).get("loss", [])), 1)
@@ -755,7 +756,7 @@ def _run_cross_validation_epoch_search(loaders, data_config, model_config, train
     summary = {
         "enabled": True,
         "num_folds": n_splits,
-        "selection_metric": training_config["training"].get("checkpoint_selection_metric", "swfcd_loss_joint"),
+        "selection_metric": training_config["training"].get("checkpoint_selection_metric", "val_loss"),
         "folds": fold_summaries,
         "fold_best_epochs": best_epochs,
         "selected_num_epochs": selected_num_epochs,
@@ -1214,6 +1215,7 @@ def run_training(
         loaders.get('val_loader'),
         num_epochs=1 if dry_run else training_config['training'].get('num_epochs', 50),
         learning_rate=training_config['training'].get('learning_rate', 1e-3),
+        aux_learning_rate=training_config['training'].get('aux_learning_rate'),
         weight_decay=training_config['training'].get('weight_decay', 1e-4),
         device=device,
         save_dir=training_config['training']['save_dir'],
@@ -1225,7 +1227,7 @@ def run_training(
         convergence_min_delta=training_config['training'].get('convergence_min_delta', 0.0),
         convergence_warmup_epochs=training_config['training'].get('convergence_warmup_epochs', 0),
         aux_head_warmup_epochs=training_config['training'].get('aux_head_warmup_epochs', 0),
-        checkpoint_selection_metric=training_config['training'].get('checkpoint_selection_metric', 'swfcd_loss_joint'),
+        checkpoint_selection_metric=training_config['training'].get('checkpoint_selection_metric', 'val_loss'),
         save_checkpoint=not dry_run,
         vectorize_val_reference=training_config['training'].get('vectorize_val_reference', False),
         compute_swfcd_during_training=training_config['training'].get('compute_swfcd_during_training'),
@@ -1243,7 +1245,7 @@ def run_training(
     if dry_run:
         print(
             "Dry run training summary: "
-            f"{json.dumps(_build_training_summary(history, mse_pca, checkpoint_selection_metric=training_config['training'].get('checkpoint_selection_metric', 'swfcd_loss_joint')), sort_keys=True, default=str)}"
+            f"{json.dumps(_build_training_summary(history, mse_pca, checkpoint_selection_metric=training_config['training'].get('checkpoint_selection_metric', 'val_loss')), sort_keys=True, default=str)}"
         )
         return None
 
@@ -1255,7 +1257,7 @@ def run_training(
         'summary': _build_training_summary(
             history,
             mse_pca,
-            checkpoint_selection_metric=training_config['training'].get('checkpoint_selection_metric', 'swfcd_loss_joint'),
+            checkpoint_selection_metric=training_config['training'].get('checkpoint_selection_metric', 'val_loss'),
         ),
         'model_params': deepcopy(model_config.get('model', {})),
         'training_params': deepcopy(training_config.get('training', {})),

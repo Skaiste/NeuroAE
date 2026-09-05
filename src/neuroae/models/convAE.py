@@ -374,7 +374,7 @@ class ConvAEPredHeads(ConvAE):
             loss[f"{bl}_loss"] = head_loss
 
         if pred_head_loss:
-            loss["loss"] += pred_heads_delta * sum(pred_head_loss) / len(pred_head_loss)
+            loss["loss"] = loss["loss"] + pred_heads_delta * sum(pred_head_loss) / len(pred_head_loss)
 
         return self.add_weighted_reconstruction_losses(loss, x, x_hat)
 

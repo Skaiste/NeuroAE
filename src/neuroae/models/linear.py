@@ -104,11 +104,16 @@ class LAE(ModelBase):
             kld = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
             kld = kld.sum(dim=1).mean() / log_var.size(1)
             loss["kld"] = kld
-            loss["loss"] += beta * kld
+            loss["loss"] = loss["loss"] + beta * kld
         else:
             loss["kld"] = torch.zeros((), device=x.device, dtype=x.dtype)
 
         return self.add_weighted_reconstruction_losses(loss, x, x_hat)
+
+    def classification_loss(self, logits, classes):
+        """Cross-entropy using class weights fitted on the training split."""
+        weights = self.cls_class_weights.to(device=logits.device, dtype=logits.dtype)
+        return F.cross_entropy(logits, classes.long(), weight=weights)
 
     def freeze_encoder(self):
         for param in self.encoder.parameters():
@@ -206,7 +211,7 @@ class LAEPredHeads(LAE):
             kld = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
             kld = kld.sum(dim=1).mean() / log_var.size(1)
             loss["kld"] = kld
-            loss["loss"] += beta * kld
+            loss["loss"] = loss["loss"] + beta * kld
         else:
             loss["kld"] = torch.zeros((), device=x.device, dtype=x.dtype)
 
@@ -219,7 +224,7 @@ class LAEPredHeads(LAE):
             loss[f"{bl}_loss"] = head_loss
 
         if len(pred_head_loss) > 0:
-            loss['loss'] += pred_heads_delta * sum(pred_head_loss) / len(pred_head_loss)
+            loss['loss'] = loss['loss'] + pred_heads_delta * sum(pred_head_loss) / len(pred_head_loss)
 
         return self.add_weighted_reconstruction_losses(loss, x, x_hat)
 
@@ -247,6 +252,8 @@ class LAEClsHead(LAE):
         if len(self.class_labels) != int(num_classes):
             raise ValueError("class_labels length must match num_classes.")
         self.class_to_idx = {label: idx for idx, label in enumerate(self.class_labels)}
+        # Derived from the training split; keep old weight checkpoints compatible.
+        self.register_buffer("cls_class_weights", torch.ones(int(num_classes)), persistent=False)
         if len(self.class_to_idx) != len(self.class_labels):
             raise ValueError("class_labels must be unique.")
         self.cls_head = head_types[cls_head_type](
@@ -275,16 +282,16 @@ class LAEClsHead(LAE):
             kld = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
             kld = kld.sum(dim=1).mean() / log_var.size(1)
             loss["kld"] = kld
-            loss["loss"] += beta * kld
+            loss["loss"] = loss["loss"] + beta * kld
         else:
             loss["kld"] = torch.zeros((), device=x.device, dtype=x.dtype)
 
-        cls_loss = F.cross_entropy(logits, classes.long())
+        cls_loss = self.classification_loss(logits, classes)
         loss["cls_loss"] = cls_loss
         cls_weight = self.loss_fn_params.get(
             "cls_head_weight", self.loss_fn_params.get("cls_head_delta", 1.0)
         )
-        loss["loss"] += float(cls_weight) * cls_loss
+        loss["loss"] = loss["loss"] + float(cls_weight) * cls_loss
 
         return self.add_weighted_reconstruction_losses(loss, x, x_hat)
 
@@ -331,6 +338,8 @@ class LAEPredClsHeads(LAEPredHeads):
         if len(self.class_labels) != int(num_classes):
             raise ValueError("class_labels length must match num_classes.")
         self.class_to_idx = {label: idx for idx, label in enumerate(self.class_labels)}
+        # Derived from the training split; keep old weight checkpoints compatible.
+        self.register_buffer("cls_class_weights", torch.ones(int(num_classes)), persistent=False)
         if len(self.class_to_idx) != len(self.class_labels):
             raise ValueError("class_labels must be unique.")
 
@@ -368,7 +377,7 @@ class LAEPredClsHeads(LAEPredHeads):
             kld = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
             kld = kld.sum(dim=1).mean() / log_var.size(1)
             loss["kld"] = kld
-            loss["loss"] += beta * kld
+            loss["loss"] = loss["loss"] + beta * kld
         else:
             loss["kld"] = torch.zeros((), device=x.device, dtype=x.dtype)
 
@@ -382,16 +391,16 @@ class LAEPredClsHeads(LAEPredHeads):
             pred_losses.append(head_loss)
             loss[f"{name}_loss"] = head_loss
         if pred_losses:
-            loss["loss"] += float(self.loss_fn_params.get("pred_heads_delta", 0.0)) * (
+            loss["loss"] = loss["loss"] + float(self.loss_fn_params.get("pred_heads_delta", 0.0)) * (
                 sum(pred_losses) / len(pred_losses)
             )
 
-        cls_loss = F.cross_entropy(logits, classes.long())
+        cls_loss = self.classification_loss(logits, classes)
         loss["cls_loss"] = cls_loss
         cls_weight = self.loss_fn_params.get(
             "cls_head_weight", self.loss_fn_params.get("cls_head_delta", 1.0)
         )
-        loss["loss"] += float(cls_weight) * cls_loss
+        loss["loss"] = loss["loss"] + float(cls_weight) * cls_loss
 
         return self.add_weighted_reconstruction_losses(loss, x, x_hat)
     
