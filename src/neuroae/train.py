@@ -384,6 +384,33 @@ def _optimizer_param_groups(model, weight_decay):
         if params
     ]
 
+def _get_aux_loss(loss, use_pred_heads=False, use_cls_head=False):
+    """Return the unweighted aggregate auxiliary loss."""
+    if use_cls_head:
+        return loss.get("cls_loss")
+
+    if use_pred_heads:
+        excluded = {
+            "loss",
+            "recon",
+            "recon_loss",
+            "kld",
+            "fc_loss",
+            "swfc_variability_loss",
+            "derivative_loss",
+        }
+
+        aux_losses = [
+            value
+            for name, value in loss.items()
+            if name.endswith("_loss") and name not in excluded
+        ]
+
+        if aux_losses:
+            return sum(aux_losses) / len(aux_losses)
+
+    return None
+
 
 def _training_loss(model, *args, auxiliary_warmup=False):
     """Temporarily suppress auxiliary objectives without changing saved settings."""
@@ -427,17 +454,23 @@ def train_vae(
 ):
     if isinstance(aux_head_warmup_epochs, bool) or not isinstance(aux_head_warmup_epochs, int) or aux_head_warmup_epochs < 0:
         raise ValueError("aux_head_warmup_epochs must be a non-negative integer.")
+
     auxiliary_modules = [
-        module for name in ("heads", "cls_head")
-        for module in [getattr(model, name, None)] if module is not None
+        module
+        for name in ("heads", "cls_head")
+        for module in [getattr(model, name, None)]
+        if module is not None
     ]
+
     if not (use_pred_heads or use_cls_head):
         aux_head_warmup_epochs = 0
+
     device = torch.device(device)
     model = model.to(device)
 
     if use_pred_heads and use_cls_head:
         raise ValueError("Prediction heads and a classification head cannot be trained together.")
+
     class_to_idx = getattr(model, "class_to_idx", None)
     if use_cls_head and not class_to_idx:
         raise ValueError("Classification-head training requires model.class_to_idx.")
@@ -451,28 +484,25 @@ def train_vae(
             raise ValueError(f"Encountered class label not configured for cls_head: {exc.args[0]!r}") from exc
 
     if noise is not None:
-        noise = {k:v for p in noise for k,v in p.items()}
+        noise = {k: v for p in noise for k, v in p.items()}
 
-    history = {
-        'train': {},
-        'val': {}
-    }
+    history = {"train": {}, "val": {}}
     best_model_losses = None
     epochs_without_improvement = 0
+
     requires_optimizer = bool(getattr(model, "requires_optimizer", True))
     optimizer = (
-        optim.AdamW(
-            _optimizer_param_groups(model, weight_decay),
-            lr=learning_rate,
-            weight_decay=weight_decay,
-        )
+        optim.AdamW(_optimizer_param_groups(model, weight_decay), lr=learning_rate, weight_decay=weight_decay)
         if requires_optimizer
         else None
     )
+
     train_valid_last_dim = _dataset_valid_last_dim(train_loader.dataset)
     val_valid_last_dim = _dataset_valid_last_dim(val_loader.dataset) if val_loader is not None else None
+
     selection_metric = str(checkpoint_selection_metric or "val_loss")
     selection_requires_joint_metrics = selection_metric in {"swfcd_classifier_joint", "swfcd_logreg_joint"}
+
     if selection_requires_joint_metrics:
         raise ValueError(
             "Training-time checkpoint_selection_metric values "
@@ -480,20 +510,29 @@ def train_vae(
             "because classifier metrics are evaluation-only. Use 'swfcd_loss_joint', "
             "'swfcd', or 'val_loss' instead."
         )
+
     compute_head_loss_during_training = selection_metric == "swfcd_head_loss_guarded"
     compute_cls_macro_f1_during_training = selection_metric == "swfcd_cls_macro_f1_joint"
+
     if compute_cls_macro_f1_during_training and not use_cls_head:
         raise ValueError("swfcd_cls_macro_f1_joint requires a model with a classification auxiliary head.")
+
     if compute_swfcd_during_training is None:
         compute_swfcd_during_training = selection_metric in {
-            "swfcd_loss_joint", "swfcd_joint", "swfcd", "swfcd_pearson", "swfcd_head_loss_guarded", "swfcd_cls_macro_f1_joint"
+            "swfcd_loss_joint",
+            "swfcd_joint",
+            "swfcd",
+            "swfcd_pearson",
+            "swfcd_head_loss_guarded",
+            "swfcd_cls_macro_f1_joint",
         }
+
     if val_loader is None:
         compute_swfcd_during_training = False
 
     val_swfcd = SwFCD(val_loader.dataset, 30, 3) if (compute_swfcd_during_training and val_loader is not None) else None
-    # val_swfcd = SwFCD(val_loader.dataset, 2, 1) if (compute_swfcd_during_training and val_loader is not None) else None
     val_reference_vec = None
+
     if (
         compute_swfcd_during_training
         and val_loader is not None
@@ -502,34 +541,46 @@ def train_vae(
     ):
         val_reference = torch.as_tensor(val_loader.dataset.data, dtype=torch.float32, device=device)
         val_reference_vec = val_swfcd.vectorize(val_reference, track_grad=False)
+
     max_training_epochs = getattr(model, "max_training_epochs", None)
     if max_training_epochs is not None:
         num_epochs = min(int(num_epochs), int(max_training_epochs))
+
+    train_aux_delta = None
+    val_aux_delta = None
+
     for epoch in range(num_epochs):
         auxiliary_warmup = epoch < aux_head_warmup_epochs
+        capture_aux_delta = aux_head_warmup_epochs > 0 and epoch == aux_head_warmup_epochs - 1
+
         if aux_head_warmup_epochs and epoch == aux_head_warmup_epochs:
             best_model_losses = None
             epochs_without_improvement = 0
-        # Non-gradient models (e.g. PCAAE) may prepare their closed-form fit
-        # from the whole training set before their first and only epoch.
+
         if epoch == 0 and hasattr(model, "fit_train_loader"):
             model.fit_train_loader(train_loader, device=device)
+
+        # =========================
+        # Training
+        # =========================
         train_loss_params = {}
+        train_aux_loss_sum = None
+        train_aux_samples = 0
+
         model.train()
         if auxiliary_warmup:
             for module in auxiliary_modules:
                 module.eval()
+
         for batch_idx, (data, labels) in enumerate(train_loader):
             x = data.to(device)
             valid_mask = _build_valid_mask(x, train_valid_last_dim)
 
             if noise is not None:
-                if noise['type'] == 'gaussian':
-                    n = torch.randn_like(x) + float(noise['std'])
-                    x += n
-                elif noise['type'] == 'mask':
-                    n = (torch.rand_like(x) > float(noise['ratio'])).float()
-                    x *= n
+                if noise["type"] == "gaussian":
+                    x += torch.randn_like(x) + float(noise["std"])
+                elif noise["type"] == "mask":
+                    x *= (torch.rand_like(x) > float(noise["ratio"])).float()
 
             if optimizer is not None:
                 optimizer.zero_grad()
@@ -538,12 +589,28 @@ def train_vae(
             output = _apply_recon_mask(x, output, valid_mask)
 
             if use_pred_heads:
-                heads = {bl:h.to(device) for bl,h in labels[1].items()}
+                heads = {bl: h.to(device) for bl, h in labels[1].items()}
                 loss = _training_loss(model, x, heads, output, auxiliary_warmup=auxiliary_warmup)
             elif use_cls_head:
                 loss = _training_loss(model, x, _class_targets(labels), output, auxiliary_warmup=auxiliary_warmup)
             else:
                 loss = model.loss(x, output)
+
+            aux_loss = _get_aux_loss(loss, use_pred_heads=use_pred_heads, use_cls_head=use_cls_head)
+
+            if capture_aux_delta and aux_loss is not None:
+                batch_size = x.shape[0]
+                weighted_aux = aux_loss.detach() * batch_size
+                train_aux_loss_sum = weighted_aux if train_aux_loss_sum is None else train_aux_loss_sum + weighted_aux
+                train_aux_samples += batch_size
+
+            if not auxiliary_warmup and train_aux_delta is not None and aux_loss is not None:
+                if use_cls_head:
+                    aux_weight = float(model.loss_fn_params.get("cls_head_weight", model.loss_fn_params.get("cls_head_delta", 1.0)))
+                else:
+                    aux_weight = float(model.loss_fn_params.get("pred_heads_delta", 0.0))
+
+                loss["loss"] = loss["loss"] - aux_weight * train_aux_delta
 
             for p in loss:
                 if p not in train_loss_params:
@@ -551,47 +618,82 @@ def train_vae(
                 train_loss_params[p] += loss[p]
 
             if optimizer is not None:
-                loss['loss'].backward()
+                loss["loss"].backward()
+
                 if auxiliary_warmup:
                     for module in auxiliary_modules:
                         for param in module.parameters():
                             param.grad = None
+
                 optimizer.step()
 
         num_batches = batch_idx + 1
+
+        if capture_aux_delta and train_aux_loss_sum is not None and train_aux_samples > 0:
+            train_aux_delta = (train_aux_loss_sum / train_aux_samples).detach()
+            print(f"Captured train auxiliary baseline: {train_aux_delta.item():.6f}", flush=True)
+
         for p in train_loss_params:
             train_loss_params[p] = float(train_loss_params[p].detach())
-            if p not in history['train']:
-                history['train'][p] = []
-            history['train'][p].append(train_loss_params[p] / num_batches)
+
+            if p not in history["train"]:
+                history["train"][p] = []
+
+            history["train"][p].append(train_loss_params[p] / num_batches)
 
         val_metric_str = ""
         current_metrics = {
             "train": {p: train_loss_params[p] / num_batches for p in train_loss_params},
             "val": {},
         }
+
+        # =========================
+        # Validation
+        # =========================
         if val_loader is not None:
             model.eval()
+
             val_loss_params = {}
+            val_aux_loss_sum = None
+            val_aux_samples = 0
+
             val_recons = [] if val_reference_vec is not None else None
             swfcd_pearson_sum = 0.0
             swfcd_pearson_count = 0
             val_cls_targets = []
             val_cls_predictions = []
+
             with torch.no_grad():
                 for batch_idx, (data, labels) in enumerate(val_loader):
                     x = data.to(device)
                     valid_mask = _build_valid_mask(x, val_valid_last_dim)
+
                     output = model(x)
                     output = _apply_recon_mask(x, output, valid_mask)
 
                     if use_pred_heads:
-                        heads = {bl:h.to(device) for bl,h in labels[1].items()}
-                        loss = model.loss(x, heads, output)
+                        heads = {bl: h.to(device) for bl, h in labels[1].items()}
+                        loss = _training_loss(model, x, heads, output, auxiliary_warmup=auxiliary_warmup)
                     elif use_cls_head:
-                        loss = model.loss(x, _class_targets(labels), output)
+                        loss = _training_loss(model, x, _class_targets(labels), output, auxiliary_warmup=auxiliary_warmup)
                     else:
                         loss = model.loss(x, output)
+
+                    val_aux_loss = _get_aux_loss(loss, use_pred_heads=use_pred_heads, use_cls_head=use_cls_head)
+
+                    if capture_aux_delta and val_aux_loss is not None:
+                        batch_size = x.shape[0]
+                        weighted_aux = val_aux_loss.detach() * batch_size
+                        val_aux_loss_sum = weighted_aux if val_aux_loss_sum is None else val_aux_loss_sum + weighted_aux
+                        val_aux_samples += batch_size
+
+                    if not auxiliary_warmup and val_aux_delta is not None and val_aux_loss is not None:
+                        if use_cls_head:
+                            aux_weight = float(model.loss_fn_params.get("cls_head_weight", model.loss_fn_params.get("cls_head_delta", 1.0)))
+                        else:
+                            aux_weight = float(model.loss_fn_params.get("pred_heads_delta", 0.0))
+
+                        loss["loss"] = loss["loss"] - aux_weight * val_aux_delta
 
                     for p in loss:
                         if p not in val_loss_params:
@@ -602,52 +704,69 @@ def train_vae(
                         logits = _extract_cls_logits(output)
                         if logits is None:
                             raise ValueError("Could not extract classification logits from the auxiliary-head model output.")
+
                         targets = _class_targets(labels)
                         val_cls_targets.extend(targets.detach().cpu().tolist())
                         val_cls_predictions.extend(torch.argmax(logits, dim=1).detach().cpu().tolist())
 
                     recon_x, _ = _extract_model_outputs(output)
                     recon_x_detached = recon_x.detach()
+
                     if val_recons is not None:
                         val_recons.append(recon_x_detached)
                     elif compute_swfcd_during_training and not getattr(val_loader.dataset, "fc_input", False):
                         swfcd_results = val_swfcd.apply(x.detach(), recon_x_detached)
+
                         if swfcd_results is not None:
                             swfcd_pearson_sum += float(swfcd_results["pearson"].detach().cpu().item()) * data.shape[0]
                             swfcd_pearson_count += int(data.shape[0])
 
             num_val_batches = batch_idx + 1
+
+            if capture_aux_delta and val_aux_loss_sum is not None and val_aux_samples > 0:
+                val_aux_delta = (val_aux_loss_sum / val_aux_samples).detach()
+                print(f"Captured val auxiliary baseline: {val_aux_delta.item():.6f}", flush=True)
+
             for p in val_loss_params:
                 val_loss_params[p] = float(val_loss_params[p].detach())
-                _append_history_metric(history, 'val', p, val_loss_params[p] / num_val_batches)
+                _append_history_metric(history, "val", p, val_loss_params[p] / num_val_batches)
 
             swfcd_pearson = float("nan")
+
             if compute_swfcd_during_training:
                 if val_reference_vec is not None and val_recons:
                     swfcd_results = val_swfcd.apply(None, torch.cat(val_recons, dim=0), x_vec=val_reference_vec)
+
                     if swfcd_results is not None:
                         swfcd_pearson = float(swfcd_results["pearson"].detach().cpu().item())
+
                 elif swfcd_pearson_count > 0:
                     swfcd_pearson = swfcd_pearson_sum / swfcd_pearson_count
-                _append_history_metric(history, 'val', 'swfcd_pearson', swfcd_pearson)
+
+                _append_history_metric(history, "val", "swfcd_pearson", swfcd_pearson)
+
                 val_metric_str += (
                     f" | Val swfcd_pearson: {swfcd_pearson:.4f}"
                     if np.isfinite(swfcd_pearson)
                     else " | Val swfcd_pearson: nan"
                 )
+
             current_metrics["val"] = {p: val_loss_params[p] / num_val_batches for p in val_loss_params}
+
             if compute_swfcd_during_training:
                 current_metrics["val"]["swfcd_pearson"] = history["val"]["swfcd_pearson"][-1]
 
             if compute_cls_macro_f1_during_training:
-                cls_macro_f1 = float(f1_score(
-                    val_cls_targets,
-                    val_cls_predictions,
-                    labels=list(range(len(class_to_idx))),
-                    average="macro",
-                    zero_division=0,
-                ))
-                joint_score = swfcd_pearson + cls_macro_f1 if _is_finite_number(swfcd_pearson) else float("nan")
+                cls_macro_f1 = float(
+                    f1_score(
+                        val_cls_targets,
+                        val_cls_predictions,
+                        labels=list(range(len(class_to_idx))),
+                        average="macro",
+                        zero_division=0,
+                    )
+                )
+
                 _append_history_metric(history, "val", "cls_macro_f1", cls_macro_f1)
                 current_metrics["val"]["cls_macro_f1"] = cls_macro_f1
                 val_metric_str += f" | Val cls_macro_f1: {cls_macro_f1:.4f}"
@@ -658,11 +777,13 @@ def train_vae(
                     if len(history["val"]["swfcd_pearson"]) > 1
                     else None
                 )
+
                 swfcd_dropped = (
                     _is_finite_number(swfcd_pearson)
                     and _is_finite_number(previous_swfcd)
-                    and swfcd_pearson < (previous_swfcd - 0.01)
+                    and swfcd_pearson < previous_swfcd - 0.01
                 )
+
                 if swfcd_dropped:
                     head_loss = float("nan")
                     val_metric_str += " | Val head_loss: skipped (SwFCD drop > 0.01)"
@@ -671,55 +792,68 @@ def train_vae(
                         current_metrics["val"],
                         configured_key=getattr(model, "loss_fn_params", {}).get("checkpoint_head_loss_key"),
                     )
+
                     if not _is_finite_number(head_loss):
                         raise ValueError(
                             "swfcd_head_loss_guarded requires a supervised head loss in validation metrics. "
                             "Use a model with cls_loss or prediction-head losses, or set "
                             "loss_params.checkpoint_head_loss_key."
                         )
+
                     val_metric_str += f" | Val head_loss: {head_loss:.4f}"
+
                 _append_history_metric(history, "val", "head_loss", head_loss)
                 current_metrics["val"]["head_loss"] = head_loss
 
+        # =========================
+        # Logging
+        # =========================
         print(
             f"Epoch {epoch}/{num_epochs} | "
             f"{loss_params2str(train_loss_params, num_batches, val_loss_params, num_val_batches, model.loss_fn_params) if val_loader is not None else _train_only_loss_params_str(train_loss_params, num_batches, model.loss_fn_params)}"
-            f"{val_metric_str}", flush=True
+            f"{val_metric_str}",
+            flush=True,
         )
 
+        # =========================
+        # Checkpoint selection
+        # =========================
         if val_loader is None:
             improved = False
         elif best_model_losses is None:
             improved = True
         else:
-            # The guarded metric is chronological: it must compare the
-            # current epoch to the actual preceding epoch, not only to the
-            # best checkpoint seen so far.
-            tmp_history = history if selection_metric == "swfcd_head_loss_guarded" else {
-                "val": {
-                    "loss": [
-                        best_model_losses["val"].get("loss", float("nan")),
-                        current_metrics["val"].get("loss", float("nan")),
-                    ],
-                    "swfcd_pearson": [
-                        best_model_losses["val"].get("swfcd_pearson", float("nan")),
-                        current_metrics["val"].get("swfcd_pearson", float("nan")),
-                    ],
-                    "head_loss": [
-                        best_model_losses["val"].get("head_loss", float("nan")),
-                        current_metrics["val"].get("head_loss", float("nan")),
-                    ],
-                    "cls_macro_f1": [
-                        best_model_losses["val"].get("cls_macro_f1", float("nan")),
-                        current_metrics["val"].get("cls_macro_f1", float("nan")),
-                    ],
+            tmp_history = (
+                history
+                if selection_metric == "swfcd_head_loss_guarded"
+                else {
+                    "val": {
+                        "loss": [
+                            best_model_losses["val"].get("loss", float("nan")),
+                            current_metrics["val"].get("loss", float("nan")),
+                        ],
+                        "swfcd_pearson": [
+                            best_model_losses["val"].get("swfcd_pearson", float("nan")),
+                            current_metrics["val"].get("swfcd_pearson", float("nan")),
+                        ],
+                        "head_loss": [
+                            best_model_losses["val"].get("head_loss", float("nan")),
+                            current_metrics["val"].get("head_loss", float("nan")),
+                        ],
+                        "cls_macro_f1": [
+                            best_model_losses["val"].get("cls_macro_f1", float("nan")),
+                            current_metrics["val"].get("cls_macro_f1", float("nan")),
+                        ],
+                    }
                 }
-            }
+            )
+
             selection = select_best_checkpoint(
                 tmp_history,
                 selection_metric=checkpoint_selection_metric,
                 min_delta=convergence_min_delta,
             )
+
             latest_index = len(history["val"].get("loss", [])) - 1
             improved = selection is not None and selection["best_index"] == (
                 latest_index if selection_metric == "swfcd_head_loss_guarded" else 1
@@ -728,44 +862,54 @@ def train_vae(
         if improved:
             best_model_losses = current_metrics
             epochs_without_improvement = 0
+
             if save_checkpoint:
-                torch.save(model.state_dict(), f'{save_dir}/{name}_model.pt')
+                torch.save(model.state_dict(), f"{save_dir}/{name}_model.pt")
+
         elif val_loader is not None:
             epochs_without_improvement += 1
 
+        # =========================
+        # Early stopping
+        # =========================
         if (
             val_loader is not None
-            and
-            convergence_patience is not None
+            and convergence_patience is not None
             and convergence_patience > 0
-            and (epoch + 1) > max(convergence_warmup_epochs, aux_head_warmup_epochs)
+            and epoch + 1 > max(convergence_warmup_epochs, aux_head_warmup_epochs)
             and epochs_without_improvement >= convergence_patience
         ):
             print(
-                "Converged: stopping early at "
-                f"epoch {epoch + 1} after {epochs_without_improvement} "
-                "epochs without validation-loss improvement."
+                f"Converged: stopping early at epoch {epoch + 1} after "
+                f"{epochs_without_improvement} epochs without validation-loss improvement."
             )
             break
 
-    # run validation set through pca
+    # =========================
+    # PCA validation
+    # =========================
     mse_pca = 0
+
     if pca is not None and val_loader is not None:
         total_mse_pca = 0
         num_batches = 0
+
         for batch_idx, (data, _) in enumerate(val_loader):
             x = data.to(device)
             valid_mask = _build_valid_mask(x, val_valid_last_dim)
+
             z_pca = pca.transform(x.detach().cpu().numpy())
             x_recon_pca = pca.inverse_transform(z_pca)
             x_recon_pca = torch.as_tensor(x_recon_pca, dtype=x.dtype, device=x.device)
+
             mse_pca = _masked_mse(x_recon_pca, x, valid_mask)
             total_mse_pca += mse_pca.item()
             num_batches += 1
+
         mse_pca = float(total_mse_pca / num_batches)
-            
+
     if val_loader is None and save_checkpoint:
-        torch.save(model.state_dict(), f'{save_dir}/{name}_model.pt')
+        torch.save(model.state_dict(), f"{save_dir}/{name}_model.pt")
 
     print("Training complete!")
     return history, mse_pca
