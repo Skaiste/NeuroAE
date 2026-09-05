@@ -366,6 +366,28 @@ def _collect_latents_and_labels(model, data_loader, device, use_pred_heads, vali
         return None, []
     return torch.cat(latents, dim=0).numpy(), labels
 
+def _optimizer_param_groups(model, weight_decay, aux_weight_decay=None):
+    """Separate auxiliary heads from AE parameters; None preserves shared decay."""
+    aux_weight_decay = weight_decay if aux_weight_decay is None else aux_weight_decay
+    if not 0 <= aux_weight_decay:
+        raise ValueError("aux_weight_decay must be non-negative.")
+    auxiliary_ids = {
+        id(param)
+        for name in ("heads", "cls_head")
+        for module in [getattr(model, name, None)]
+        if module is not None
+        for param in module.parameters()
+    }
+    ae_params, aux_params = [], []
+    for param in model.parameters():
+        (aux_params if id(param) in auxiliary_ids else ae_params).append(param)
+    return [
+        {"params": params, "weight_decay": decay}
+        for params, decay in ((ae_params, weight_decay), (aux_params, aux_weight_decay))
+        if params
+    ]
+
+
 def train_vae(
     model,
     train_loader,
@@ -387,6 +409,7 @@ def train_vae(
     save_checkpoint=True,
     vectorize_val_reference=False,
     compute_swfcd_during_training=None,
+    aux_weight_decay=None,
 ):
     device = torch.device(device)
     model = model.to(device)
@@ -416,7 +439,11 @@ def train_vae(
     epochs_without_improvement = 0
     requires_optimizer = bool(getattr(model, "requires_optimizer", True))
     optimizer = (
-        optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        optim.AdamW(
+            _optimizer_param_groups(model, weight_decay, aux_weight_decay),
+            lr=learning_rate,
+            weight_decay=weight_decay,
+        )
         if requires_optimizer
         else None
     )

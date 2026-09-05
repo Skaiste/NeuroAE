@@ -235,6 +235,7 @@ class LAEClsHead(LAE):
         cls_head_type: str = "linear",
         cls_head_hidden_dim=None,
         class_labels=None,
+        cls_head_dropout: float = 0.0,
     ):
         super().__init__(region_dim=region_dim, timepoint_dim=timepoint_dim, latent_dim=latent_dim)
         if int(num_classes) < 2:
@@ -249,8 +250,8 @@ class LAEClsHead(LAE):
         if len(self.class_to_idx) != len(self.class_labels):
             raise ValueError("class_labels must be unique.")
         self.cls_head = head_types[cls_head_type](
-            self.latent_flat_dim, int(num_classes), cls_head_hidden_dim
-        ) if cls_head_type == "mlp" else head_types[cls_head_type](self.latent_flat_dim, int(num_classes))
+            self.latent_flat_dim, int(num_classes), cls_head_hidden_dim, dropout=cls_head_dropout
+        ) if cls_head_type == "mlp" else head_types[cls_head_type](self.latent_flat_dim, int(num_classes), dropout=cls_head_dropout)
 
     def forward(self, x):
         output = super().forward(x)
@@ -309,6 +310,7 @@ class LAEPredClsHeads(LAEPredHeads):
         cls_head_type: str = "linear",
         cls_head_hidden_dim=None,
         class_labels=None,
+        cls_head_dropout: float = 0.0,
     ):
         super().__init__(
             region_dim=region_dim,
@@ -333,9 +335,9 @@ class LAEPredClsHeads(LAEPredHeads):
             raise ValueError("class_labels must be unique.")
 
         self.cls_head = (
-            head_types[cls_head_type](self.latent_flat_dim, int(num_classes), cls_head_hidden_dim)
+            head_types[cls_head_type](self.latent_flat_dim, int(num_classes), cls_head_hidden_dim, dropout=cls_head_dropout)
             if cls_head_type == "mlp"
-            else head_types[cls_head_type](self.latent_flat_dim, int(num_classes))
+            else head_types[cls_head_type](self.latent_flat_dim, int(num_classes), dropout=cls_head_dropout)
         )
 
     def forward(self, x):

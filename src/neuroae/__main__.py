@@ -701,6 +701,7 @@ def _run_cross_validation_epoch_search(loaders, data_config, model_config, train
             num_epochs=max_epochs,
             learning_rate=training_config["training"].get("learning_rate", 1e-3),
             weight_decay=training_config["training"].get("weight_decay", 1e-4),
+            aux_weight_decay=training_config["training"].get("aux_weight_decay"),
             device=device,
             save_dir=training_config["training"].get("save_dir", "./models"),
             name=f"cv_fold_{fold_idx}",
@@ -882,6 +883,7 @@ def load_model_from_config(
             num_classes=num_classes,
             cls_head_type=model_config['model'].get("cls_head_type", "linear"),
             cls_head_hidden_dim=model_config['model'].get("cls_head_hidden_dim"),
+            cls_head_dropout=model_config['model'].get("cls_head_dropout", 0.0),
             class_labels=class_labels,
         )
     elif model_name == "ConvAE":
@@ -1213,6 +1215,7 @@ def run_training(
         num_epochs=1 if dry_run else training_config['training'].get('num_epochs', 50),
         learning_rate=training_config['training'].get('learning_rate', 1e-3),
         weight_decay=training_config['training'].get('weight_decay', 1e-4),
+        aux_weight_decay=training_config['training'].get('aux_weight_decay'),
         device=device,
         save_dir=training_config['training']['save_dir'],
         name=experiment_id or f"dry_run_{model_name.lower()}",
