@@ -804,7 +804,12 @@ def _apply_cross_validation_epoch_search_if_needed(
     updated_training_config["training"]["num_epochs"] = int(cv_summary["selected_num_epochs"])
 
     updated_loaders = dict(loaders)
-    updated_loaders.pop("val_loader", None)
+    # aux_training_mode experiments need a val_loader throughout: for AE
+    # pretraining patience inside _train_auxiliary_with_pretraining, and for
+    # the head-only patience in head_first_joint. Only remove it for plain
+    # LAE training where the epoch count was the only thing CV was solving.
+    if not updated_training_config["training"].get("aux_training_mode"):
+        updated_loaders.pop("val_loader", None)
     updated_loaders["val_is_test"] = False
     return updated_loaders, updated_training_config, cv_summary
 
