@@ -1,0 +1,266 @@
+\section{Training Objectives}
+
+The primary training objective was to reconstruct the dynamic BOLD activity
+as faithfully as possible from the compressed latent representation.
+Pointwise agreement between the observed and reconstructed signals provides
+a direct measure of reconstruction accuracy, but does not necessarily ensure
+that the temporal evolution of the signal or the functional relationships
+between brain regions are preserved. The training framework therefore
+combined a primary pointwise reconstruction loss with optional auxiliary
+reconstruction terms targeting temporal dynamics, static functional
+connectivity, and dynamic connectivity variability. Additional variational
+and supervised objectives were incorporated where applicable.
+
+\subsection{Pointwise Reconstruction Loss}
+
+The pointwise reconstruction loss measures the difference between the
+observed BOLD signal $\mathbf{X}$ and its reconstruction
+$\hat{\mathbf{X}}$. Three alternative reconstruction objectives were
+considered: mean squared error (MSE), mean absolute error (MAE), and Huber
+loss.
+
+The MSE is defined as
+\begin{equation}
+    \mathcal{L}_{\mathrm{MSE}}
+    =
+    \frac{1}{N}
+    \sum_{i=1}^{N}
+    \left(
+        X_i-\hat{X}_i
+    \right)^2,
+\end{equation}
+where $N$ denotes the total number of reconstructed BOLD values. Squaring
+the residuals places greater emphasis on larger reconstruction errors.
+
+The MAE is defined as
+\begin{equation}
+    \mathcal{L}_{\mathrm{MAE}}
+    =
+    \frac{1}{N}
+    \sum_{i=1}^{N}
+    \left|
+        X_i-\hat{X}_i
+    \right|.
+\end{equation}
+Compared with MSE, MAE is less sensitive to isolated large residuals and
+penalises reconstruction errors linearly.
+
+Huber loss~\cite{Huber1964} combines quadratic and linear penalisation,
+\begin{equation}
+    \mathcal{L}_{\mathrm{Huber}}
+    =
+    \frac{1}{N}
+    \sum_{i=1}^{N}
+    \begin{cases}
+        \frac{1}{2}(X_i-\hat{X}_i)^2,
+        & |X_i-\hat{X}_i| \leq \delta, \\[4pt]
+        \delta
+        \left(
+            |X_i-\hat{X}_i|-\frac{1}{2}\delta
+        \right),
+        & |X_i-\hat{X}_i| > \delta,
+    \end{cases}
+\end{equation}
+where $\delta$ determines the transition between the quadratic and linear
+regions. Huber loss therefore retains the sensitivity of MSE to small
+residuals while reducing the influence of larger reconstruction errors.
+
+These objectives were compared to determine which form of pointwise
+penalisation was most suitable for reconstruction of the regional BOLD
+signals. RMSE was not included as a separate training objective, as it is
+a monotonic transformation of MSE and therefore provides a closely related
+optimisation criterion.
+
+\subsection{Functional Connectivity Loss}
+
+Pointwise reconstruction alone does not explicitly constrain the
+inter-regional relationships present in the BOLD signal. A functional
+connectivity (FC) loss was therefore introduced to encourage preservation
+of the static correlation structure between brain regions.
+
+For an input
+\[
+\mathbf{X}\in\mathbb{R}^{T\times R},
+\]
+each regional time series is first centred across the temporal dimension
+and normalised to unit Euclidean norm. The resulting FC matrix can then be
+computed as
+\begin{equation}
+    \mathbf{C}
+    =
+    \bar{\mathbf{X}}^{\mathsf{T}}
+    \bar{\mathbf{X}},
+\end{equation}
+where $\bar{\mathbf{X}}$ denotes the centred and normalised time series.
+This operation is equivalent to computing the Pearson correlation between
+each pair of regional signals. The reconstructed FC matrix
+$\hat{\mathbf{C}}$ is calculated in the same manner from
+$\hat{\mathbf{X}}$.
+
+The FC loss is then defined as
+\begin{equation}
+    \mathcal{L}_{\mathrm{FC}}
+    =
+    \operatorname{MSE}
+    \left(
+        \mathbf{C},
+        \hat{\mathbf{C}}
+    \right).
+\end{equation}
+
+This term complements the pointwise reconstruction objective by encouraging
+the reconstructed signals to preserve static inter-regional functional
+organisation.
+
+\subsection{Temporal and Dynamic Connectivity Losses}
+
+Two additional objectives were considered to more directly constrain the
+dynamic properties of the reconstructed BOLD signals: a first-derivative
+loss and a sliding-window FC variability loss.
+
+\subsubsection{First-Derivative Loss}
+
+A reconstruction may achieve low pointwise error while remaining overly
+smooth and failing to reproduce local temporal changes. To explicitly
+constrain the temporal evolution of each regional signal, the first
+temporal difference is computed as
+\begin{equation}
+    \Delta X_{t,r}
+    =
+    X_{t+1,r}-X_{t,r},
+\end{equation}
+with the equivalent quantity $\Delta\hat{X}_{t,r}$ calculated for the
+reconstruction.
+
+The derivative loss is defined as
+\begin{equation}
+    \mathcal{L}_{\Delta}
+    =
+    \operatorname{MSE}
+    \left(
+        \Delta\mathbf{X},
+        \Delta\hat{\mathbf{X}}
+    \right).
+\end{equation}
+
+This objective encourages the reconstructed BOLD signals to preserve the
+magnitude and direction of changes between consecutive time points rather
+than matching only their absolute values.
+
+\subsubsection{Sliding-Window FC Variability Loss}
+
+Static FC summarises functional relationships over the complete scan and
+therefore does not capture changes in connectivity over time. To introduce
+a lightweight constraint on dynamic functional connectivity, the BOLD
+signals are divided into overlapping temporal windows and an FC matrix is
+computed independently within each window.
+
+For each regional pair, the standard deviation of its FC value across
+windows is then calculated,
+\begin{equation}
+    \mathbf{S}
+    =
+    \operatorname{Std}_{w}
+    \left(
+        \mathbf{C}^{(w)}
+    \right),
+\end{equation}
+where $\mathbf{C}^{(w)}$ denotes the FC matrix of window $w$. The
+corresponding variability matrix $\hat{\mathbf{S}}$ is obtained from the
+reconstructed signal.
+
+The sliding-window FC variability loss is defined as
+\begin{equation}
+    \mathcal{L}_{\mathrm{SwFC-var}}
+    =
+    \operatorname{MSE}
+    \left(
+        \mathbf{S},
+        \hat{\mathbf{S}}
+    \right).
+\end{equation}
+
+This objective does not attempt to reproduce every individual
+sliding-window FC matrix. Instead, it constrains the reconstructed signals
+to reproduce the degree to which each functional connection varies over
+time, providing a computationally lighter approximation to dynamic
+connectivity preservation.
+
+\subsection{Variational and Auxiliary Objectives}
+
+The preceding losses all constrain properties of the reconstructed BOLD
+signal. Additional objectives were introduced for specific model variants.
+
+For the variational autoencoders, the reconstruction objective was
+augmented with the KL-divergence term described in the Variational
+Autoencoder Extension section,
+\begin{equation}
+    \mathcal{L}_{\mathrm{VAE}}
+    =
+    \mathcal{L}_{\mathrm{reconstruction}}
+    +
+    \beta\mathcal{L}_{\mathrm{KL}},
+\end{equation}
+where $\beta$ controls the strength of the latent-space regularisation.
+
+For models containing auxiliary biomarker-prediction heads, prediction
+errors were calculated using Smooth L1 loss. When multiple prediction
+heads were present, their losses were averaged before being added to the
+training objective,
+\begin{equation}
+    \mathcal{L}_{\mathrm{pred}}
+    =
+    \frac{1}{M}
+    \sum_{m=1}^{M}
+    \mathcal{L}_{\mathrm{SmoothL1}}^{(m)},
+\end{equation}
+where $M$ denotes the number of prediction targets.
+
+For models containing an auxiliary diagnostic classification head,
+cross-entropy loss was used,
+\begin{equation}
+    \mathcal{L}_{\mathrm{cls}}
+    =
+    -\frac{1}{B}
+    \sum_{b=1}^{B}
+    \log p_{b,y_b},
+\end{equation}
+where $p_{b,y_b}$ denotes the predicted probability assigned to the
+ground-truth class $y_b$ for sample $b$.
+
+The architectures and purposes of these auxiliary heads are described
+separately in the Auxiliary Supervision section.
+
+\subsection{Combined Objective}
+
+The complete training framework allows the different objectives to be
+combined through independently weighted loss terms. The general objective
+can be expressed as
+\begin{equation}
+\begin{split}
+    \mathcal{L}_{\mathrm{total}}
+    ={}&
+    \mathcal{L}_{\mathrm{recon}}
+    + \lambda_{\mathrm{FC}}\mathcal{L}_{\mathrm{FC}}
+    + \lambda_{\Delta}\mathcal{L}_{\Delta} \\
+    &+
+    \lambda_{\mathrm{SwFC}}
+    \mathcal{L}_{\mathrm{SwFC-var}}
+    + \beta\mathcal{L}_{\mathrm{KL}} \\
+    &+
+    \lambda_{\mathrm{pred}}\mathcal{L}_{\mathrm{pred}}
+    + \lambda_{\mathrm{cls}}\mathcal{L}_{\mathrm{cls}} .
+\end{split}
+\end{equation}
+
+This expression represents the general loss framework rather than a single
+objective applied in every experiment. Terms that were not relevant to a
+given model or experimental configuration were assigned a weight of zero
+and therefore did not contribute to optimisation.
+
+The pointwise, FC, derivative, and sliding-window FC variability terms
+target complementary properties of reconstruction quality. Together, they
+allow the optimisation objective to consider not only agreement between
+individual BOLD values, but also local temporal evolution, static
+inter-regional connectivity, and variability in functional connectivity
+over time.

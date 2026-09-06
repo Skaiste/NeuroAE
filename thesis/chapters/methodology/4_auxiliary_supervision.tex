@@ -1,0 +1,355 @@
+\section{Auxiliary Supervision}
+
+The autoencoder architectures described previously are trained primarily
+to preserve information required for reconstruction of the dynamic BOLD
+signal. Reconstruction alone, however, does not explicitly require the
+latent representation to retain information associated with disease state
+or pathological biomarkers. Auxiliary supervision was therefore introduced
+to investigate whether clinically relevant information could be encouraged
+within the latent space while maintaining the ability of the autoencoder
+to reconstruct dynamic brain activity.
+
+Two forms of auxiliary supervision were investigated independently:
+diagnostic classification and biomarker regression. Diagnostic supervision
+used the HC, MCI, and AD class labels, while regression supervision used
+continuous amyloid-$\beta$ and tau measurements. In both cases, auxiliary
+heads were attached directly to the latent representation, as illustrated
+in Figure~\ref{fig:auxiliary_heads}. Gradients from the auxiliary objectives
+therefore propagated through the prediction head and encoder, encouraging
+the latent representation to support the corresponding supervised task,
+while the reconstruction objective continued to constrain preservation of
+the original BOLD signal.
+
+\thesisfigure{architectures/auxiliaryHeads}{Conceptual addition of auxiliary supervision to the autoencoder framework}{fig:auxiliary_heads}{\textwidth}
+
+
+
+
+
+\subsection{Diagnostic Classification Head}
+
+Diagnostic classification was investigated as a source of categorical
+disease-related supervision for the latent representation. The objective
+of the classification head was to encourage the encoder to retain features
+associated with diagnostic status while preserving the information required
+for reconstruction of the dynamic BOLD signal. The classification task was
+therefore treated as an auxiliary objective rather than as the primary
+purpose of the model.
+
+The time-preserving latent representation,
+\[
+\mathbf{Z}\in\mathbb{R}^{T\times L},
+\]
+was flattened into a subject-level feature vector,
+\[
+\mathbf{z}_{\mathrm{flat}}\in\mathbb{R}^{TL},
+\]
+before being provided to the classification head. This allows information
+from all latent dimensions and time points to contribute jointly to the
+subject-level diagnostic prediction. 
+
+Two classification-head architectures were considered: a linear classifier
+and a small multilayer perceptron (MLP). The linear classifier consisted of
+a single affine transformation,
+\begin{equation}
+    \mathbf{o}
+    =
+    \mathbf{W}_{\mathrm{cls}}
+    \mathbf{z}_{\mathrm{flat}}
+    +
+    \mathbf{b}_{\mathrm{cls}},
+\end{equation}
+where
+\[
+\mathbf{o}\in\mathbb{R}^{C}
+\]
+denotes the classifier output and $C$ is the number of diagnostic classes.
+For the HC, MCI, and AD classification task, $C=3$. This head provides the
+lowest-capacity classification variant and tests whether diagnostic
+information can be extracted directly from the flattened latent
+representation through a linear mapping.
+
+The MLP classifier introduces an additional nonlinear hidden transformation,
+\begin{equation}
+    \mathbf{h}_{\mathrm{cls}}
+    =
+    \operatorname{ReLU}
+    \left(
+        \mathbf{W}_{1}
+        \mathbf{z}_{\mathrm{flat}}
+        +
+        \mathbf{b}_{1}
+    \right),
+\end{equation}
+followed by a second linear transformation,
+\begin{equation}
+    \mathbf{o}
+    =
+    \mathbf{W}_{2}
+    \mathbf{h}_{\mathrm{cls}}
+    +
+    \mathbf{b}_{2}.
+\end{equation}
+The dimensional progression of this head can therefore be represented as
+\[
+TL
+\rightarrow
+H_{\mathrm{cls}}
+\rightarrow
+C,
+\]
+where $H_{\mathrm{cls}}$ denotes the dimensionality of the hidden layer.
+The nonlinear transformation increases the representational capacity of
+the auxiliary classifier and allows interactions between latent features
+to contribute to diagnostic prediction. The implemented classification
+heads therefore differ primarily in whether diagnostic information is
+modelled using a direct linear mapping or a small nonlinear network.
+
+
+The classification objective was computed using cross-entropy loss, as
+defined in the Training Objectives section. The classification loss was
+combined with the reconstruction objective through a weighting coefficient
+$\lambda_{\mathrm{cls}}$,
+\begin{equation}
+    \mathcal{L}_{\mathrm{total}}
+    =
+    \mathcal{L}_{\mathrm{reconstruction}}
+    +
+    \lambda_{\mathrm{cls}}
+    \mathcal{L}_{\mathrm{cls}}.
+\end{equation}
+
+The classification head was trained jointly with the autoencoder. As a
+result, gradients from the classification objective propagated through the
+classification head and into the encoder, allowing diagnostic supervision
+to influence the latent representation. At the same time, the
+reconstruction objective continued to constrain the encoder-decoder model
+to preserve the dynamic BOLD activity. The coefficient
+$\lambda_{\mathrm{cls}}$ therefore controls the relative contribution of
+diagnostic supervision to the overall training objective.
+
+The classification experiments were designed to evaluate whether adding
+diagnostic supervision could encourage the latent representation to encode
+more class-related information without degrading reconstruction quality.
+The auxiliary models were therefore evaluated using the same reconstruction
+and dynamic-connectivity metrics as the preceding autoencoder architecture
+experiments, while classification performance was used as an additional
+measure of how effectively diagnostic information could be extracted from
+the learned latent representation.
+
+
+
+
+\subsection{Biomarker Regression Heads}
+
+Biomarker regression was investigated as a source of continuous
+disease-related supervision for the latent representation. In contrast to
+the diagnostic classification objective, which uses categorical disease
+labels, the regression objective provides supervision based on continuous
+amyloid-$\beta$ and tau measurements. The purpose of these heads was to
+encourage the encoder to retain information associated with Alzheimer's
+disease pathology while preserving the information required for
+reconstruction of the dynamic BOLD signal.
+
+The regression heads operate directly on the time-preserving latent
+representation,
+\[
+    \mathbf{Z}\in\mathbb{R}^{T\times L}.
+\]
+Rather than flattening the complete latent representation, as performed for
+the diagnostic classification head, the regression architectures aggregate
+or model the temporal dimension before producing a subject-level biomarker
+prediction. This preserves the temporal organisation of the latent
+representation within the auxiliary head and allows different assumptions
+about the distribution of biomarker-related information over time to be
+investigated.
+
+Three regression-head architectures were considered: an average-pooling
+head, a temporal-attention pooling head, and a temporal-convolutional head.
+These architectures progressively introduce learned temporal processing,
+ranging from uniform aggregation across time to explicit modelling of local
+temporal patterns.
+
+\subsubsection{Average-Pooling Regression Head}
+
+The average-pooling head provides the simplest regression architecture. The
+latent representation is first averaged over the temporal dimension,
+producing a subject-level latent vector
+\[
+    \bar{\mathbf{z}}
+    =
+    \frac{1}{T}
+    \sum_{t=1}^{T}
+    \mathbf{z}_{t},
+    \qquad
+    \bar{\mathbf{z}}\in\mathbb{R}^{L}.
+\]
+A linear transformation then maps this representation to the predicted
+biomarker value,
+\begin{equation}
+    \hat{\mathbf{y}}
+    =
+    \mathbf{W}_{\mathrm{reg}}
+    \bar{\mathbf{z}}
+    +
+    \mathbf{b}_{\mathrm{reg}}.
+\end{equation}
+
+This architecture assigns equal importance to every time point and therefore
+does not explicitly model temporal variation within the latent
+representation. It provides a low-capacity baseline for determining whether
+biomarker-related information is represented as an overall subject-level
+pattern across the latent trajectories.
+
+\thesisfigure
+    {architectures/avgRegHead}
+    {Average-pooling biomarker regression head. The temporal dimension of
+    the latent representation is averaged before a linear projection to the
+    biomarker prediction.}
+    {fig:avg_regression_head}
+    {0.75\textwidth}
+
+
+\subsubsection{Temporal-Attention Pooling Regression Head}
+
+Uniform temporal averaging assumes that all time points contribute equally
+to biomarker prediction. To allow the model to learn whether particular
+parts of the latent trajectory are more informative, a temporal-attention
+pooling head was additionally considered.
+
+For each time point, the corresponding latent vector
+$\mathbf{z}_{t}\in\mathbb{R}^{L}$ is mapped to a scalar attention score,
+\begin{equation}
+    e_t
+    =
+    \mathbf{w}_{a}^{\mathsf{T}}
+    \mathbf{z}_{t}
+    +
+    b_a.
+\end{equation}
+The scores are normalised across time,
+\begin{equation}
+    \alpha_t
+    =
+    \frac{\exp(e_t)}
+    {\sum_{j=1}^{T}\exp(e_j)},
+\end{equation}
+such that
+\[
+    \sum_{t=1}^{T}\alpha_t=1.
+\]
+A subject-level representation is then constructed as the weighted sum of
+the latent vectors,
+\begin{equation}
+    \mathbf{z}_{\mathrm{att}}
+    =
+    \sum_{t=1}^{T}
+    \alpha_t\mathbf{z}_{t},
+\end{equation}
+where
+$\mathbf{z}_{\mathrm{att}}\in\mathbb{R}^{L}$.
+The pooled representation is subsequently mapped to the biomarker
+prediction using a linear regression layer,
+\begin{equation}
+    \hat{\mathbf{y}}
+    =
+    \mathbf{W}_{\mathrm{reg}}
+    \mathbf{z}_{\mathrm{att}}
+    +
+    \mathbf{b}_{\mathrm{reg}}.
+\end{equation}
+
+Unlike average pooling, this architecture learns the relative contribution
+of individual time points to the auxiliary prediction. It therefore tests
+whether biomarker-related information is more strongly represented during
+particular portions of the latent trajectory rather than being distributed
+uniformly across the scan.
+
+\thesisfigure
+    {architectures/tempAttPoolRegHead}
+    {Temporal-attention pooling biomarker regression head. Learned attention
+    weights are used to construct a weighted temporal summary of the latent
+    representation before biomarker prediction.}
+    {fig:temporal_pool_regression_head}
+    {0.85\textwidth}
+
+\subsubsection{Temporal-Convolutional Regression Head}
+
+The temporal-convolutional head was introduced to investigate whether local
+patterns in the latent trajectories contain biomarker-related information
+that cannot be captured through direct temporal aggregation. In contrast to
+the preceding pooling approaches, temporal convolutions transform the
+latent sequence before it is reduced to a subject-level representation.
+
+Internally, the latent representation is arranged as
+\[
+    \mathbf{Z}\in\mathbb{R}^{L\times T},
+\]
+such that the $L$ latent dimensions form the input channels and convolution
+is performed along the temporal dimension. The regression head applies a
+one-dimensional convolution with kernel size three, followed by a GELU
+activation. When a hidden representation is used, a second temporal
+convolution and GELU activation are applied,
+\[
+    (L,T)
+    \rightarrow
+    (H_{\mathrm{reg}},T)
+    \rightarrow
+    (H_{\mathrm{reg}},T),
+\]
+where $H_{\mathrm{reg}}$ denotes the number of hidden feature channels.
+Padding is used such that the temporal length is retained by the
+convolutional transformations.
+
+Adaptive average pooling subsequently reduces the temporal dimension,
+\[
+    (H_{\mathrm{reg}},T)
+    \rightarrow
+    (H_{\mathrm{reg}},1),
+\]
+and the resulting feature vector is mapped to the biomarker prediction by a
+linear output layer. The complete transformation can therefore be
+summarised as
+\[
+    (L,T)
+    \rightarrow
+    (H_{\mathrm{reg}},T)
+    \rightarrow
+    (H_{\mathrm{reg}},T)
+    \rightarrow
+    H_{\mathrm{reg}}
+    \rightarrow
+    \hat{\mathbf{y}}.
+\]
+
+Whereas average pooling tests for temporally distributed biomarker
+information and attention pooling allows individual time points to receive
+different importance, the convolutional head explicitly models local
+relationships between neighbouring time points. It therefore provides a
+complementary test of whether short-range temporal patterns within the
+latent representation contribute to biomarker prediction.
+
+\thesisfigure
+    {architectures/convRegHead}
+    {Temporal-convolutional biomarker regression head. Temporal
+    convolutions extract local patterns from the latent trajectories before
+    adaptive average pooling and linear biomarker prediction.}
+    {fig:conv_regression_head}
+    {0.9\textwidth}
+
+For each architecture, the regression output was trained against the
+corresponding amyloid-$\beta$ or tau measurement using the Smooth L1
+objective described in the Training Objectives section. When multiple
+biomarker prediction objectives were used, their contributions were
+combined through the regression loss before being weighted by the
+auxiliary-loss coefficient $\lambda_{\mathrm{pred}}$.
+
+The three regression architectures were selected to provide distinct levels
+of temporal modelling while retaining relatively compact auxiliary heads.
+The average-pooling model contains no learned temporal aggregation, the
+temporal-attention model learns the importance of individual time points,
+and the temporal-convolutional model learns local temporal features before
+aggregation. Their comparison therefore evaluates not only whether
+biomarker supervision can influence the latent representation, but also
+whether the manner in which temporal latent information is exposed to the
+auxiliary task affects preservation of dynamic BOLD reconstruction.

@@ -1,0 +1,226 @@
+\section{Evaluation Metrics}
+
+The autoencoder models were evaluated using complementary metrics targeting
+different aspects of reconstruction quality. Root mean squared error (RMSE)
+was used to quantify pointwise agreement between the observed and
+reconstructed BOLD time series. Functional connectivity (FC) similarity was
+used as a secondary measure of preservation of static inter-regional
+relationships, while sliding-window functional connectivity dynamics
+(SwFCD) similarity was used as the primary evaluation metric. This
+prioritisation reflects the main objective of the thesis: preserving the
+dynamic organisation of BOLD activity rather than optimising pointwise
+signal reconstruction alone.
+
+\subsection{Time-Series Reconstruction Error}
+
+Pointwise reconstruction accuracy was quantified using root mean squared
+error (RMSE). For an observed BOLD signal
+$\mathbf{X}\in\mathbb{R}^{T\times R}$ and its reconstruction
+$\hat{\mathbf{X}}$, RMSE is defined as
+
+\begin{equation}
+    \operatorname{RMSE}
+    =
+    \sqrt{
+        \frac{1}{TR}
+        \sum_{t=1}^{T}
+        \sum_{r=1}^{R}
+        \left(
+            X_{t,r}-\hat{X}_{t,r}
+        \right)^2
+    }.
+\end{equation}
+
+Lower RMSE values indicate greater pointwise agreement between the observed
+and reconstructed BOLD signals. RMSE was used primarily to assess how
+accurately the amplitude of the regional time series was reproduced.
+However, pointwise reconstruction error alone does not determine whether
+the functional relationships between regions, or their temporal variation,
+are preserved. RMSE was therefore interpreted alongside the connectivity-
+based evaluation metrics.
+
+\subsection{Static Functional Connectivity Similarity}
+
+Static functional connectivity was calculated from the Pearson correlation
+between each pair of regional BOLD time series, producing a symmetric
+functional connectivity matrix
+$\mathbf{C}\in\mathbb{R}^{R\times R}$. Pearson correlation is widely used
+to quantify statistical dependence between regional BOLD signals in
+resting-state fMRI and forms a common basis for functional connectivity
+analysis~\cite{Hutchison2013}.
+
+To compare the observed and reconstructed FC matrices, only the upper
+triangular elements were extracted, excluding the diagonal. This avoids
+including duplicate values resulting from matrix symmetry and removes the
+trivial self-correlations along the diagonal. Let
+$\operatorname{ut}(\mathbf{C})$ denote this vectorisation operation. FC
+similarity was then calculated as
+
+\begin{equation}
+    r_{\mathrm{FC}}
+    =
+    \operatorname{corr}
+    \left(
+        \operatorname{ut}\left(\mathbf{C}(\mathbf{X})\right),
+        \operatorname{ut}\left(\mathbf{C}(\hat{\mathbf{X}})\right)
+    \right).
+\end{equation}
+
+Higher values of $r_{\mathrm{FC}}$ indicate greater agreement between the
+static inter-regional connectivity patterns of the observed and
+reconstructed signals. FC correlation was treated as a secondary
+evaluation metric because it describes the average functional organisation
+over the complete scan but does not explicitly characterise changes in
+connectivity over time.
+
+\subsection{Dynamic Functional Connectivity Similarity}
+
+Dynamic functional connectivity was evaluated using sliding-window
+functional connectivity dynamics (SwFCD). Sliding-window approaches estimate
+functional connectivity repeatedly over partially overlapping temporal
+segments and are commonly used to characterise temporal variability in
+resting-state functional connectivity~\cite{Hutchison2013}. SwFCD
+extends this representation by comparing the similarity of window-specific
+FC patterns across time, thereby describing the recurrence and temporal
+organisation of functional connectivity states~\cite{Hansen2015}.
+
+The BOLD signal was divided into overlapping windows of $W=30$ time points,
+with a step size of $S=3$ time points. For each window, an FC matrix was
+calculated and vectorised. Let
+$\mathbf{F}_1,\ldots,\mathbf{F}_K$ denote the resulting window-specific FC
+vectors. The SwFCD matrix was defined by the Pearson correlation between
+each pair of window-specific FC patterns,
+
+\begin{equation}
+    \operatorname{SwFCD}_{i,j}
+    =
+    \operatorname{corr}
+    \left(
+        \mathbf{F}_i,
+        \mathbf{F}_j
+    \right),
+\end{equation}
+
+where $i$ and $j$ index the sliding windows.
+
+As with the static FC metric, only the upper triangular portion of the
+SwFCD matrix was used during evaluation. In addition, a region surrounding
+the main diagonal was excluded before vectorisation. Consecutive
+sliding windows overlap substantially and therefore share a large number
+of time points. As a result, pairs of nearby windows naturally exhibit high
+similarity, producing a band of elevated SwFCD values around the main
+diagonal. Retaining this region could artificially increase the correlation
+between observed and reconstructed SwFCD matrices even when their
+longer-range dynamic structure differs.
+
+The excluded diagonal offset was defined as
+
+\begin{equation}
+    k
+    =
+    \frac{W}{S}.
+\end{equation}
+
+For the values used in this work,
+$W=30$ and $S=3$, giving an offset of
+
+\begin{equation}
+    k = 10.
+\end{equation}
+
+Only upper-triangular SwFCD elements outside this near-diagonal region were
+therefore included in the evaluation. Let
+$\operatorname{ut}_{k}(\cdot)$ denote this masked upper-triangular
+vectorisation. SwFCD similarity was calculated as
+
+\begin{equation}
+    r_{\mathrm{SwFCD}}
+    =
+    \operatorname{corr}
+    \left(
+        \operatorname{ut}_{k}
+        \left(
+            \operatorname{SwFCD}(\mathbf{X})
+        \right),
+        \operatorname{ut}_{k}
+        \left(
+            \operatorname{SwFCD}(\hat{\mathbf{X}})
+        \right)
+    \right).
+\end{equation}
+
+Higher values of $r_{\mathrm{SwFCD}}$ indicate greater agreement between the
+temporal organisation of functional connectivity in the observed and
+reconstructed BOLD signals. SwFCD correlation was used as the primary
+model-selection metric because preserving dynamic functional activity is
+the central objective of this work. The use of a fixed window length, step
+size, and masking procedure across all models ensured that SwFCD comparisons
+were performed consistently. Sliding-window analyses are sensitive to
+methodological choices such as window length and overlap, making such
+consistency important for interpretation~\cite{Hutchison2013}.
+
+\subsection{Model Comparison and Selection}
+
+Candidate model configurations were evaluated across multiple random seeds.
+Where more than one metric value was available for a particular seed, these
+values were first averaged to obtain a single value for each model, seed,
+and evaluation metric. Statistical comparisons were therefore performed at
+the seed level.
+
+Because corresponding model configurations were evaluated using matched
+random seeds, differences between models were assessed using paired
+$t$-tests. For two models $A$ and $B$, the paired differences for a metric
+$m$ were defined as
+
+\begin{equation}
+    d_s
+    =
+    m_{A,s}
+    -
+    m_{B,s},
+\end{equation}
+
+where $s$ indexes the random seed. The paired $t$-statistic is
+
+\begin{equation}
+    t
+    =
+    \frac{\bar{d}}
+    {s_d/\sqrt{n}},
+\end{equation}
+
+where $\bar{d}$ is the mean paired difference, $s_d$ is the standard
+deviation of the paired differences, and $n$ is the number of seeds.
+
+The significance threshold was set to
+$\alpha=0.05$. Where multiple pairwise comparisons were performed, the
+resulting $p$-values were adjusted using the Holm sequentially rejective
+procedure~\cite{Holm1979}. The Holm procedure controls the family-wise
+error rate while sequentially adjusting the significance criteria applied
+to multiple hypotheses~\cite{Holm1979}.
+
+Paired tests were performed for RMSE, FC correlation, and SwFCD correlation.
+The statistical results were interpreted together with the corresponding
+mean performance and seed-level distributions. Raincloud plots were used
+throughout the experimental analysis to visualise the distribution of
+results across seeds, together with their mean and variability. Means were
+reported in the accompanying discussion to describe the direction and
+magnitude of performance differences, while variability was discussed
+explicitly where it materially affected interpretation.
+
+Model selection considered all three evaluation metrics, with greatest
+importance placed on SwFCD correlation because of the focus on preservation
+of dynamic activity. FC correlation provided complementary information
+about static connectivity preservation, while RMSE described pointwise
+time-series reconstruction quality. Statistical significance alone was not
+used to determine which model was preferable; the direction and magnitude
+of the metric differences were considered jointly with the corresponding
+Holm-adjusted $p$-values.
+
+Where candidate configurations showed comparable overall performance and
+no statistically significant improvement was identified, preference was
+given to the computationally simpler model. Model simplicity was considered
+in terms of factors such as architectural depth, number of trainable
+parameters, and computational requirements. This criterion was used to
+avoid introducing additional model complexity where it did not provide a
+statistically supported improvement in reconstruction performance.

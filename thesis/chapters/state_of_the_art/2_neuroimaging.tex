@@ -1,0 +1,28 @@
+\section{Functional Neuroimaging and Brain Connectivity}
+
+Functional magnetic resonance imaging (fMRI) provides a non-invasive method for studying brain activity. 
+It commonly measures activity through the blood-oxygen-level-dependent (BOLD) signal, which is based on changes in blood oxygenation associated with neural activity~\cite{Ogawa1990}. 
+In resting-state fMRI (rs-fMRI), BOLD signals are recorded while no specific task is performed, allowing spontaneous changes in brain activity to be studied. 
+Correlations between resting-state BOLD signals were first shown to identify functionally related brain regions by Biswal et al.~\cite{Biswal1995}, providing a basis for studying the functional organisation of the brain at rest.
+
+As fMRI data contain signals across a large number of spatial locations, brain parcellation can be used to group the cortex into a smaller set of regions. 
+The BOLD signal within each region can then be represented as a regional time series. 
+Schaefer et al.\ proposed a cortical parcellation based on intrinsic functional connectivity, with several levels of spatial resolution ranging from 100 to 1,000 regions~\cite{Schaefer2018}.
+This includes the 400-region parcellation, which provides a functionally defined representation of cortical activity.
+
+Relationships between regional BOLD signals can be studied using functional connectivity (FC).
+Functional connectivity describes statistical relationships between activity recorded from different brain regions~\cite{Friston1993}. 
+In rs-fMRI, FC is commonly estimated using the Pearson correlation between pairs of regional BOLD time series~\cite{Biswal1995}. 
+Calculating these correlations across the full time series produces a static FC matrix, where each value represents the strength of the functional relationship between a pair of regions. 
+Static FC therefore provides a summary of functional relationships across the complete recording period.
+
+However, functional relationships between brain regions can change over time and may not be fully represented by a single static FC matrix. 
+Dynamic functional connectivity (dFC) methods study these temporal changes in connectivity~\cite{Hutchison2013}. 
+A commonly used approach is sliding-window analysis, where the BOLD time series is divided into overlapping windows and an FC matrix is calculated separately for each window~\cite{Preti2017}. 
+The similarity between FC patterns at different windows can then be used to describe changes in functional connectivity over time, producing a sliding-window functional connectivity dynamics (SwFCD) representation. 
+This provides information about temporal changes in brain connectivity that is not captured by static FC alone~\cite{Preti2017}.
+
+Functional connectivity can also be studied at the level of larger functional networks.
+Yeo et al.\ used resting-state functional connectivity to identify large-scale organisation of the cerebral cortex and proposed parcellations consisting of seven and seventeen functional networks~\cite{Yeo2011}. 
+The seven-network organisation groups cortical regions into the visual, somatomotor, dorsal attention, ventral attention, limbic, frontoparietal, and default mode networks. 
+These networks provide a broader representation of functional brain organisation and can be used to interpret patterns observed across individual cortical regions.

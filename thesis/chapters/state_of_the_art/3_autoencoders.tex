@@ -1,0 +1,29 @@
+\section{Representation Learning and Autoencoders}
+
+Dimensionality reduction aims to represent high-dimensional data using a smaller number of features while retaining relevant information. 
+A widely used linear approach is principal component analysis (PCA), originally introduced by Pearson~\cite{Pearson1901}. 
+PCA transforms the input into a set of orthogonal principal components, ordered by the amount of variance they explain. 
+By retaining only a subset of these components, the dimensionality of the data can be reduced while preserving as much variance as possible.
+
+Autoencoders (AEs) provide a learned approach to dimensionality reduction. 
+An autoencoder consists of an encoder that maps the input to a lower-dimensional latent representation, and a decoder that reconstructs the original input from this representation. 
+The model is commonly trained by minimizing the difference between the input and its reconstruction. 
+Linear autoencoders are closely related to PCA and, when trained with a squared reconstruction objective under suitable conditions, can learn the same principal subspace, although their individual latent dimensions are not required to match the principal components~\cite{BaldiHornik1989}. 
+Autoencoders can also use multiple nonlinear layers, allowing them to learn more complex representations than linear dimensionality reduction. 
+Hinton and Salakhutdinov demonstrated the use of deep autoencoders for reducing the dimensionality of high-dimensional data and compared their learned representations with PCA~\cite{HintonSalakhutdinov2006}.
+
+More generally, representation learning aims to learn useful features directly from the data instead of relying on manually defined representations~\cite{Bengio2013}. 
+In autoencoders, the latent space provides such a representation by compressing information needed to reconstruct the input. 
+The use of nonlinear transformations and multiple layers allows deep autoencoders to capture relationships that cannot be represented by a purely linear transformation. 
+The structure of this latent space can therefore provide information about how the model represents patterns present in the original high-dimensional data.
+
+Autoencoders can also be built using convolutional layers instead of fully connected layers. 
+Convolutional autoencoders apply shared filters across the input, allowing local patterns to be learned while reducing the number of independent model parameters. 
+Masci et al.\ introduced stacked convolutional autoencoders for learning hierarchical representations from data~\cite{Masci2011}. 
+Convolutional architectures therefore provide an alternative to fully connected autoencoders when local structure in the input may contain useful information.
+
+A further extension is the variational autoencoder (VAE), which introduces a probabilistic latent representation. 
+Rather than encoding an input directly into a single latent vector, a VAE learns the parameters of a distribution from which the latent representation is sampled. 
+Kingma and Welling introduced this approach together with the reparameterization method that allows the model to be trained through standard gradient-based optimisation~\cite{KingmaWelling2014}. 
+The training objective combines reconstruction with a Kullback–Leibler (KL) divergence term that regularizes the latent distribution towards a chosen prior. 
+This encourages a more structured and continuous latent space while still allowing the input to be reconstructed from its lower-dimensional representation.

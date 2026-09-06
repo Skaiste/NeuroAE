@@ -15,7 +15,8 @@
 \usepackage{titlesec}
 \usepackage{hyperref}
 \usepackage{csquotes}
-\usepackage[backend=biber,style=authoryear]{biblatex}
+\usepackage{array}
+\usepackage[backend=biber,style=ieee]{biblatex}
 \usepackage[colorinlistoftodos]{todonotes}
 
 \geometry{margin=2.5cm}
@@ -47,6 +48,7 @@
 \input{chapters/discussion}
 \input{chapters/conclusion}
 \input{backmatter/appendices}
-\input{backmatter/bibliography}
+
+\printbibliography[heading=bibintoc,title={References}]
 
 \end{document}

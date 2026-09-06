@@ -1,0 +1,529 @@
+\section{Autoencoder Framework}
+
+Autoencoders were used to learn compact representations of preprocessed
+resting-state fMRI BOLD signals while reconstructing the original data.
+As described in Section~\ref{sec:bold_representation}, each session is
+represented by a parcellated BOLD time series,
+\[
+\mathbf{X} \in \mathbb{R}^{T \times R},
+\]
+where $T$ is the number of timepoints and $R$ is the number of brain
+regions. The models operate directly on this representation, rather than
+on connectivity matrices or other features derived from it.
+
+An autoencoder has an encoder and a decoder. The encoder $f_{\theta}$
+maps the input to a lower-dimensional latent representation,
+\[
+\mathbf{Z} = f_{\theta}(\mathbf{X}),
+\]
+where $\mathbf{Z}$ is the compressed representation. The decoder
+$g_{\phi}$ maps this representation back to the input space,
+\[
+\hat{\mathbf{X}} = g_{\phi}(\mathbf{Z}),
+\]
+where $\hat{\mathbf{X}}$ is the reconstructed BOLD time series. The
+complete mapping is
+\[
+\hat{\mathbf{X}} = g_{\phi}\left(f_{\theta}(\mathbf{X})\right).
+\]
+
+The latent representation is an information bottleneck. The models
+compress the regional dimension from $R$ to $L$, where $L<R$, while
+preserving the temporal dimension. Thus,
+\[
+\mathbf{X} \in \mathbb{R}^{T \times R}
+\longrightarrow
+\mathbf{Z} \in \mathbb{R}^{T \times L}
+\longrightarrow
+\hat{\mathbf{X}} \in \mathbb{R}^{T \times R}.
+\]
+
+Each latent feature therefore has a time-dependent trajectory across the scan. The representation describes regional BOLD activity at every timepoint in a lower-dimensional space.
+This framework was used for linear, deep fully connected, and convolutional autoencoders. The architectures differ in their encoder and decoder transformations but share the same time-preserving latent format and the common objective of reconstructing the input BOLD signal.
+
+\subsection{Linear Autoencoder}
+\thesisfigure{architectures/linearAE}{Linear autoencoder architecture diagram}{fig:lae_diagram}{0.8\textwidth}
+
+The linear autoencoder is the simplest architecture considered. As shown
+in Figure~\ref{fig:lae_diagram}, it has one linear encoder layer and one
+linear decoder layer. Given an input BOLD time series
+\[
+\mathbf{X}\in\mathbb{R}^{T\times R},
+\]
+the encoder maps regional activity at each timepoint from $R$ dimensions
+to $L$ dimensions,
+\[
+\mathbf{X}\in\mathbb{R}^{T\times R}
+\longrightarrow
+\mathbf{Z}\in\mathbb{R}^{T\times L}.
+\]
+
+For each time point $t$, the encoding operation is given by
+\[
+\mathbf{z}_t = \mathbf{W}_e\mathbf{x}_t + \mathbf{b}_e,
+\]
+where $\mathbf{x}_t\in\mathbb{R}^{R}$ is regional BOLD activity at
+timepoint $t$, $\mathbf{W}_e\in\mathbb{R}^{L\times R}$ is the encoder
+weight matrix, and $\mathbf{b}_e\in\mathbb{R}^{L}$ is its bias vector.
+
+The same encoder parameters are applied independently at every
+timepoint. This preserves the temporal dimension and makes the number of
+trainable parameters independent of $T$.
+
+The decoder maps the latent representation back to the original regional dimensionality,
+\[
+\hat{\mathbf{x}}_t = \mathbf{W}_d\mathbf{z}_t + \mathbf{b}_d,
+\]
+where $\mathbf{W}_d\in\mathbb{R}^{R\times L}$ and
+$\mathbf{b}_d\in\mathbb{R}^{R}$. Applying the decoder at all timepoints
+restores the original dimensionality,
+\[
+\mathbf{Z}\in\mathbb{R}^{T\times L}
+\longrightarrow
+\hat{\mathbf{X}}\in\mathbb{R}^{T\times R}.
+\]
+
+No nonlinear activation is used. The model therefore learns a
+low-dimensional linear representation of regional BOLD activity. Because
+each timepoint is processed independently, it does not explicitly model
+temporal interactions.
+
+For $R$ input regions and $L$ latent dimensions, the encoder has
+$RL+L$ trainable parameters and the decoder has $LR+R$. The total is
+$2RL+L+R$.
+
+\subsection{Deep Autoencoder}
+\thesisfigure{architectures/deepAE}{Deep autoencoder architecture diagram}{fig:dae_diagram}{\textwidth}
+
+The deep autoencoder extends the linear model with one or two nonlinear
+hidden layers before the latent bottleneck. The decoder has the mirrored
+structure. Figure~\ref{fig:dae_diagram} shows the evaluated
+configurations.
+
+For a single hidden layer, the architecture is
+\[
+(T,R)\rightarrow(T,H_1)\rightarrow(T,L)\rightarrow(T,H_1)\rightarrow(T,R),
+\]
+while the two-hidden-layer configuration is
+\[
+(T,R)\rightarrow(T,H_1)\rightarrow(T,H_2)\rightarrow(T,L)
+\rightarrow(T,H_2)\rightarrow(T,H_1)\rightarrow(T,R).
+\]
+
+The hidden dimensions $H_1$ and $H_2$ determine the width of the
+nonlinear mappings, while $L$ determines the bottleneck size. Hidden
+linear layers use GELU activations. The latent projection and final
+reconstruction layer remain linear.
+
+As in the linear autoencoder, the same transformations are applied
+independently at each timepoint. The temporal dimension is preserved,
+but dependencies between neighbouring timepoints are not modelled
+explicitly.
+
+The composition of linear transformations and GELU activations allows the
+encoder and decoder to learn nonlinear mappings between the regional and
+latent representations, increasing representational capacity relative to
+the linear autoencoder. Each encoder hidden layer has a corresponding decoder layer.
+
+The experiments used one or two hidden layers to limit model complexity
+and computational cost. The latent and hidden-layer dimensions were
+varied as architectural hyperparameters.
+
+
+
+
+\subsection{Convolutional Autoencoder}
+
+\subsubsection{Two-Dimensional Convolutional Autoencoder}
+\thesisfigure{architectures/conv2dAE}{Conceptual 2D convolutional autoencoder architecture diagram}{fig:conv2dae_diagram}{\textwidth}
+
+The two-dimensional convolutional autoencoder applies convolutions
+across the temporal and regional dimensions of the BOLD signal. Its
+conceptual architecture is shown in Figure~\ref{fig:conv2dae_diagram}.
+
+The model was motivated by convolutional approaches to neuroimaging
+representation learning. It was designed to test whether local features
+across time and regional parcel indices improve the learned
+representation while retaining a time-preserving latent space.
+
+The architecture preserves the time dimension while reducing the regional
+dimension from $R$ to $L$. It therefore produces
+$\mathbf{Z}\in\mathbb{R}^{T\times L}$ rather than compressing the whole
+scan into one feature map.
+
+The input BOLD signal is represented as
+\[
+\mathbf{X}\in\mathbb{R}^{T\times R}.
+\]
+For two-dimensional convolutions, a singleton channel dimension is added,
+\[
+(B,T,R)\rightarrow(B,1,T,R),
+\]
+where $B$ is the batch size.
+
+The encoder can contain zero, one, or two hidden convolutional layers.
+Each hidden layer applies a two-dimensional convolution and GELU
+activation,
+\[
+\mathbf{H}^{(i)}
+=
+\operatorname{GELU}
+\left(
+\operatorname{Conv2D}
+\left(
+\mathbf{H}^{(i-1)}
+\right)
+\right).
+\]
+The kernels extend across time and regions, so a representation can use
+neighbouring temporal observations. The temporal stride is one, which
+preserves the number of timepoints.
+
+For consistency across architectures, $H_1$ and $H_2$ denote hidden-layer
+sizes. In the fully connected architecture, they represent hidden feature
+dimensions. In the convolutional architectures, they represent the
+number of feature channels. Thus, the 2D hidden convolutional layers
+produce $H_1$ and, where used, $H_2$ channels, while $L$ denotes the
+width of the final bottleneck.
+
+After the optional hidden layers, a depthwise convolution reduces the
+regional dimension. Its kernel and stride operate only along the
+regional axis; both are one along the temporal axis. Conceptually,
+\[
+(H,T,R')
+\rightarrow
+(H,T,L),
+\]
+where $R'$ is the regional width after hidden convolutions and $H$ is the
+number of channels. Depthwise convolution processes each channel
+independently.
+
+A subsequent $1\times1$ convolution combines the feature channels into
+one latent channel without changing the temporal or regional dimensions.
+The resulting representation is
+\[
+\mathbf{Z}\in\mathbb{R}^{T\times L}.
+\]
+This gives one $L$-dimensional vector at each timepoint. The model
+reshapes tensors between the convolutional layout and
+$\mathbf{Z}\in\mathbb{R}^{T\times L}$ as required.
+
+The decoder reverses this process. A $1\times1$ convolution expands the
+latent representation to the required number of channels, and a
+depthwise transposed convolution restores regional width. Hidden
+convolutional layers are reversed in order. Intermediate decoder layers
+use GELU activations and the final layer is linear. The output is
+reshaped to
+\[
+\hat{\mathbf{X}}\in\mathbb{R}^{T\times R}.
+\]
+
+Unlike the fully connected models, this architecture uses local temporal
+context without reducing temporal resolution. Along the regional axis,
+convolution uses neighbouring Schaefer parcel indices, which do not
+necessarily represent anatomically adjacent regions. The model therefore
+learns local temporal--regional-index patterns rather than explicit
+anatomical neighbourhoods.
+
+The experiments considered zero, one, or two hidden convolutional
+layers. The latent dimensionality, number of hidden layers, and channel
+dimensions were architectural hyperparameters.
+
+\subsubsection{One-Dimensional Regional Convolutional Autoencoder}
+\thesisfigure{architectures/convAE}{Conceptual 1D convolutional autoencoder architecture diagram}{fig:convae_diagram}{\textwidth}
+
+The one-dimensional convolutional autoencoder is an intermediate model
+between timepoint-wise fully connected autoencoders and the
+two-dimensional convolutional model. It tests regional convolution
+without temporal convolution. It was introduced to determine whether
+regional convolutional feature extraction improves representation
+learning independently of temporal convolution.
+Figure~\ref{fig:convae_diagram} shows the conceptual architecture.
+
+As with the linear and deep models, each timepoint is processed
+independently with shared encoder and decoder parameters. The input
+tensor
+\[
+\mathbf{X}\in\mathbb{R}^{B\times T\times R}
+\]
+is internally reshaped to
+\[
+(BT,1,R),
+\]
+so that each timepoint is an independent one-dimensional regional signal.
+The convolutions operate only along the regional axis. After encoding,
+the representation is reshaped to
+\[
+\mathbf{Z}\in\mathbb{R}^{B\times T\times L},
+\]
+which preserves one $L$-dimensional vector for every timepoint.
+
+The encoder can contain zero, one, or two hidden convolutional layers.
+Each hidden layer applies a one-dimensional convolution and GELU
+activation,
+\[
+\mathbf{H}^{(i)}
+=
+\operatorname{GELU}
+\left(
+\operatorname{Conv1D}
+\left(
+\mathbf{H}^{(i-1)}
+\right)
+\right).
+\]
+The hidden-layer sizes $H_1$ and $H_2$ denote the number of channels in
+their respective convolutional layers. Together with the number of
+hidden layers, they control feature-extractor capacity. The latent
+dimensionality $L$ determines bottleneck size.
+
+After optional hidden feature extraction, a depthwise one-dimensional
+convolution reduces regional width from $R$ to $L$ while processing each
+channel independently,
+\[
+(BT,H,R)\rightarrow(BT,H,L),
+\]
+where $H$ is the number of channels. The reduction-layer kernel and
+stride are selected to give exactly $L$ output positions.
+
+A $1\times1$ convolution then combines the feature channels without
+changing regional width,
+\[
+(BT,H,L)\rightarrow(BT,1,L).
+\]
+After removing the channel dimension and restoring batch and temporal
+dimensions, this gives
+\[
+\mathbf{Z}\in\mathbb{R}^{B\times T\times L}.
+\]
+The latent representation at timepoint $t$ therefore depends only on the
+regional BOLD values at that timepoint,
+\[
+\mathbf{z}_t=f_{\theta}(\mathbf{x}_t),
+\]
+and not on neighbouring observations.
+
+The decoder reverses this process. A $1\times1$ convolution expands the
+latent representation to the required number of channels, and a
+depthwise transposed convolution restores the regional dimension from
+$L$ to $R$. Hidden layers are reversed to return to one output channel.
+Intermediate layers use GELU activations and the final layer is linear.
+The reconstructed tensor is reshaped to
+\[
+\hat{\mathbf{X}}\in\mathbb{R}^{B\times T\times R}.
+\]
+
+This architecture retains the timepoint-wise processing of the linear and
+deep models but replaces fully connected layers with regional
+convolutions. Its filters share parameters across regional positions,
+giving locally constrained feature extraction rather than the global
+mappings used by fully connected layers.
+
+Unlike the two-dimensional model, it does not learn convolutional
+temporal features. The distinction is
+\[
+\text{1D ConvAE: regional convolution only}
+\]
+and
+\[
+\text{2D ConvAE: joint temporal--regional convolution}.
+\]
+The one-dimensional model therefore separates the effect of regional
+convolution from temporal convolution.
+
+As convolution follows the Schaefer parcel ordering, neighbouring
+positions are not necessarily anatomically adjacent. The model learns
+local regional-index patterns, not explicit anatomical neighbourhoods.
+
+The experiments considered zero, one, or two hidden convolutional
+layers. The latent dimensionality, number of layers, and $H_1$ and $H_2$
+were architectural hyperparameters.
+
+\subsection{Architecture Summary}
+
+The principal characteristics of the deterministic autoencoder architectures
+considered in this work are summarised in Table~\ref{tab:ae_architecture_summary}.
+All architectures preserve a latent representation of size $T\times L$, but
+differ in how information is transformed across the regional and temporal
+dimensions. The linear and deep autoencoders process each time point
+independently using fully connected transformations, the one-dimensional
+convolutional autoencoder introduces convolutional processing along the
+regional dimension only, and the two-dimensional convolutional autoencoder
+additionally incorporates local temporal context.
+
+\begin{table}[ht]
+    \centering
+    \caption{Summary of the deterministic autoencoder architectures.}
+    \label{tab:ae_architecture_summary}
+
+    \begin{tabular}{
+        >{\raggedright\arraybackslash}p{0.17\textwidth}
+        >{\raggedright\arraybackslash}p{0.19\textwidth}
+        >{\raggedright\arraybackslash}p{0.25\textwidth}
+        >{\raggedright\arraybackslash}p{0.15\textwidth}
+        >{\raggedright\arraybackslash}p{0.11\textwidth}
+    }
+        \toprule
+        \textbf{Architecture} &
+        \textbf{Temporal modelling} &
+        \textbf{Regional mapping} &
+        \textbf{Hidden layers} &
+        \textbf{Latent} \\
+        \midrule
+
+        Linear AE &
+        None &
+        Linear, fully connected &
+        None &
+        $T\times L$ \\
+
+        Deep AE &
+        None &
+        Nonlinear, fully connected &
+        1--2 &
+        $T\times L$ \\
+
+        1D Regional ConvAE &
+        None &
+        1D regional convolution &
+        0--2 &
+        $T\times L$ \\
+
+        2D ConvAE &
+        Local temporal context &
+        2D temporal--regional convolution &
+        0--2 &
+        $T\times L$ \\
+
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+
+These architectures therefore form a progression from globally connected,
+timepoint-wise mappings to convolutional representations with increasing
+use of local structure. The following section introduces the variational
+extension applied to each architecture while retaining the same underlying
+encoder-decoder configuration and time-preserving latent dimensionality.
+
+
+
+
+\subsection{Variational Autoencoder Extension}
+\thesisfigure{architectures/variationalAE}{Conceptual variational extension applied to the autoencoder architectures}{fig:variational_ae_diagram}{0.9\textwidth}
+
+After the architectural search, selected deterministic autoencoders were
+extended with the variational autoencoder formulation of Kingma and
+Welling~\cite{KingmaWelling2014}. This tests whether a structured
+probabilistic latent space improves representation organisation and
+generalisation while retaining reconstruction quality. Figure~\ref{fig:variational_ae_diagram}
+shows this modification.
+
+In deterministic autoencoders, the encoder directly produces
+\[
+\mathbf{Z}=f_{\theta}(\mathbf{X}).
+\]
+In the variational formulation, it instead parameterises an approximate
+posterior distribution,
+\[
+q_{\theta}(\mathbf{Z}\mid\mathbf{X})
+=
+\mathcal{N}
+\left(
+\boldsymbol{\mu},
+\operatorname{diag}(\boldsymbol{\sigma}^{2})
+\right),
+\]
+where $\boldsymbol{\mu}$ and $\boldsymbol{\sigma}$ are the latent mean
+and standard deviation. The latent representation is sampled from this
+distribution.
+
+The models predict $\boldsymbol{\mu}$ and log-variance
+$\log\boldsymbol{\sigma}^{2}$ rather than standard deviation directly.
+The standard deviation is obtained as
+\[
+\boldsymbol{\sigma}
+=
+\exp\left(
+\frac{1}{2}\log\boldsymbol{\sigma}^{2}
+\right).
+\]
+This keeps the network output unconstrained while ensuring a positive
+standard deviation. Log-variance is bounded for numerical stability.
+
+Latent samples use the reparameterisation trick,
+\[
+\boldsymbol{\epsilon}
+\sim
+\mathcal{N}(\mathbf{0},\mathbf{I}),
+\]
+\[
+\mathbf{Z}
+=
+\boldsymbol{\mu}
++
+\boldsymbol{\sigma}\odot\boldsymbol{\epsilon},
+\]
+where $\odot$ denotes element-wise multiplication. This separates
+sampling from the learnable parameters, allowing gradients to propagate
+through $\boldsymbol{\mu}$ and $\boldsymbol{\sigma}$.
+
+The variational extension does not change the latent representation
+shape. For the time-preserving models,
+\[
+\boldsymbol{\mu},
+\log\boldsymbol{\sigma}^{2},
+\mathbf{Z}
+\in
+\mathbb{R}^{T\times L},
+\]
+so each input timepoint retains an $L$-dimensional latent vector. The
+extension changes the parameterisation and regularisation of the
+bottleneck, not its size or temporal structure.
+
+The approximate posterior is regularised towards a standard normal
+prior,
+\[
+p(\mathbf{Z})
+=
+\mathcal{N}(\mathbf{0},\mathbf{I}).
+\]
+using the Kullback--Leibler (KL) divergence,
+\[
+\mathcal{L}_{\mathrm{KL}}
+=
+D_{\mathrm{KL}}
+\left(
+q_{\theta}(\mathbf{Z}\mid\mathbf{X})
+\parallel
+p(\mathbf{Z})
+\right).
+\]
+For a diagonal Gaussian posterior and standard normal prior, the KL term
+is
+\[
+\mathcal{L}_{\mathrm{KL}}
+=
+-\frac{1}{2}
+\sum_j
+\left(
+1+\log\sigma_j^2-\mu_j^2-\sigma_j^2
+\right),
+\]
+The implementation normalises this term over the latent dimensions.
+
+The training objective adds this term to reconstruction loss,
+\[
+\mathcal{L}
+=
+\mathcal{L}_{\mathrm{recon}}
++
+\beta\mathcal{L}_{\mathrm{KL}},
+\]
+where $\beta$ controls variational regularisation. Smaller values favour
+reconstruction fidelity, while larger values constrain the posterior more
+strongly towards the standard normal prior.
+
+During training, latent values are sampled with this procedure. During
+evaluation, the posterior mean $\boldsymbol{\mu}$ is used instead,
+giving a deterministic representation and reconstruction.

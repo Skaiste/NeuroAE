@@ -1,0 +1,15 @@
+\section{Representation Learning of Functional Brain Dynamics}
+
+Representation learning has been applied to functional brain data to obtain lower-dimensional descriptions of complex brain activity. 
+Sanz Perl et al. used variational autoencoders (VAEs) to create low-dimensional embeddings of collective brain dynamics~\cite{SanzPerl2020}. 
+Their results showed that the learned latent space can preserve meaningful differences between brain states, supporting the use of generative models for studying the organization of high-dimensional brain dynamics.
+
+Representation learning has also been applied directly to resting-state fMRI (rs-fMRI). 
+Kim et al.\ used a convolutional VAE to represent individual fMRI activity patterns in a low-dimensional latent space~\cite{Kim2021}. 
+As each fMRI frame is represented separately, changes in the latent representation over time form trajectories that describe the temporal evolution of brain activity. 
+The learned representations were related to patterns of cortical activity and functional connectivity, showing that information about functional brain organization can be retained after dimensionality reduction.
+
+Low-dimensional representations can also be used to compare different global brain states. 
+Sanz Perl et al.\ applied deep generative models to fMRI data from different states of consciousness and found that these states showed an ordered organization within a low-dimensional space~\cite{SanzPerl2023}. 
+This demonstrates that latent-space structure can reflect differences in functional brain dynamics between conditions. 
+Together, these studies show that representation learning can provide compact descriptions of high-dimensional fMRI activity while preserving information about temporal dynamics and differences between brain states.

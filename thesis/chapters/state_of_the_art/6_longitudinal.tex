@@ -1,0 +1,19 @@
+\section{Longitudinal and Disease-Progression Modelling}
+
+Longitudinal data provide information about how Alzheimer’s disease (AD) develops over time by following individuals across multiple clinical visits. 
+While cross-sectional studies can identify differences between clinical groups at a particular point in time, longitudinal measurements allow changes within individuals to be studied. 
+Representation learning methods can use these repeated measurements to learn disease-related changes and trajectories of progression.
+
+Yang et al.\ proposed a sequential graph autoencoder for modelling longitudinal neuroimaging data in preclinical AD~\cite{Yang2021}. The model combines relationships between brain regions with information from repeated clinical visits and separates the latent representation into time-varying and time-invariant components. 
+The time-varying representation captures changes across visits, while the time-invariant representation captures characteristics that remain relatively stable over time. 
+This demonstrates how autoencoder-based representations can be structured to distinguish longitudinal disease-related changes from more stable subject-specific information.
+
+Longitudinal progression has also been modelled using recurrent variational autoencoders. 
+Martí-Juan et al.\ proposed a multi-channel recurrent variational autoencoder (MC-RVAE) for modelling multimodal AD progression~\cite{MartiJuan2023}. 
+The model uses a shared latent representation to capture relationships between different data modalities while recurrent components model their changes over time. 
+This allows longitudinal trajectories to be reconstructed and missing measurements to be estimated, demonstrating how generative latent-variable models can represent the temporal progression of multiple AD-related measurements.
+
+Disease progression can also be represented as a continuous trajectory within a learned latent space. 
+Hong et al.\ used a variational autoencoder to learn representations of tau PET images and derive a pseudo-temporal trajectory describing the progression of tau pathology~\cite{Hong2022}. 
+The resulting trajectory reflected changes in the spatial distribution of tau and was associated with clinical and biological measures of AD.\@ 
+Together, these studies show that learned representations can be used not only to distinguish clinical groups, but also to describe disease-related changes over time and represent progression as a continuous process.

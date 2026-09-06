@@ -1,0 +1,509 @@
+\section{Data and Preprocessing}
+
+The data were obtained from the Alzheimer's Disease Neuroimaging
+Initiative (ADNI)~\cite{ADNI}. Two datasets were used: a primary dataset
+(\textbf{ADNI-B}) and a longitudinal dataset (\textbf{ADNI-Long}).
+Both contain resting-state functional magnetic resonance imaging
+(rs-fMRI), regional amyloid-$\beta$ (A$\beta$) and tau measurements,
+and a clinical diagnosis for each session. Diagnoses were grouped as
+healthy controls (HC), mild cognitive impairment (MCI), and Alzheimer's
+disease (AD).
+
+ADNI-B contains 152 ADNI3 participants, with one session per
+participant. It was used for model development and evaluation.
+ADNI-Long contains data from ADNI1, ADNIGO, ADNI2, and ADNI3. Before
+longitudinal selection, it included 141 participants and 281 sessions.
+Its repeated sessions allow changes in clinical stage to be studied
+across visits.
+
+Both datasets were provided in preprocessed and parcellated form.
+Neuroimaging preprocessing, denoising, spatial normalisation, temporal
+filtering, and brain parcellation were therefore not performed in this
+work. The datasets were processed independently using the same
+procedure, so matching sessions are not necessarily numerically
+identical. Sections~\ref{sec:neuroimaging_preprocessing}
+and~\ref{sec:dataset_consistency} describe the upstream procedure and
+the comparison between datasets, respectively.
+
+
+\subsection{Sample Selection and Cohort Characteristics}
+\label{sec:sample_selection}
+
+ADNI-B was the cross-sectional cohort for training, validation, and
+testing. Its 152 samples represent different participants: 93 HC, 33
+MCI, and 26 AD.
+
+ADNI-Long was used to evaluate changes associated with clinical
+progression. Participants with unchanged diagnoses across all available
+visits were excluded because the analysis focuses on changes between
+clinical stages. Transitions to an earlier stage were also excluded.
+The selected cohort therefore represents forward progression between
+HC, MCI, and AD rather than all trajectories in ADNI-Long.
+
+Participants with three sessions and different diagnoses were split
+into pairs representing clinical progression. The construction of these
+pairs is described in Section~\ref{sec:longitudinal_construction}.
+
+Participants shared by the selected ADNI-Long cohort and ADNI-B were
+identified. To avoid subject-level information leakage, their ADNI-B
+samples were assigned only to the test set. They were therefore not
+included in the training or validation data.
+
+Table~\ref{tab:dataset_summary} summarises ADNI-B, the available
+ADNI-Long dataset, and the selected longitudinal cohort.
+
+\begin{table}[ht]
+    \centering
+    \caption{Summary of the available and selected datasets. Diagnostic
+    counts for ADNI-Long are reported at the session level.}
+    \label{tab:dataset_summary}
+    \begin{tabular}{lccc}
+        \hline
+        & ADNI-B & ADNI-Long Available & ADNI-Long Selected \\
+        \hline
+        ADNI phases & ADNI3 & ADNI1/GO/2/3 & ADNI1/2/3 \\
+        Unique subjects & 152 & 141 & 22 \\
+        Sessions & 152 & 281 & 48 \\
+        HC sessions & 93 & 175 & 15 \\
+        MCI sessions & 33 & 76 & 23 \\
+        AD sessions & 26 & 30 & 10 \\
+        \hline
+    \end{tabular}
+\end{table}
+
+Table~\ref{tab:demographics} shows the demographic characteristics of
+the final cohorts. Mean age was similar across groups in ADNI-B
+(73.26--75.88 years) and ADNI-Long (73.87--74.67 years). Sex was also
+relatively balanced, although the AD group in ADNI-B contained more
+males (61.5\%).
+
+ADNI-Long characteristics are reported at the session level. A
+participant may therefore contribute to more than one clinical group as
+their diagnosis changes across visits.
+
+\begin{table}[ht]
+    \centering
+    \caption{Demographic characteristics of the final ADNI-B and selected
+    ADNI-Long cohorts. Age is reported as mean $\pm$ standard deviation.
+    ADNI-Long characteristics are reported at the session level.}
+    \label{tab:demographics}
+    \begin{tabular}{llcccc}
+        \hline
+        Dataset & Group & N & Age (years) & Female, n (\%) & Male, n (\%) \\
+        \hline
+        ADNI-B
+            & HC  & 93 & $73.26 \pm 5.33$ & 48 (51.6\%) & 45 (48.4\%) \\
+            & MCI & 33 & $73.72 \pm 6.37$ & 19 (57.6\%) & 14 (42.4\%) \\
+            & AD  & 26 & $75.88 \pm 7.51$ & 10 (38.5\%) & 16 (61.5\%) \\
+        \hline
+        ADNI-Long
+            & HC  & 15 & $74.65 \pm 5.03$ & 6 (40.0\%) & 9 (60.0\%) \\
+            & MCI & 23 & $74.67 \pm 6.64$ & 11 (47.8\%) & 12 (52.2\%) \\
+            & AD  & 10 & $73.87 \pm 6.85$ & 4 (40.0\%) & 6 (60.0\%) \\
+        \hline
+    \end{tabular}
+\end{table}
+
+\subsection{Upstream Neuroimaging Preprocessing}
+\label{sec:neuroimaging_preprocessing}
+
+The neuroimaging data were preprocessed before they were provided.
+This section describes that upstream preparation, not preprocessing
+performed in this thesis.
+
+Functional MRI preprocessing used the standard volume-based CONN
+pipeline. It included realignment and motion correction, slice-timing
+correction, and outlier detection with the Artifact Detection Toolbox
+(ART). Functional images were coregistered to each participant's
+high-resolution T1-weighted image and normalised to MNI-152 space with
+2~mm isotropic resampling. They were then smoothed with an 8~mm FWHM
+Gaussian kernel~\cite{AquileLlorensMartinezMolina}.
+
+Denoising used anatomical CompCor (aCompCor)~\cite{Behzadi2007}. Five
+principal components from white matter and five from cerebrospinal
+fluid were regressed from the functional data. Nuisance regressors also
+included six realignment parameters, their first-order temporal
+derivatives, and ART-identified artifacts. The denoised BOLD time
+series were band-pass filtered between 0.008 and
+0.08~Hz~\cite{AquileLlorensMartinezMolina}.
+
+ADNI-B and ADNI-Long underwent the same procedure but were processed
+independently. Section~\ref{sec:dataset_consistency} examines the
+effect on the parcellated BOLD signals.
+
+
+\subsection{Brain Parcellation and BOLD Representation}
+\label{sec:bold_representation}
+
+During upstream preparation, the functional data were parcellated with
+the 400-region Schaefer cortical atlas~\cite{Schaefer2018}. The
+provided data therefore contain regional BOLD time series rather than
+voxel-level fMRI volumes.
+
+Each parcel is represented by one BOLD time series. An rs-fMRI sample
+is represented as
+
+\begin{equation}
+    \mathbf{X} \in \mathbb{R}^{R \times T},
+\end{equation}
+
+where $R=400$ is the number of cortical regions and $T=197$ is the
+number of timepoints. Each element $x_{r,t}$ is the BOLD signal for
+region $r$ at timepoint $t$. Each session is thus a
+$400 \times 197$ matrix.
+
+% The 400 parcels can also be assigned to the seven large-scale networks
+% described by Yeo et al.~\cite{Yeo2011}. These assignments are not model
+% inputs. They are used later to interpret learned representations in
+% terms of large-scale brain organisation.
+
+Figure~\ref{fig:bold_example} shows an example of the parcellated BOLD
+representation used as input to the models.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.85\textwidth]
+    {example_bold_heatmap.png}
+    \caption{Example parcellated rs-fMRI sample used as input to the
+    models. Each row represents one of the 400 Schaefer cortical
+    parcels and each column represents one of the 197 available
+    timepoints.}
+    \label{fig:bold_example}
+\end{figure}
+
+
+\subsection{Amyloid-$\beta$ and Tau Data}
+\label{sec:biomarker_data}
+
+The A$\beta$ and tau PET data were also provided after preprocessing
+and parcellation. The following PET steps were performed upstream.
+
+PET images were coregistered to the corresponding T1-weighted image and
+smoothed to 8~mm FWHM. Partial-volume correction used the
+Müller--Gärtner method in PETPVC~\cite{Thomas2016}.
+
+A$\beta$ measurements came from Florbetapir (FBP) or Florbetaben (FBB)
+PET scans. Standardized Uptake Value Ratios (SUVRs) used the whole
+cerebellum as the reference region and were converted to Centiloid
+units with tracer-specific calibration equations. Tau measurements came
+from Flortaucipir PET scans. Their SUVRs used inferior cerebellar grey
+matter as the reference region~\cite{AquileLlorensMartinezMolina}.
+
+The upstream procedure parcellated PET data with the Schaefer-400
+atlas. Each session is associated with regional A$\beta$ and tau
+vectors,
+
+\begin{equation}
+    \mathbf{a} \in \mathbb{R}^{400},
+    \qquad
+    \boldsymbol{\tau} \in \mathbb{R}^{400},
+\end{equation}
+
+where $a_r$ and $\tau_r$ are the A$\beta$ and tau measurements for
+region $r$.
+
+
+\subsection{Input Normalisation}
+\label{sec:input_normalisation}
+
+Further normalisation was performed before the data were passed to the
+models. BOLD time series and regional A$\beta$ and tau measurements
+used different procedures.
+
+Each regional BOLD time series was standardised across time using a
+z-score,
+
+\begin{equation}
+    \tilde{x}_{r,t}
+    =
+    \frac{x_{r,t}-\mu_r}{\sigma_r},
+\end{equation}
+
+where $\mu_r$ and $\sigma_r$ are the temporal mean and standard
+deviation of region $r$ in that session. This was done independently
+for every region and session. It removes differences in signal scale
+while preserving temporal fluctuations. Each normalised time series has
+zero temporal mean and unit temporal standard deviation. The same
+procedure was used for ADNI-B and ADNI-Long.
+
+A$\beta$ and tau were instead normalised across subjects. For each
+biomarker and region, the mean and standard deviation were calculated
+from the ADNI-B training set only. A regional biomarker value $b_r$ was
+then standardised as
+
+\begin{equation}
+    \tilde{b}_{r}
+    =
+    \frac{b_{r}-\mu_{r}^{\mathrm{train}}}
+         {\sigma_{r}^{\mathrm{train}}},
+\end{equation}
+
+where $b_r$ is the A$\beta$ or tau value for region $r$.
+$\mu_{r}^{\mathrm{train}}$ and $\sigma_{r}^{\mathrm{train}}$ are the
+corresponding mean and standard deviation across training subjects.
+This was done separately for each of the 400 regions and for each
+biomarker.
+
+The ADNI-B training statistics were used to normalise the validation
+and test sets. They were also used for ADNI-Long when evaluating models
+developed on ADNI-B. This prevents validation, test, and longitudinal
+data from influencing model development.
+
+
+\subsection{Consistency Between ADNI-B and ADNI-Long}
+\label{sec:dataset_consistency}
+
+Although ADNI-B and ADNI-Long underwent the same upstream neuroimaging
+preprocessing procedure, the datasets were processed independently.
+Consequently, sessions corresponding to the same participant and
+acquisition are not numerically identical between the two datasets.
+Since models developed using ADNI-B are subsequently evaluated using
+longitudinal observations from ADNI-Long, the consistency between the
+independently processed datasets was assessed before longitudinal
+evaluation.
+
+Sessions corresponding to the same participant and acquisition were
+identified in both datasets and compared at three levels: regional BOLD
+activity, static functional connectivity (FC), and sliding-window
+functional connectivity dynamics (SwFCD). These comparisons were used
+to determine whether differences introduced by the independent
+processing affected the regional signals themselves, their static
+functional relationships, or their temporal connectivity structure.
+
+For each matched session, the normalised BOLD matrices from ADNI-B and
+ADNI-Long were flattened into vectors containing all cortical regions
+and timepoints,
+
+\begin{equation}
+    \mathbf{x}^{B}
+    =
+    \operatorname{vec}(\mathbf{X}^{B}),
+    \qquad
+    \mathbf{x}^{Long}
+    =
+    \operatorname{vec}(\mathbf{X}^{Long}),
+\end{equation}
+
+where
+$\mathbf{x}^{B},\mathbf{x}^{Long}\in\mathbb{R}^{RT}$,
+with $R=400$ regions and $T=197$ timepoints. Each vector therefore
+contains $78{,}800$ corresponding normalised BOLD values. Similarity
+between the two BOLD representations was calculated using Pearson
+correlation,
+
+\begin{equation}
+    \rho_{\mathrm{BOLD}}
+    =
+    \operatorname{corr}
+    \left(
+        \mathbf{x}^{B},
+        \mathbf{x}^{Long}
+    \right).
+\end{equation}
+
+Static FC was calculated from the Pearson correlation between every
+pair of regional BOLD time series. The unique off-diagonal elements of
+the resulting FC matrices were vectorised, and similarity between the
+two datasets was calculated as
+
+\begin{equation}
+    \rho_{\mathrm{FC}}
+    =
+    \operatorname{corr}
+    \left(
+        \operatorname{vec}_{u}(\mathbf{FC}^{B}),
+        \operatorname{vec}_{u}(\mathbf{FC}^{Long})
+    \right),
+\end{equation}
+
+where $\operatorname{vec}_{u}$ denotes vectorisation of the upper
+triangular elements of a matrix, excluding the diagonal.
+
+SwFCD was compared in the same manner using the unique off-diagonal
+elements of the corresponding SwFCD matrices,
+
+\begin{equation}
+    \rho_{\mathrm{SwFCD}}
+    =
+    \operatorname{corr}
+    \left(
+        \operatorname{vec}_{u}(\mathbf{SwFCD}^{B}),
+        \operatorname{vec}_{u}(\mathbf{SwFCD}^{Long})
+    \right).
+\end{equation}
+
+In addition to Pearson correlation, mean absolute error (MAE) was used
+to quantify the numerical difference between corresponding values. For
+two vectorised representations $\mathbf{u}$ and $\mathbf{v}$ containing
+$N$ corresponding elements, MAE was calculated as
+
+\begin{equation}
+    \mathrm{MAE}(\mathbf{u},\mathbf{v})
+    =
+    \frac{1}{N}
+    \sum_{i=1}^{N}
+    \left|u_i-v_i\right|.
+\end{equation}
+
+For BOLD, MAE was therefore calculated across the $78{,}800$
+corresponding region--timepoint values. For FC and SwFCD, it was
+calculated across the corresponding vectorised upper-triangular
+elements. Pearson correlation and MAE provide complementary measures:
+Pearson correlation evaluates similarity in the relative structure of
+the representations, whereas MAE measures the magnitude of their
+pointwise numerical differences.
+
+Figure~\ref{fig:dataset_consistency_example} shows a representative
+comparison of the BOLD, FC, and SwFCD representations from a session
+present in both datasets.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=\textwidth]
+    {b2_long_comparison.png}
+    \caption{Representative comparison of a session present in both
+    ADNI-B and ADNI-Long. The columns show the corresponding normalised
+    regional BOLD signals, static functional connectivity (FC), and
+    sliding-window functional connectivity dynamics (SwFCD). The upper
+    row represents ADNI-B and the lower row represents ADNI-Long.}
+    \label{fig:dataset_consistency_example}
+\end{figure}
+
+A total of eight sessions could be matched between ADNI-B and
+ADNI-Long. The same BOLD, FC, and SwFCD comparisons were performed for
+each shared session to assess whether the observed consistency extended
+beyond an individual example. The resulting Pearson correlations and
+MAE values are shown in
+Figure~\ref{fig:dataset_consistency_population}.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=\textwidth]
+    {dataset_consistency_population.png}
+    \caption{Consistency between the eight sessions represented in both
+    ADNI-B and ADNI-Long. Boxplots show the Pearson correlation and mean
+    absolute error (MAE) between corresponding BOLD, FC, and SwFCD
+    representations. Individual points represent shared sessions, and
+    annotations indicate the median across sessions.}
+    \label{fig:dataset_consistency_population}
+\end{figure}
+
+Across the eight shared sessions, the mean Pearson correlations were
+0.770 for BOLD, 0.736 for FC, and 0.490 for SwFCD. The corresponding
+mean MAE values were 0.522, 0.126, and 0.047, respectively. BOLD and FC
+showed reasonably consistent correlations across the shared sessions,
+indicating that their overall signal and static connectivity structure
+was largely preserved between the independently processed datasets.
+
+SwFCD showed lower and more variable Pearson correlations, indicating
+that its relative structure was less consistently preserved. Within
+the SwFCD representation, however, the corresponding absolute
+differences remained relatively small, with a mean MAE of 0.047. This
+difference between the Pearson correlation and MAE results demonstrates
+that small pointwise numerical differences can coexist with weaker
+preservation of the relative structure of a representation.
+
+Overall, the independently processed datasets should not be considered
+numerically equivalent. Nevertheless, the consistency check indicates
+that the BOLD and static FC representations retained a reasonable degree
+of similarity across the shared sessions, while larger differences were
+observed in the relative structure of SwFCD. Since only eight sessions
+were available in both datasets, these results are interpreted as a
+dataset consistency check rather than as evidence of equivalence between
+ADNI-B and ADNI-Long.
+
+\subsection{Longitudinal Dataset Construction}
+\label{sec:longitudinal_construction}
+
+After the selection described in Section~\ref{sec:sample_selection},
+the remaining ADNI-Long sessions were organised into longitudinal
+pairs. Each pair contains a source and target observation from the same
+participant at different visits,
+
+\begin{equation}
+    \left(
+        \mathbf{X}_{t_1},
+        \mathbf{X}_{t_2}
+    \right),
+    \qquad t_1 < t_2,
+\end{equation}
+
+where $\mathbf{X}_{t_1}$ is the source state and
+$\mathbf{X}_{t_2}$ is the target state. The source session is the
+earlier visit and the target session is the later visit. Their clinical
+labels are referred to as the source diagnosis and target diagnosis,
+respectively.
+
+Only forward transitions between different clinical groups were kept:
+HC~$\rightarrow$~MCI, HC~$\rightarrow$~AD, and
+MCI~$\rightarrow$~AD. Stable and reverse transitions were excluded.
+
+For participants with more than two sessions, all temporally ordered
+source--target pairs representing valid forward transitions were
+retained. A session could therefore contribute to more than one pair.
+For example, for a participant with three chronologically ordered
+diagnoses
+
+\begin{equation}
+    \left[
+        \mathrm{MCI}_{t_1},
+        \mathrm{AD}_{t_2},
+        \mathrm{AD}_{t_3}
+    \right],
+    \qquad t_1 < t_2 < t_3,
+\end{equation}
+
+the resulting source--target pairs are
+
+\begin{equation}
+    \left(
+        \mathrm{MCI}_{t_1},
+        \mathrm{AD}_{t_2}
+    \right)
+    \quad \text{and} \quad
+    \left(
+        \mathrm{MCI}_{t_1},
+        \mathrm{AD}_{t_3}
+    \right).
+\end{equation}
+
+The pair $\left(\mathrm{AD}_{t_2},\mathrm{AD}_{t_3}\right)$ is excluded
+because the diagnosis does not change. More generally, every temporally ordered source--target combination
+representing one of the valid forward transitions
+HC~$\rightarrow$~MCI, HC~$\rightarrow$~AD, or
+MCI~$\rightarrow$~AD is retained. This allows several
+progression intervals from one participant while excluding stable and
+reverse transitions.
+
+The selected ADNI-Long cohort contains 22 participants and 48 sessions,
+which produced 27 progression pairs. Participants and sessions can
+contribute to more than one pair or transition type.
+Table~\ref{tab:longitudinal_transitions} summarises these pairs.
+
+\begin{table}[ht]
+    \centering
+    \caption{Clinical progression pairs represented in the selected
+    ADNI-Long cohort. The number of unique subjects within each
+    transition type is not additive because the same participant may
+    contribute to more than one type of clinical transition.}
+    \label{tab:longitudinal_transitions}
+    \begin{tabular}{lcc}
+        \hline
+        Transition & Unique subjects & Pairs \\
+        \hline
+        HC $\rightarrow$ MCI & 13 & 15 \\
+        HC $\rightarrow$ AD  & 1  & 1  \\
+        MCI $\rightarrow$ AD & 10 & 11 \\
+        \hline
+        Total & 22 & 27 \\
+        \hline
+    \end{tabular}
+\end{table}
+
+The interval between the source and target sessions was recorded for
+each pair to describe the period over which the transition was observed.
+Across the 27 longitudinal pairs, the mean interval was $2.90 \pm 1.05$ years.
+
+As described in Section~\ref{sec:sample_selection}, participants shared
+by ADNI-Long and ADNI-B were restricted to the ADNI-B test set. Thus,
+longitudinal participants did not contribute to training or validation.

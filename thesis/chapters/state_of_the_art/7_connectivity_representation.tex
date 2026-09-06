@@ -1,0 +1,17 @@
+\section{Brain Connectivity Representation and Translation}
+
+Learned representations of brain activity can be used not only for dimensionality reduction, but also to study how latent dimensions relate to functional brain organisation. 
+Sanz Perl et al.\ used a variational autoencoder to obtain low-dimensional representations of parcellated fMRI activity~\cite{SanzPerl2025}. 
+Individual latent dimensions were perturbed and decoded back into regional brain activity, allowing their spatial patterns to be related to large-scale functional networks. 
+This showed that information represented within individual latent dimensions can be mapped back to interpretable patterns of functional brain organisation.
+
+Latent representations can also provide a common space for translating between different representations of brain connectivity. 
+Jamison et al.\ proposed Krakencoder, an encoder-decoder framework that maps different structural and functional connectomes into a shared latent representation~\cite{Jamison2025}. 
+Separate encoders and decoders are used for different connectivity representations, allowing one representation to be encoded into the shared space and reconstructed as another. 
+This demonstrates how a common latent representation can be combined with different decoders to reconstruct or translate between related representations of brain organisation.
+
+Shared representations of structural and functional connectivity have also been investigated in relation to Alzheimer’s disease. 
+Amodeo et al.\ proposed a graph variational autoencoder that combines structural connectivity with resting-state functional connectivity within a joint latent representation~\cite{Amodeo2022}. 
+The learned representations were evaluated using data from the OASIS-3 dataset and contained information relevant to distinguishing AD-related populations. 
+Together, these studies show that latent representations can preserve information about functional brain organisation, provide interpretable mappings back to brain networks, and support translation between different brain representations. 
+These approaches provide a basis for investigating whether a shared representation can also be decoded into different disease-related functional brain states.

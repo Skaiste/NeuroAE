@@ -1,0 +1,17 @@
+\section{Autoencoder-Based Representation Learning in Alzheimer's Disease}
+Autoencoder-based representation learning has been used to identify patterns in neuroimaging data related to Alzheimer’s disease (AD) and mild cognitive impairment (MCI). 
+Early work by Suk and Shen used autoencoders to learn features from neuroimaging and biomarker data for AD/MCI classification~\cite{SukShen2013}. 
+Their results showed that learned representations can contain disease-related information useful for distinguishing between clinical groups, providing an alternative to manually defined imaging features.
+
+Autoencoders have also been applied to resting-state fMRI (rs-fMRI) to represent functional brain activity. 
+Suk et al.\ used a deep autoencoder to map regional BOLD activity at individual timepoints into a lower-dimensional representation~\cite{SukStateSpace}. 
+Applying the encoder across the rs-fMRI time series produced a sequence of latent representations, which was then used to model functional dynamics and distinguish individuals with MCI from healthy controls. 
+Other approaches have instead learned representations from functional connectivity derived from rs-fMRI.\@ 
+For example, autoencoder-based feature learning has been applied to functional brain networks for the early identification of MCI~\cite{EarlyDiagnosis2018}. 
+These approaches show that disease-related information can be learned both directly from regional brain activity and from the functional relationships between brain regions.
+
+More recent work has extended this approach towards probabilistic latent representations. 
+Variational methods have been used to represent rs-fMRI functional connectivity through latent distributions for the identification of MCI~\cite{FCLatentDistributions2023}.
+This allows functional connectivity patterns to be represented in a structured latent space rather than only through deterministic features. 
+Overall, previous studies show that autoencoders can learn AD- and MCI-related representations from functional neuroimaging data. 
+However, these representations have mainly been used as features for identifying or classifying clinical groups, with less focus on how disease-related differences are represented within the latent space and reconstructed back into functional brain activity.
