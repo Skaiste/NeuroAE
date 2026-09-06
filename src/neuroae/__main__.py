@@ -714,6 +714,12 @@ def _run_cross_validation_epoch_search(loaders, data_config, model_config, train
             convergence_warmup_epochs=training_config["training"].get("convergence_warmup_epochs", 0),
             aux_head_warmup_epochs=training_config["training"].get("aux_head_warmup_epochs", 0),
             aux_head_ramp_epochs=training_config["training"].get("aux_head_ramp_epochs", 20),
+            aux_training_mode=training_config["training"].get("aux_training_mode"),
+            aux_head_only_epochs=training_config["training"].get("aux_head_only_epochs", 25),
+            aux_head_patience=training_config["training"].get("aux_head_patience", 6),
+            aux_joint_epochs=training_config["training"].get("aux_joint_epochs", 50),
+            aux_joint_patience=training_config["training"].get("aux_joint_patience", 10),
+            encoder_cls_scale=training_config["training"].get("encoder_cls_scale", 0.1),
             checkpoint_selection_metric=training_config["training"].get("checkpoint_selection_metric", "val_loss"),
             save_checkpoint=False,
             vectorize_val_reference=training_config["training"].get("vectorize_val_reference", False),
@@ -1002,12 +1008,17 @@ def load_model_from_config(
 
     torch_device = torch.device(device)
     if "load_path" in model_config['model']:
-        model.load_state_dict(torch.load(model_config['model']['load_path'], map_location=torch_device))
+        checkpoint_state = torch.load(model_config['model']['load_path'], map_location=torch_device)
+        if hasattr(model, "load_pretrained_ae") and not any(key.startswith("cls_head.") for key in checkpoint_state):
+            model.load_pretrained_ae(checkpoint_state)
+        else:
+            model.load_state_dict(checkpoint_state)
         print(f"Model loaded from {model_config['model']['load_path']}")
-        if model_config['model']['freeze_encoder']:
+        if model_config['model'].get('freeze_encoder', False):
             model.freeze_encoder()
-        if model_config['model']['reset_decoder']:
+        if model_config['model'].get('reset_decoder', False):
             model.reset_decoder()
+            model._pretrained_ae_loaded = False
 
     # summary(model, (197, 400))
     # breakpoint()
@@ -1229,6 +1240,12 @@ def run_training(
         convergence_warmup_epochs=training_config['training'].get('convergence_warmup_epochs', 0),
         aux_head_warmup_epochs=training_config['training'].get('aux_head_warmup_epochs', 0),
         aux_head_ramp_epochs=training_config['training'].get('aux_head_ramp_epochs', 20),
+        aux_training_mode=training_config['training'].get('aux_training_mode'),
+        aux_head_only_epochs=training_config['training'].get('aux_head_only_epochs', 25),
+        aux_head_patience=training_config['training'].get('aux_head_patience', 6),
+        aux_joint_epochs=training_config['training'].get('aux_joint_epochs', 50),
+        aux_joint_patience=training_config['training'].get('aux_joint_patience', 10),
+        encoder_cls_scale=training_config['training'].get('encoder_cls_scale', 0.1),
         checkpoint_selection_metric=training_config['training'].get('checkpoint_selection_metric', 'val_loss'),
         save_checkpoint=not dry_run,
         vectorize_val_reference=training_config['training'].get('vectorize_val_reference', False),

@@ -111,6 +111,9 @@ class LAE(ModelBase):
         return self.add_weighted_reconstruction_losses(loss, x, x_hat)
 
     def _classification_logits(self, z):
+        scale = getattr(self, "encoder_cls_scale", 1.0)
+        if scale != 1.0:
+            z = z.detach() + scale * (z - z.detach())
         if isinstance(self.cls_head, ClsHeadLinear):
             # Flattening preserves (time, latent); pool over time, not latent.
             z = z.reshape(z.shape[0], self.timepoint_dim, self.latent_dim).transpose(1, 2)
@@ -265,6 +268,16 @@ class LAEClsHead(LAE):
         self.cls_head = head_types[cls_head_type](
             self.latent_flat_dim, int(num_classes), cls_head_hidden_dim, dropout=cls_head_dropout
         ) if cls_head_type == "mlp" else head_types[cls_head_type](self.latent_dim, int(num_classes), dropout=cls_head_dropout)
+
+    def load_pretrained_ae(self, state_dict):
+        """Load a plain AE state while retaining the freshly initialized head."""
+        expected = {key for key in self.state_dict() if not key.startswith("cls_head.")}
+        if set(state_dict) != expected:
+            missing = sorted(expected - set(state_dict))
+            unexpected = sorted(set(state_dict) - expected)
+            raise ValueError(f"Expected a complete plain AE checkpoint; missing={missing}, unexpected={unexpected}.")
+        self.load_state_dict(state_dict, strict=False)
+        self._pretrained_ae_loaded = True
 
     def forward(self, x):
         output = super().forward(x)
