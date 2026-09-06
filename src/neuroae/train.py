@@ -493,12 +493,14 @@ def _dataset_class_labels(dataset):
 
 
 def _configure_classifier_class_weights(model, dataset):
-    """Use N / (K * class_count) from training data, never validation data."""
-    setting = (getattr(model, "loss_fn_params", {}) or {}).get("cls_class_weights", "balanced")
+    """Fit inverse-frequency or square-root weights using training labels only."""
+    setting = (getattr(model, "loss_fn_params", {}) or {}).get("cls_class_weights", "weighted")
+    if isinstance(setting, str):
+        setting = setting.lower().replace("-", "_")
     num_classes = len(model.class_to_idx)
-    if setting is None:
+    if setting is None or (isinstance(setting, str) and setting == "unweighted"):
         weights = torch.ones(num_classes)
-    elif isinstance(setting, str) and setting == "balanced":
+    elif isinstance(setting, str) and setting in {"weighted", "balanced", "sqrt_balanced"}:
         counts = torch.zeros(num_classes)
         for label in _dataset_class_labels(dataset):
             if label not in model.class_to_idx:
@@ -508,10 +510,13 @@ def _configure_classifier_class_weights(model, dataset):
             missing = [label for label, index in model.class_to_idx.items() if counts[index] == 0]
             raise ValueError(f"Balanced classifier loss requires training samples for every class; missing: {missing!r}")
         weights = counts.sum() / (num_classes * counts)
+        if setting == "sqrt_balanced":
+            weights = weights.sqrt()
     elif isinstance(setting, (list, tuple)):
         weights = torch.as_tensor(setting, dtype=torch.float32)
     else:
-        raise ValueError("cls_class_weights must be 'balanced', null, or a list of positive weights in class_labels order.")
+        raise ValueError("cls_class_weights must be 'weighted', 'unweighted', 'sqrt_balanced', "
+            "or a list of positive weights in class_labels order ('balanced' and null are legacy aliases).")
     if weights.shape != (num_classes,) or not torch.isfinite(weights).all() or not (weights > 0).all():
         raise ValueError("cls_class_weights must contain one finite positive weight per class.")
     model.cls_class_weights.copy_(weights.to(model.cls_class_weights))
@@ -612,9 +617,9 @@ def train_vae(
         )
 
     compute_head_loss_during_training = selection_metric == "swfcd_head_loss_guarded"
-    compute_cls_macro_f1_during_training = selection_metric == "swfcd_cls_macro_f1_joint"
+    compute_cls_macro_f1_during_training = use_cls_head
 
-    if compute_cls_macro_f1_during_training and not use_cls_head:
+    if selection_metric == "swfcd_cls_macro_f1_joint" and not use_cls_head:
         raise ValueError("swfcd_cls_macro_f1_joint requires a model with a classification auxiliary head.")
 
     if compute_swfcd_during_training is None:
