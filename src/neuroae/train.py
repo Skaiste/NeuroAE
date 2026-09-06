@@ -222,6 +222,9 @@ def select_best_checkpoint(
     # Once full auxiliary weight is reached, exclude warmup and ramp checkpoints.
     active = _metric_values(history, "val", "auxiliary_active")
     start_idx = next((idx for idx, value in enumerate(active) if value), 0)
+    stages = _metric_values(history, "val", "selection_stage")
+    if stages:
+        start_idx = stages.index(max(stages))
     best_idx = start_idx
     best_loss, best_swfcd, best_head_loss, best_cls_macro_f1, best_joint_score = _epoch_metrics(start_idx)
 
@@ -532,8 +535,6 @@ def _configure_auxiliary_mode(model, mode, head_only_epochs, encoder_cls_scale, 
     from .models.linear import LAEClsHead
     if not isinstance(model, LAEClsHead) or not use_cls_head or use_pred_heads:
         raise ValueError("These auxiliary training modes require LAEClsHead without regression heads.")
-    if not getattr(model, "_pretrained_ae_loaded", False):
-        raise ValueError("These modes require model.load_path pointing to a plain pretrained AE checkpoint and reset_decoder=false.")
     if mode == "head_first_joint" and (
         isinstance(head_only_epochs, bool) or not isinstance(head_only_epochs, int) or head_only_epochs < 1
     ):
@@ -547,6 +548,77 @@ def _configure_auxiliary_mode(model, mode, head_only_epochs, encoder_cls_scale, 
         parameter.grad = None
     for parameter in model.cls_head.parameters():
         parameter.requires_grad_(True)
+
+
+def _train_auxiliary_with_pretraining(options):
+    """Train a seed-local AE, restore its best weights, then run the classifier stages."""
+    from .models.linear import LAE
+    model = options["model"]
+    if options["val_loader"] is None:
+        raise ValueError("AE pretraining for auxiliary modes requires a validation loader.")
+    for name in ("ae_pretrain_epochs", "ae_pretrain_patience"):
+        value = options[name]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"{name} must be a positive integer.")
+    # Preserve RNG state while constructing the temporary plain AE; copy the
+    # initial AE weights from the run's already seeded classifier model.
+    with torch.random.fork_rng(devices=[]):
+        ae = LAE(model.region_dim, model.timepoint_dim, model.latent_dim)
+    ae.load_state_dict({key: value for key, value in model.state_dict().items() if not key.startswith("cls_head.")})
+    ae.set_loss_fn_params(deepcopy(getattr(model, "loss_fn_params", {})))
+    ae_options = dict(options)
+    ae_options.update(
+        model=ae,
+        num_epochs=min(options["num_epochs"], options["ae_pretrain_epochs"]),
+        learning_rate=options["ae_pretrain_learning_rate"],
+        use_cls_head=False, use_pred_heads=False, aux_training_mode=None,
+        aux_head_warmup_epochs=0, aux_head_ramp_epochs=0,
+        convergence_patience=options["ae_pretrain_patience"],
+        convergence_warmup_epochs=0, checkpoint_selection_metric="val_loss",
+        name=f"{options['name']}_ae", pca=None, _restore_best_weights=True,
+    )
+    print("Stage: AE pretraining (classifier inactive)", flush=True)
+    ae_history, _ = train_vae(**ae_options)
+    ae_epochs = len(ae_history["train"].get("loss", []))
+    if not ae_epochs:
+        raise ValueError("AE pretraining requires at least one training epoch.")
+    model.load_pretrained_ae(ae.state_dict())
+    ae_selection = select_best_checkpoint(ae_history, "val_loss", options["convergence_min_delta"])
+    remaining_epochs = options["num_epochs"] - ae_epochs
+    if remaining_epochs > 0:
+        head_options = dict(options)
+        head_options.update(num_epochs=remaining_epochs)
+        print(f"Restored AE epoch {ae_selection['best_epoch']}; starting classifier stages after {ae_epochs} AE epochs", flush=True)
+        head_history, mse_pca = train_vae(**head_options)
+    else:
+        head_history, mse_pca = {"train": {}, "val": {}}, 0
+        print("Overall num_epochs cap reached during AE pretraining; no classifier epochs remain.", flush=True)
+        if options["save_checkpoint"]:
+            torch.save(model.state_dict(), f"{options['save_dir']}/{options['name']}_model.pt")
+
+    history = {}
+    for split in ("train", "val"):
+        first, second = ae_history.get(split, {}), head_history.get(split, {})
+        first_count = len(first.get("loss", []))
+        second_count = len(second.get("loss", []))
+        history[split] = {
+            key: first.get(key, [float("nan")] * first_count) + second.get(key, [float("nan")] * second_count)
+            for key in dict.fromkeys([*first, *second])
+        }
+    # A phase's loss is only comparable to losses in that same phase.
+    head_val_count = len(head_history.get("val", {}).get("loss", []))
+    active = head_history.get("val", {}).get("auxiliary_active", [1] * head_val_count)
+    head_phases = [2 if flag else 1 for flag in active] if options["aux_training_mode"] == "head_first_joint" else [1] * head_val_count
+    history["val"]["selection_stage"] = [0] * len(ae_history["val"].get("loss", [])) + head_phases
+    stage_info = deepcopy(head_history.get("auxiliary_stages", {}))
+    for key in ("head_best_epoch", "joint_start_epoch"):
+        if key in stage_info:
+            stage_info[key] += ae_epochs
+    stage_info.update(ae_epochs_completed=ae_epochs, ae_best_epoch=ae_selection["best_epoch"])
+    if remaining_epochs > 0:
+        stage_info["head_start_epoch"] = ae_epochs + 1
+    history["auxiliary_stages"] = stage_info
+    return history, mse_pca
 
 
 def train_vae(
@@ -579,7 +651,12 @@ def train_vae(
     aux_head_patience=6,
     aux_joint_epochs=50,
     aux_joint_patience=10,
+    ae_pretrain_epochs=100,
+    ae_pretrain_patience=10,
+    ae_pretrain_learning_rate=1e-3,
+    _restore_best_weights=False,
 ):
+    run_options = dict(locals())
     if isinstance(aux_head_warmup_epochs, bool) or not isinstance(aux_head_warmup_epochs, int) or aux_head_warmup_epochs < 0:
         raise ValueError("aux_head_warmup_epochs must be a non-negative integer.")
 
@@ -596,10 +673,14 @@ def train_vae(
     if aux_training_mode == "head_first_joint":
         if val_loader is None:
             raise ValueError("head_first_joint requires validation data to select and restore the best head checkpoint.")
-        for name, value in (("aux_head_patience", aux_head_patience), ("aux_joint_epochs", aux_joint_epochs), ("aux_joint_patience", aux_joint_patience)):
+        for parameter_name, value in (("aux_head_patience", aux_head_patience), ("aux_joint_epochs", aux_joint_epochs), ("aux_joint_patience", aux_joint_patience)):
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-                raise ValueError(f"{name} must be a positive integer.")
-        num_epochs = min(num_epochs, aux_head_only_epochs + aux_joint_epochs)
+                raise ValueError(f"{parameter_name} must be a positive integer.")
+        if getattr(model, "_pretrained_ae_loaded", False):
+            num_epochs = min(num_epochs, aux_head_only_epochs + aux_joint_epochs)
+
+    if aux_training_mode is not None and not getattr(model, "_pretrained_ae_loaded", False):
+        return _train_auxiliary_with_pretraining(run_options)
 
     auxiliary_modules = [
         module
@@ -637,6 +718,7 @@ def train_vae(
 
     history = {"train": {}, "val": {}}
     best_model_losses = None
+    best_weights = None
     epochs_without_improvement = 0
 
     requires_optimizer = bool(getattr(model, "requires_optimizer", True))
@@ -1050,6 +1132,8 @@ def train_vae(
         if improved:
             best_model_losses = current_metrics
             epochs_without_improvement = 0
+            if _restore_best_weights:
+                best_weights = deepcopy(model.state_dict())
 
             if save_checkpoint:
                 torch.save(model.state_dict(), f"{save_dir}/{name}_model.pt")
@@ -1073,6 +1157,9 @@ def train_vae(
                 f"{epochs_without_improvement} epochs without validation-loss improvement."
             )
             break
+
+    if _restore_best_weights and best_weights is not None:
+        model.load_state_dict(best_weights)
 
     if aux_training_mode == "head_first_joint" and joint_start_epoch is None and head_best_state is not None:
         model.load_state_dict(head_best_state)
