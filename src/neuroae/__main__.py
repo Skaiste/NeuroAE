@@ -700,7 +700,6 @@ def _run_cross_validation_epoch_search(loaders, data_config, model_config, train
             fold_loaders["val_loader"],
             num_epochs=max_epochs,
             learning_rate=training_config["training"].get("learning_rate", 1e-3),
-            aux_learning_rate=training_config["training"].get("aux_learning_rate"),
             weight_decay=training_config["training"].get("weight_decay", 1e-4),
             device=device,
             save_dir=training_config["training"].get("save_dir", "./models"),
@@ -712,17 +711,6 @@ def _run_cross_validation_epoch_search(loaders, data_config, model_config, train
             convergence_patience=training_config["training"].get("convergence_patience"),
             convergence_min_delta=training_config["training"].get("convergence_min_delta", 0.0),
             convergence_warmup_epochs=training_config["training"].get("convergence_warmup_epochs", 0),
-            aux_head_warmup_epochs=training_config["training"].get("aux_head_warmup_epochs", 0),
-            aux_head_ramp_epochs=training_config["training"].get("aux_head_ramp_epochs", 20),
-            aux_training_mode=training_config["training"].get("aux_training_mode"),
-            aux_head_only_epochs=training_config["training"].get("aux_head_only_epochs", 25),
-            ae_pretrain_epochs=training_config["training"].get("ae_pretrain_epochs", 100),
-            ae_pretrain_patience=training_config["training"].get("ae_pretrain_patience", 10),
-            ae_pretrain_learning_rate=training_config["training"].get("ae_pretrain_learning_rate", 1e-3),
-            aux_head_patience=training_config["training"].get("aux_head_patience", 6),
-            aux_joint_epochs=training_config["training"].get("aux_joint_epochs", 50),
-            aux_joint_patience=training_config["training"].get("aux_joint_patience", 10),
-            encoder_cls_scale=training_config["training"].get("encoder_cls_scale", 0.1),
             checkpoint_selection_metric=training_config["training"].get("checkpoint_selection_metric", "val_loss"),
             save_checkpoint=False,
             vectorize_val_reference=training_config["training"].get("vectorize_val_reference", False),
@@ -804,12 +792,7 @@ def _apply_cross_validation_epoch_search_if_needed(
     updated_training_config["training"]["num_epochs"] = int(cv_summary["selected_num_epochs"])
 
     updated_loaders = dict(loaders)
-    # aux_training_mode experiments need a val_loader throughout: for AE
-    # pretraining patience inside _train_auxiliary_with_pretraining, and for
-    # the head-only patience in head_first_joint. Only remove it for plain
-    # LAE training where the epoch count was the only thing CV was solving.
-    if not updated_training_config["training"].get("aux_training_mode"):
-        updated_loaders.pop("val_loader", None)
+    updated_loaders.pop("val_loader", None)
     updated_loaders["val_is_test"] = False
     return updated_loaders, updated_training_config, cv_summary
 
@@ -1017,16 +1000,12 @@ def load_model_from_config(
     torch_device = torch.device(device)
     if "load_path" in model_config['model']:
         checkpoint_state = torch.load(model_config['model']['load_path'], map_location=torch_device)
-        if hasattr(model, "load_pretrained_ae") and not any(key.startswith("cls_head.") for key in checkpoint_state):
-            model.load_pretrained_ae(checkpoint_state)
-        else:
-            model.load_state_dict(checkpoint_state)
+        model.load_state_dict(checkpoint_state)
         print(f"Model loaded from {model_config['model']['load_path']}")
         if model_config['model'].get('freeze_encoder', False):
             model.freeze_encoder()
         if model_config['model'].get('reset_decoder', False):
             model.reset_decoder()
-            model._pretrained_ae_loaded = False
 
     # summary(model, (197, 400))
     # breakpoint()
@@ -1235,7 +1214,6 @@ def run_training(
         loaders.get('val_loader'),
         num_epochs=1 if dry_run else training_config['training'].get('num_epochs', 50),
         learning_rate=training_config['training'].get('learning_rate', 1e-3),
-        aux_learning_rate=training_config['training'].get('aux_learning_rate'),
         weight_decay=training_config['training'].get('weight_decay', 1e-4),
         device=device,
         save_dir=training_config['training']['save_dir'],
@@ -1246,17 +1224,6 @@ def run_training(
         convergence_patience=training_config['training'].get('convergence_patience'),
         convergence_min_delta=training_config['training'].get('convergence_min_delta', 0.0),
         convergence_warmup_epochs=training_config['training'].get('convergence_warmup_epochs', 0),
-        aux_head_warmup_epochs=training_config['training'].get('aux_head_warmup_epochs', 0),
-        aux_head_ramp_epochs=training_config['training'].get('aux_head_ramp_epochs', 20),
-        aux_training_mode=training_config['training'].get('aux_training_mode'),
-        aux_head_only_epochs=training_config['training'].get('aux_head_only_epochs', 25),
-        ae_pretrain_epochs=training_config['training'].get('ae_pretrain_epochs', 100),
-        ae_pretrain_patience=training_config['training'].get('ae_pretrain_patience', 10),
-        ae_pretrain_learning_rate=training_config['training'].get('ae_pretrain_learning_rate', 1e-3),
-        aux_head_patience=training_config['training'].get('aux_head_patience', 6),
-        aux_joint_epochs=training_config['training'].get('aux_joint_epochs', 50),
-        aux_joint_patience=training_config['training'].get('aux_joint_patience', 10),
-        encoder_cls_scale=training_config['training'].get('encoder_cls_scale', 0.1),
         checkpoint_selection_metric=training_config['training'].get('checkpoint_selection_metric', 'val_loss'),
         save_checkpoint=not dry_run,
         vectorize_val_reference=training_config['training'].get('vectorize_val_reference', False),

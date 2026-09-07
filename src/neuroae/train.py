@@ -1,5 +1,3 @@
-from copy import deepcopy
-
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
@@ -139,41 +137,6 @@ def _compare_lower(candidate, best, min_delta=0.0):
     return _compare_higher(best, candidate, min_delta=min_delta)
 
 
-def _joint_metric_score(swfcd, logreg, swfcd_weight=0.5, logreg_weight=0.5):
-    score = 0.0
-    total_weight = 0.0
-    if _is_finite_number(swfcd):
-        score += float(swfcd_weight) * float(swfcd)
-        total_weight += float(swfcd_weight)
-    if _is_finite_number(logreg):
-        score += float(logreg_weight) * float(logreg)
-        total_weight += float(logreg_weight)
-    if total_weight == 0.0:
-        return float("nan")
-    return score / total_weight
-
-
-def _head_loss_from_metrics(metrics, configured_key=None):
-    """Return the validation loss produced by a supervised AE head.
-
-    A classification head takes precedence.  Prediction-head losses are
-    otherwise averaged so models with multiple biological targets use one
-    comparable checkpoint signal.
-    """
-    if configured_key:
-        value = metrics.get(configured_key)
-        return float(value) if _is_finite_number(value) else float("nan")
-    if _is_finite_number(metrics.get("cls_loss")):
-        return float(metrics["cls_loss"])
-    excluded = {"loss", "recon_loss", "fc_loss", "swfc_variability_loss", "derivative_loss"}
-    values = [
-        float(value)
-        for name, value in metrics.items()
-        if name.endswith("_loss") and name not in excluded and _is_finite_number(value)
-    ]
-    return float(np.mean(values)) if values else float("nan")
-
-
 def _extract_cls_logits(model_out):
     """Extract logits from LAEClsHead/LAEPredClsHeads output tuples."""
     if isinstance(model_out, (tuple, list)) and len(model_out) >= 3:
@@ -184,124 +147,32 @@ def _extract_cls_logits(model_out):
 
 
 def _reject_removed_selection_metric(selection_metric):
-    if selection_metric in {"swfcd_loss_joint", "swfcd_joint"}:
-        raise ValueError(
-            f"Checkpoint selection metric {selection_metric!r} has been removed. "
-            "Use 'val_loss' for selection and early stopping based on validation loss."
-        )
+    if selection_metric not in {"val_loss", "swfcd", "swfcd_pearson"}:
+        raise ValueError("checkpoint_selection_metric must be 'val_loss', 'swfcd', or 'swfcd_pearson'.")
 
 
-def select_best_checkpoint(
-    history,
-    selection_metric="val_loss",
-    min_delta=0.0,
-    swfcd_weight=0.5,
-    classifier_weight=0.5,
-):
+def select_best_checkpoint(history, selection_metric="val_loss", min_delta=0.0):
     _reject_removed_selection_metric(selection_metric)
     val_losses = _metric_values(history, "val", "loss")
     val_swfcd = _metric_values(history, "val", "swfcd_pearson")
-    val_head_loss = _metric_values(history, "val", "head_loss")
-    val_cls_macro_f1 = _metric_values(history, "val", "cls_macro_f1")
-    num_epochs = max(len(val_losses), len(val_swfcd), len(val_head_loss), len(val_cls_macro_f1))
-    if num_epochs == 0:
+    val_f1 = _metric_values(history, "val", "cls_macro_f1")
+    count = max(len(val_losses), len(val_swfcd))
+    if not count:
         return None
-
-    def _epoch_metrics(idx):
-        loss = float(val_losses[idx]) if idx < len(val_losses) else float("nan")
-        swfcd = float(val_swfcd[idx]) if idx < len(val_swfcd) else float("nan")
-        head_loss = float(val_head_loss[idx]) if idx < len(val_head_loss) else float("nan")
-        cls_macro_f1 = float(val_cls_macro_f1[idx]) if idx < len(val_cls_macro_f1) else float("nan")
-        joint_score = (
-            swfcd + cls_macro_f1
-            if _is_finite_number(swfcd) and _is_finite_number(cls_macro_f1)
-            else float("nan")
-        )
-        return loss, swfcd, head_loss, cls_macro_f1, joint_score
-
-    # Once full auxiliary weight is reached, exclude warmup and ramp checkpoints.
-    active = _metric_values(history, "val", "auxiliary_active")
-    start_idx = next((idx for idx, value in enumerate(active) if value), 0)
-    stages = _metric_values(history, "val", "selection_stage")
-    if stages:
-        start_idx = stages.index(max(stages))
-    best_idx = start_idx
-    best_loss, best_swfcd, best_head_loss, best_cls_macro_f1, best_joint_score = _epoch_metrics(start_idx)
-
-    if selection_metric == "swfcd_cls_macro_f1_joint":
-        for idx in range(start_idx + 1, num_epochs):
-            loss, swfcd, head_loss, cls_macro_f1, joint_score = _epoch_metrics(idx)
-            if _compare_higher(joint_score, best_joint_score, min_delta=min_delta) > 0:
-                best_idx = idx
-                best_loss, best_swfcd = loss, swfcd
-                best_head_loss, best_cls_macro_f1, best_joint_score = head_loss, cls_macro_f1, joint_score
-        return {
-            "best_index": best_idx,
-            "best_epoch": best_idx + 1,
-            "loss": best_loss,
-            "swfcd_pearson": best_swfcd,
-            "head_loss": best_head_loss,
-            "cls_macro_f1": best_cls_macro_f1,
-            "selection_metric": selection_metric,
-        }
-
-    if selection_metric == "swfcd_head_loss_guarded":
-        # This is deliberately sequential. SwFCD is the primary signal: an
-        # improvement accepts the epoch regardless of head loss. Head loss is
-        # used only when SwFCD is flat (inside its 0.01 guard band). A larger
-        # SwFCD drop selects the preceding epoch.
-        for idx in range(start_idx + 1, num_epochs):
-            _, previous_swfcd, previous_head_loss, _, _ = _epoch_metrics(idx - 1)
-            loss, swfcd, head_loss, _, joint_score = _epoch_metrics(idx)
-            swfcd_dropped = (
-                _is_finite_number(swfcd)
-                and _is_finite_number(previous_swfcd)
-                and swfcd < (previous_swfcd - 0.01)
-            )
-            swfcd_improved = _compare_higher(swfcd, previous_swfcd, min_delta=min_delta) > 0
-            head_loss_improved = _compare_lower(head_loss, previous_head_loss, min_delta=min_delta) > 0
-            if swfcd_dropped:
-                break
-            if swfcd_improved or head_loss_improved:
-                best_idx = idx
-                best_loss, best_swfcd, best_head_loss, best_joint_score = loss, swfcd, head_loss, joint_score
-
-        return {
-            "best_index": best_idx,
-            "best_epoch": best_idx + 1,
-            "loss": best_loss,
-            "swfcd_pearson": best_swfcd,
-            "head_loss": best_head_loss,
-            "cls_macro_f1": best_cls_macro_f1,
-            "selection_metric": selection_metric,
-        }
-
-    for idx in range(start_idx + 1, num_epochs):
-        loss, swfcd, head_loss, cls_macro_f1, joint_score = _epoch_metrics(idx)
-
-        if selection_metric in {"swfcd_classifier_joint", "swfcd_logreg_joint"}:
-            comparisons = (
-                _compare_higher(joint_score, best_joint_score, min_delta=min_delta),
-                _compare_higher(swfcd, best_swfcd),
-                _compare_lower(loss, best_loss),
-            )
-            is_better = next((comparison > 0 for comparison in comparisons if comparison != 0), False)
-        elif selection_metric in {"swfcd", "swfcd_pearson"}:
-            is_better = _compare_higher(swfcd, best_swfcd, min_delta=min_delta) > 0
-        else:
-            is_better = _compare_lower(loss, best_loss, min_delta=min_delta) > 0
-
-        if is_better:
-            best_idx = idx
-            best_loss, best_swfcd, best_head_loss, best_cls_macro_f1, best_joint_score = loss, swfcd, head_loss, cls_macro_f1, joint_score
-
+    def value(values, index):
+        return float(values[index]) if index < len(values) else float("nan")
+    values = val_losses if selection_metric == "val_loss" else val_swfcd
+    compare = _compare_lower if selection_metric == "val_loss" else _compare_higher
+    best = 0
+    for index in range(1, count):
+        if compare(value(values, index), value(values, best), min_delta) > 0:
+            best = index
     return {
-        "best_index": best_idx,
-        "best_epoch": best_idx + 1,
-        "loss": best_loss,
-        "swfcd_pearson": best_swfcd,
-        "head_loss": best_head_loss,
-        "cls_macro_f1": best_cls_macro_f1,
+        "best_index": best,
+        "best_epoch": best + 1,
+        "loss": value(val_losses, best),
+        "swfcd_pearson": value(val_swfcd, best),
+        "cls_macro_f1": value(val_f1, best),
         "selection_metric": selection_metric,
     }
 
@@ -377,60 +248,6 @@ def _collect_latents_and_labels(model, data_loader, device, use_pred_heads, vali
         return None, []
     return torch.cat(latents, dim=0).numpy(), labels
 
-def _optimizer_param_groups(model, weight_decay, aux_learning_rate=None):
-    """Give auxiliary heads an optional learning rate and zero weight decay."""
-    if aux_learning_rate is not None:
-        aux_learning_rate = float(aux_learning_rate)
-        if not np.isfinite(aux_learning_rate) or aux_learning_rate < 0:
-            raise ValueError("aux_learning_rate must be a finite non-negative number or null.")
-    auxiliary_ids = {
-        id(param)
-        for name in ("heads", "cls_head")
-        for module in [getattr(model, name, None)]
-        if module is not None
-        for param in module.parameters()
-    }
-    ae_params, aux_params = [], []
-    for param in model.parameters():
-        (aux_params if id(param) in auxiliary_ids else ae_params).append(param)
-    groups = []
-    if ae_params:
-        groups.append({"params": ae_params, "weight_decay": weight_decay})
-    if aux_params:
-        auxiliary_group = {"params": aux_params, "weight_decay": 0.0}
-        if aux_learning_rate is not None:
-            auxiliary_group["lr"] = aux_learning_rate
-        groups.append(auxiliary_group)
-    return groups
-
-def _get_aux_loss(loss, use_pred_heads=False, use_cls_head=False):
-    """Return the unweighted aggregate auxiliary loss."""
-    if use_cls_head:
-        return loss.get("cls_loss")
-
-    if use_pred_heads:
-        excluded = {
-            "loss",
-            "recon",
-            "recon_loss",
-            "kld",
-            "fc_loss",
-            "swfc_variability_loss",
-            "derivative_loss",
-        }
-
-        aux_losses = [
-            value
-            for name, value in loss.items()
-            if name.endswith("_loss") and name not in excluded
-        ]
-
-        if aux_losses:
-            return sum(aux_losses) / len(aux_losses)
-
-    return None
-
-
 def _accumulate_loss_metrics(totals, loss, batch_size, cls_mass=None):
     """Detach batch statistics; CE means use target-weight mass, not batch count."""
     totals["_samples"] = totals.get("_samples", 0) + batch_size
@@ -452,34 +269,6 @@ def _mean_loss_metrics(totals, cls_weight=0.0):
         metrics["cls_loss"] = cls_mean
         metrics["loss"] += correction
     return metrics
-
-
-def _auxiliary_weight_scale(epoch, warmup_epochs, ramp_epochs):
-    if epoch < warmup_epochs:
-        return 0.0
-    if ramp_epochs == 0:
-        return 1.0
-    return min(1.0, (epoch - warmup_epochs + 1) / ramp_epochs)
-
-
-def _training_loss(model, *args, auxiliary_warmup=False, auxiliary_scale=1.0):
-    """Scale auxiliary objectives while preserving configured target weights."""
-    scale = 0.0 if auxiliary_warmup else auxiliary_scale
-    if scale == 1.0:
-        return model.loss(*args)
-    original_params = model.loss_fn_params
-    params = original_params or {}
-    model.loss_fn_params = {
-        **params,
-        "pred_heads_delta": scale * float(params.get("pred_heads_delta", 0.0)),
-        "cls_head_weight": scale * float(params.get("cls_head_weight", params.get("cls_head_delta", 1.0))),
-        "cls_head_delta": scale * float(params.get("cls_head_delta", 1.0)),
-    }
-    try:
-        return model.loss(*args)
-    finally:
-        model.loss_fn_params = original_params
-
 
 
 def _dataset_class_labels(dataset):
@@ -527,100 +316,6 @@ def _configure_classifier_class_weights(model, dataset):
     model.cls_class_weights.copy_(weights.to(model.cls_class_weights))
 
 
-def _configure_auxiliary_mode(model, mode, head_only_epochs, encoder_cls_scale, use_cls_head, use_pred_heads):
-    if mode is None:
-        return
-    if mode not in {"frozen_encoder", "head_first_joint"}:
-        raise ValueError("aux_training_mode must be null, 'frozen_encoder', or 'head_first_joint'.")
-    from .models.linear import LAEClsHead
-    if not isinstance(model, LAEClsHead) or not use_cls_head or use_pred_heads:
-        raise ValueError("These auxiliary training modes require LAEClsHead without regression heads.")
-    if mode == "head_first_joint" and (
-        isinstance(head_only_epochs, bool) or not isinstance(head_only_epochs, int) or head_only_epochs < 1
-    ):
-        raise ValueError("aux_head_only_epochs must be a positive integer for head_first_joint.")
-    scale = float(encoder_cls_scale)
-    if not np.isfinite(scale) or not 0 <= scale <= 1:
-        raise ValueError("encoder_cls_scale must be finite and between 0 and 1.")
-    model.encoder_cls_scale = scale if mode == "head_first_joint" else 0.0
-    for parameter in model.parameters():
-        parameter.requires_grad_(False)
-        parameter.grad = None
-    for parameter in model.cls_head.parameters():
-        parameter.requires_grad_(True)
-
-
-def _train_auxiliary_with_pretraining(options):
-    """Train a seed-local AE, restore its best weights, then run the classifier stages."""
-    from .models.linear import LAE
-    model = options["model"]
-    if options["val_loader"] is None:
-        raise ValueError("AE pretraining for auxiliary modes requires a validation loader.")
-    for name in ("ae_pretrain_epochs", "ae_pretrain_patience"):
-        value = options[name]
-        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-            raise ValueError(f"{name} must be a positive integer.")
-    # Preserve RNG state while constructing the temporary plain AE; copy the
-    # initial AE weights from the run's already seeded classifier model.
-    with torch.random.fork_rng(devices=[]):
-        ae = LAE(model.region_dim, model.timepoint_dim, model.latent_dim)
-    ae.load_state_dict({key: value for key, value in model.state_dict().items() if not key.startswith("cls_head.")})
-    ae.set_loss_fn_params(deepcopy(getattr(model, "loss_fn_params", {})))
-    ae_options = dict(options)
-    ae_options.update(
-        model=ae,
-        num_epochs=min(options["num_epochs"], options["ae_pretrain_epochs"]),
-        learning_rate=options["ae_pretrain_learning_rate"],
-        use_cls_head=False, use_pred_heads=False, aux_training_mode=None,
-        aux_head_warmup_epochs=0, aux_head_ramp_epochs=0,
-        convergence_patience=options["ae_pretrain_patience"],
-        convergence_warmup_epochs=0, checkpoint_selection_metric="val_loss",
-        name=f"{options['name']}_ae", pca=None, _restore_best_weights=True,
-    )
-    print("Stage: AE pretraining (classifier inactive)", flush=True)
-    ae_history, _ = train_vae(**ae_options)
-    ae_epochs = len(ae_history["train"].get("loss", []))
-    if not ae_epochs:
-        raise ValueError("AE pretraining requires at least one training epoch.")
-    model.load_pretrained_ae(ae.state_dict())
-    ae_selection = select_best_checkpoint(ae_history, "val_loss", options["convergence_min_delta"])
-    remaining_epochs = options["num_epochs"] - ae_epochs
-    if remaining_epochs > 0:
-        head_options = dict(options)
-        head_options.update(num_epochs=remaining_epochs)
-        print(f"Restored AE epoch {ae_selection['best_epoch']}; starting classifier stages after {ae_epochs} AE epochs", flush=True)
-        head_history, mse_pca = train_vae(**head_options)
-    else:
-        head_history, mse_pca = {"train": {}, "val": {}}, 0
-        print("Overall num_epochs cap reached during AE pretraining; no classifier epochs remain.", flush=True)
-        if options["save_checkpoint"]:
-            torch.save(model.state_dict(), f"{options['save_dir']}/{options['name']}_model.pt")
-
-    history = {}
-    for split in ("train", "val"):
-        first, second = ae_history.get(split, {}), head_history.get(split, {})
-        first_count = len(first.get("loss", []))
-        second_count = len(second.get("loss", []))
-        history[split] = {
-            key: first.get(key, [float("nan")] * first_count) + second.get(key, [float("nan")] * second_count)
-            for key in dict.fromkeys([*first, *second])
-        }
-    # A phase's loss is only comparable to losses in that same phase.
-    head_val_count = len(head_history.get("val", {}).get("loss", []))
-    active = head_history.get("val", {}).get("auxiliary_active", [1] * head_val_count)
-    head_phases = [2 if flag else 1 for flag in active] if options["aux_training_mode"] == "head_first_joint" else [1] * head_val_count
-    history["val"]["selection_stage"] = [0] * len(ae_history["val"].get("loss", [])) + head_phases
-    stage_info = deepcopy(head_history.get("auxiliary_stages", {}))
-    for key in ("head_best_epoch", "joint_start_epoch"):
-        if key in stage_info:
-            stage_info[key] += ae_epochs
-    stage_info.update(ae_epochs_completed=ae_epochs, ae_best_epoch=ae_selection["best_epoch"])
-    if remaining_epochs > 0:
-        stage_info["head_start_epoch"] = ae_epochs + 1
-    history["auxiliary_stages"] = stage_info
-    return history, mse_pca
-
-
 def train_vae(
     model,
     train_loader,
@@ -642,57 +337,7 @@ def train_vae(
     save_checkpoint=True,
     vectorize_val_reference=False,
     compute_swfcd_during_training=None,
-    aux_head_warmup_epochs=0,
-    aux_learning_rate=None,
-    aux_head_ramp_epochs=20,
-    aux_training_mode=None,
-    aux_head_only_epochs=25,
-    encoder_cls_scale=0.1,
-    aux_head_patience=6,
-    aux_joint_epochs=50,
-    aux_joint_patience=10,
-    ae_pretrain_epochs=100,
-    ae_pretrain_patience=10,
-    ae_pretrain_learning_rate=1e-3,
-    _restore_best_weights=False,
 ):
-    run_options = dict(locals())
-    if isinstance(aux_head_warmup_epochs, bool) or not isinstance(aux_head_warmup_epochs, int) or aux_head_warmup_epochs < 0:
-        raise ValueError("aux_head_warmup_epochs must be a non-negative integer.")
-
-    if isinstance(aux_head_ramp_epochs, bool) or not isinstance(aux_head_ramp_epochs, int) or aux_head_ramp_epochs < 0:
-        raise ValueError("aux_head_ramp_epochs must be a non-negative integer.")
-
-    _configure_auxiliary_mode(model, aux_training_mode, aux_head_only_epochs, encoder_cls_scale, use_cls_head, use_pred_heads)
-    if aux_training_mode is not None:
-        if checkpoint_selection_metric != "val_loss":
-            raise ValueError("Use checkpoint_selection_metric='val_loss' for classifier-only auxiliary modes.")
-        aux_head_warmup_epochs = 0
-        aux_head_ramp_epochs = 0
-
-    if aux_training_mode == "head_first_joint":
-        if val_loader is None:
-            raise ValueError("head_first_joint requires validation data to select and restore the best head checkpoint.")
-        for parameter_name, value in (("aux_head_patience", aux_head_patience), ("aux_joint_epochs", aux_joint_epochs), ("aux_joint_patience", aux_joint_patience)):
-            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-                raise ValueError(f"{parameter_name} must be a positive integer.")
-        if getattr(model, "_pretrained_ae_loaded", False):
-            num_epochs = min(num_epochs, aux_head_only_epochs + aux_joint_epochs)
-
-    if aux_training_mode is not None and not getattr(model, "_pretrained_ae_loaded", False):
-        return _train_auxiliary_with_pretraining(run_options)
-
-    auxiliary_modules = [
-        module
-        for name in ("heads", "cls_head")
-        for module in [getattr(model, name, None)]
-        if module is not None
-    ]
-
-    if not (use_pred_heads or use_cls_head):
-        aux_head_warmup_epochs = 0
-        aux_head_ramp_epochs = 0
-
     device = torch.device(device)
     model = model.to(device)
 
@@ -718,16 +363,11 @@ def train_vae(
 
     history = {"train": {}, "val": {}}
     best_model_losses = None
-    best_weights = None
     epochs_without_improvement = 0
 
     requires_optimizer = bool(getattr(model, "requires_optimizer", True))
     optimizer = (
-        optim.AdamW(
-            _optimizer_param_groups(model, weight_decay, aux_learning_rate),
-            lr=learning_rate,
-            weight_decay=weight_decay,
-        )
+        optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
         if requires_optimizer
         else None
     )
@@ -737,28 +377,9 @@ def train_vae(
 
     selection_metric = str(checkpoint_selection_metric or "val_loss")
     _reject_removed_selection_metric(selection_metric)
-    selection_requires_joint_metrics = selection_metric in {"swfcd_classifier_joint", "swfcd_logreg_joint"}
-
-    if selection_requires_joint_metrics:
-        raise ValueError(
-            "Training-time checkpoint_selection_metric values "
-            "'swfcd_classifier_joint' and 'swfcd_logreg_joint' are no longer supported "
-            "because classifier metrics are evaluation-only. Use 'swfcd' or 'val_loss' instead."
-        )
-
-    compute_head_loss_during_training = selection_metric == "swfcd_head_loss_guarded"
     compute_cls_macro_f1_during_training = use_cls_head
-
-    if selection_metric == "swfcd_cls_macro_f1_joint" and not use_cls_head:
-        raise ValueError("swfcd_cls_macro_f1_joint requires a model with a classification auxiliary head.")
-
     if compute_swfcd_during_training is None:
-        compute_swfcd_during_training = selection_metric in {
-            "swfcd",
-            "swfcd_pearson",
-            "swfcd_head_loss_guarded",
-            "swfcd_cls_macro_f1_joint",
-        }
+        compute_swfcd_during_training = selection_metric in {"swfcd", "swfcd_pearson"}
 
     if val_loader is None:
         compute_swfcd_during_training = False
@@ -779,56 +400,7 @@ def train_vae(
     if max_training_epochs is not None:
         num_epochs = min(int(num_epochs), int(max_training_epochs))
 
-    # Center validation only against its fixed warmup baseline. Training uses
-    # the unshifted objective. Validation subtracts the scaled baseline.
-    val_aux_delta = None
-    full_aux_epoch = aux_head_warmup_epochs + max(aux_head_ramp_epochs - 1, 0)
-    joint_start_epoch = None
-    head_best_state = None
-    head_best_optimizer = None
-    head_best_loss = float("inf")
-    head_best_epoch = None
-    head_stale_epochs = 0
-    start_joint_next_epoch = False
-    if aux_training_mode == "head_first_joint":
-        full_aux_epoch = aux_head_only_epochs
-        history["auxiliary_stages"] = {}
-
     for epoch in range(num_epochs):
-        if start_joint_next_epoch:
-            model.load_state_dict(head_best_state)
-            optimizer.load_state_dict(head_best_optimizer)
-            for parameter in model.parameters():
-                parameter.requires_grad_(True)
-                parameter.grad = None
-            joint_start_epoch = epoch
-            full_aux_epoch = epoch
-            val_aux_delta = head_best_loss
-            start_joint_next_epoch = False
-            history["auxiliary_stages"].update(
-                head_best_epoch=head_best_epoch + 1,
-                head_epochs_completed=epoch,
-                joint_start_epoch=epoch + 1,
-                validation_aux_baseline=head_best_loss,
-            )
-            print(
-                f"Restored best head checkpoint from epoch {head_best_epoch + 1}; "
-                f"starting joint AE training at epoch {epoch + 1} with encoder_cls_scale={model.encoder_cls_scale:g}",
-                flush=True,
-            )
-        if joint_start_epoch is not None and epoch - joint_start_epoch >= aux_joint_epochs:
-            break
-        head_only_phase = aux_training_mode == "frozen_encoder" or (
-            aux_training_mode == "head_first_joint" and joint_start_epoch is None
-        )
-        auxiliary_warmup = epoch < aux_head_warmup_epochs
-        auxiliary_scale = _auxiliary_weight_scale(epoch, aux_head_warmup_epochs, aux_head_ramp_epochs)
-        capture_aux_delta = aux_head_warmup_epochs > 0 and epoch == aux_head_warmup_epochs - 1
-
-        if full_aux_epoch and epoch == full_aux_epoch:
-            best_model_losses = None
-            epochs_without_improvement = 0
-
         if epoch == 0 and hasattr(model, "fit_train_loader"):
             model.fit_train_loader(train_loader, device=device)
 
@@ -836,18 +408,11 @@ def train_vae(
         # Training
         # =========================
         train_loss_params = {}
-        cls_weight = 0.0 if not use_cls_head else auxiliary_scale * float(
+        cls_weight = 0.0 if not use_cls_head else float(
             model.loss_fn_params.get("cls_head_weight", model.loss_fn_params.get("cls_head_delta", 1.0))
         )
 
         model.train()
-        if aux_training_mode is not None:
-            if head_only_phase:
-                model.eval()  # Frozen encoder stays deterministic; only the head trains.
-                model.cls_head.train()
-        if auxiliary_warmup:
-            for module in auxiliary_modules:
-                module.eval()
 
         for batch_idx, (data, labels) in enumerate(train_loader):
             x = data.to(device)
@@ -867,25 +432,17 @@ def train_vae(
 
             if use_pred_heads:
                 heads = {bl: h.to(device) for bl, h in labels[1].items()}
-                loss = _training_loss(model, x, heads, output, auxiliary_warmup=auxiliary_warmup, auxiliary_scale=auxiliary_scale)
+                loss = model.loss(x, heads, output)
             elif use_cls_head:
-                loss = _training_loss(model, x, _class_targets(labels), output, auxiliary_warmup=auxiliary_warmup, auxiliary_scale=auxiliary_scale)
+                loss = model.loss(x, _class_targets(labels), output)
             else:
                 loss = model.loss(x, output)
-
-            if head_only_phase:
-                loss["loss"] = cls_weight * loss["cls_loss"]
 
             cls_mass = float(model.cls_class_weights[_class_targets(labels)].sum()) if use_cls_head else None
             _accumulate_loss_metrics(train_loss_params, loss, x.shape[0], cls_mass)
 
             if optimizer is not None:
                 loss["loss"].backward()
-
-                if auxiliary_warmup:
-                    for module in auxiliary_modules:
-                        for param in module.parameters():
-                            param.grad = None
 
                 optimizer.step()
 
@@ -924,24 +481,11 @@ def train_vae(
 
                     if use_pred_heads:
                         heads = {bl: h.to(device) for bl, h in labels[1].items()}
-                        loss = _training_loss(model, x, heads, output, auxiliary_warmup=auxiliary_warmup, auxiliary_scale=auxiliary_scale)
+                        loss = model.loss(x, heads, output)
                     elif use_cls_head:
-                        loss = _training_loss(model, x, _class_targets(labels), output, auxiliary_warmup=auxiliary_warmup, auxiliary_scale=auxiliary_scale)
+                        loss = model.loss(x, _class_targets(labels), output)
                     else:
                         loss = model.loss(x, output)
-
-                    if head_only_phase:
-                        loss["loss"] = cls_weight * loss["cls_loss"]
-
-                    val_aux_loss = _get_aux_loss(loss, use_pred_heads=use_pred_heads, use_cls_head=use_cls_head)
-
-                    if not auxiliary_warmup and val_aux_delta is not None and val_aux_loss is not None:
-                        if use_cls_head:
-                            aux_weight = float(model.loss_fn_params.get("cls_head_weight", model.loss_fn_params.get("cls_head_delta", 1.0)))
-                        else:
-                            aux_weight = float(model.loss_fn_params.get("pred_heads_delta", 0.0))
-
-                        loss["loss"] = loss["loss"] - auxiliary_scale * aux_weight * val_aux_delta
 
                     cls_mass = float(model.cls_class_weights[_class_targets(labels)].sum()) if use_cls_head else None
                     _accumulate_loss_metrics(val_loss_params, loss, x.shape[0], cls_mass)
@@ -969,15 +513,8 @@ def train_vae(
 
             val_loss_params = _mean_loss_metrics(val_loss_params, cls_weight)
             num_val_batches = 1
-            if capture_aux_delta:
-                val_aux_delta = _get_aux_loss(val_loss_params, use_pred_heads, use_cls_head)
-                if val_aux_delta is not None:
-                    print(f"Captured val auxiliary baseline: {val_aux_delta:.6f}", flush=True)
             for key, value in val_loss_params.items():
                 _append_history_metric(history, "val", key, value)
-            if aux_head_warmup_epochs or aux_head_ramp_epochs or aux_training_mode == "head_first_joint":
-                _append_history_metric(history, "val", "auxiliary_active", epoch >= full_aux_epoch)
-
             swfcd_pearson = float("nan")
 
             if compute_swfcd_during_training:
@@ -1018,40 +555,6 @@ def train_vae(
                 current_metrics["val"]["cls_macro_f1"] = cls_macro_f1
                 val_metric_str += f" | Val cls_macro_f1: {cls_macro_f1:.4f}"
 
-            if compute_head_loss_during_training:
-                previous_swfcd = (
-                    history["val"]["swfcd_pearson"][-2]
-                    if len(history["val"]["swfcd_pearson"]) > 1 and epoch != full_aux_epoch
-                    else None
-                )
-
-                swfcd_dropped = (
-                    _is_finite_number(swfcd_pearson)
-                    and _is_finite_number(previous_swfcd)
-                    and swfcd_pearson < previous_swfcd - 0.01
-                )
-
-                if swfcd_dropped:
-                    head_loss = float("nan")
-                    val_metric_str += " | Val head_loss: skipped (SwFCD drop > 0.01)"
-                else:
-                    head_loss = _head_loss_from_metrics(
-                        current_metrics["val"],
-                        configured_key=getattr(model, "loss_fn_params", {}).get("checkpoint_head_loss_key"),
-                    )
-
-                    if not _is_finite_number(head_loss):
-                        raise ValueError(
-                            "swfcd_head_loss_guarded requires a supervised head loss in validation metrics. "
-                            "Use a model with cls_loss or prediction-head losses, or set "
-                            "loss_params.checkpoint_head_loss_key."
-                        )
-
-                    val_metric_str += f" | Val head_loss: {head_loss:.4f}"
-
-                _append_history_metric(history, "val", "head_loss", head_loss)
-                current_metrics["val"]["head_loss"] = head_loss
-
         # =========================
         # Logging
         # =========================
@@ -1062,29 +565,6 @@ def train_vae(
             flush=True,
         )
 
-        if aux_training_mode == "head_first_joint" and head_only_phase:
-            head_loss = current_metrics["val"]["cls_loss"]
-            if not np.isfinite(head_loss):
-                raise ValueError("Head initialization produced a non-finite validation classifier loss.")
-            if head_loss < head_best_loss - convergence_min_delta:
-                head_best_loss = head_loss
-                head_best_epoch = epoch
-                head_stale_epochs = 0
-                head_best_state = deepcopy(model.state_dict())
-                head_best_optimizer = deepcopy(optimizer.state_dict())
-                if save_checkpoint:
-                    torch.save(head_best_state, f"{save_dir}/{name}_model.pt")
-                    torch.save(head_best_state, f"{save_dir}/{name}_head_model.pt")
-            else:
-                head_stale_epochs += 1
-            history["auxiliary_stages"].update(
-                head_best_epoch=head_best_epoch + 1,
-                head_epochs_completed=epoch + 1,
-            )
-            if epoch + 1 >= aux_head_only_epochs or head_stale_epochs >= aux_head_patience:
-                start_joint_next_epoch = True
-            continue  # Stage 1 has its own patience; one worse epoch never unfreezes the AE.
-
         # =========================
         # Checkpoint selection
         # =========================
@@ -1093,30 +573,10 @@ def train_vae(
         elif best_model_losses is None:
             improved = True
         else:
-            tmp_history = (
-                history
-                if selection_metric == "swfcd_head_loss_guarded"
-                else {
-                    "val": {
-                        "loss": [
-                            best_model_losses["val"].get("loss", float("nan")),
-                            current_metrics["val"].get("loss", float("nan")),
-                        ],
-                        "swfcd_pearson": [
-                            best_model_losses["val"].get("swfcd_pearson", float("nan")),
-                            current_metrics["val"].get("swfcd_pearson", float("nan")),
-                        ],
-                        "head_loss": [
-                            best_model_losses["val"].get("head_loss", float("nan")),
-                            current_metrics["val"].get("head_loss", float("nan")),
-                        ],
-                        "cls_macro_f1": [
-                            best_model_losses["val"].get("cls_macro_f1", float("nan")),
-                            current_metrics["val"].get("cls_macro_f1", float("nan")),
-                        ],
-                    }
-                }
-            )
+            tmp_history = {"val": {
+                key: [best_model_losses["val"].get(key, float("nan")), current_metrics["val"].get(key, float("nan"))]
+                for key in ("loss", "swfcd_pearson", "cls_macro_f1")
+            }}
 
             selection = select_best_checkpoint(
                 tmp_history,
@@ -1124,16 +584,11 @@ def train_vae(
                 min_delta=convergence_min_delta,
             )
 
-            latest_index = len(history["val"].get("loss", [])) - 1
-            improved = selection is not None and selection["best_index"] == (
-                latest_index if selection_metric == "swfcd_head_loss_guarded" else 1
-            )
+            improved = selection is not None and selection["best_index"] == 1
 
         if improved:
             best_model_losses = current_metrics
             epochs_without_improvement = 0
-            if _restore_best_weights:
-                best_weights = deepcopy(model.state_dict())
 
             if save_checkpoint:
                 torch.save(model.state_dict(), f"{save_dir}/{name}_model.pt")
@@ -1144,12 +599,12 @@ def train_vae(
         # =========================
         # Early stopping
         # =========================
-        patience = aux_joint_patience if aux_training_mode == "head_first_joint" else convergence_patience
+        patience = convergence_patience
         if (
             val_loader is not None
             and patience is not None
             and patience > 0
-            and epoch + 1 > (full_aux_epoch if aux_training_mode == "head_first_joint" else max(convergence_warmup_epochs, full_aux_epoch))
+            and epoch + 1 > convergence_warmup_epochs
             and epochs_without_improvement >= patience
         ):
             print(
@@ -1157,12 +612,6 @@ def train_vae(
                 f"{epochs_without_improvement} epochs without validation-loss improvement."
             )
             break
-
-    if _restore_best_weights and best_weights is not None:
-        model.load_state_dict(best_weights)
-
-    if aux_training_mode == "head_first_joint" and joint_start_epoch is None and head_best_state is not None:
-        model.load_state_dict(head_best_state)
 
     # =========================
     # PCA validation
