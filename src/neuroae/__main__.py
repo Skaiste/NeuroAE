@@ -864,6 +864,7 @@ def load_model_from_config(
             timepoint_dim=input_dim[0],
             latent_dim=latent_dim,
             pred_head_type=pred_head_type,
+            pred_head_dropout=model_config["model"].get("pred_head_dropout", 0.0),
             pred_head_num=pred_head_num
         )
     elif model_name == "LAEClsHead":

@@ -142,7 +142,8 @@ class VLAE(LAE):
 
 class LAEPredHeads(LAE):
     """ LAE + linear temporal models for ABeta and Tau level prediction 
-            Assumes latent dimension preserves the time dimension
+            Assumes latent dimension preserves the time dimension.
+            pred_head_dropout drops pooled features before prediction (default: 0.0).
     """
     def __init__(
         self,
@@ -150,7 +151,8 @@ class LAEPredHeads(LAE):
         timepoint_dim,
         pred_head_type: str = "gated_temp_pool",
         pred_head_num: int = 1,
-        latent_dim=32
+        latent_dim=32,
+        pred_head_dropout: float = 0.0,
     ) -> None:
         super().__init__(
             region_dim=region_dim,
@@ -162,7 +164,7 @@ class LAEPredHeads(LAE):
         pred_head_idx = {
             "avg": PredHeadAvg,
             "conv": PredHeadConv,
-            "conv_no_hidden": lambda l, r: PredHeadConv(l, r, with_hidden=False),
+            "conv_no_hidden": lambda l, r, dropout: PredHeadConv(l, r, with_hidden=False, dropout=dropout),
             "temp_pool": PredHeadTemporalPool,
             "gated_temp_pool": PredHeadGatedTemporalPool
         }
@@ -172,7 +174,10 @@ class LAEPredHeads(LAE):
         # Register the heads as submodules so their parameters are included in
         # ``model.parameters()`` and are consequently optimized and saved.
         self.heads = nn.ModuleList(
-            [pred_head_idx[pred_head_type](self.latent_regions, self.regions) for _ in range(pred_head_num)]
+            [
+                pred_head_idx[pred_head_type](self.latent_regions, self.regions, dropout=pred_head_dropout)
+                for _ in range(pred_head_num)
+            ]
         )
 
     def to(self, device):
@@ -324,12 +329,14 @@ class LAEPredClsHeads(LAEPredHeads):
         cls_head_hidden_dim=None,
         class_labels=None,
         cls_head_dropout: float = 0.0,
+        pred_head_dropout: float = 0.0,
     ):
         super().__init__(
             region_dim=region_dim,
             timepoint_dim=timepoint_dim,
             pred_head_type=pred_head_type,
             pred_head_num=pred_head_num,
+            pred_head_dropout=pred_head_dropout,
             latent_dim=latent_dim,
         )
         if int(num_classes) < 2:

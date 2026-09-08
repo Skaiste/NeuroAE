@@ -52,21 +52,23 @@ class PredHeadAvg(nn.Module):
          - averaging across time point dimension 
          - applying linear layer to predict levels
     """
-    def __init__(self, latent_dim, output_dim):
+    def __init__(self, latent_dim, output_dim, dropout=0.0):
         super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
         self.head = nn.Linear(latent_dim, output_dim, bias=True)
 
     def forward(self, z):
         x = z.mean(dim=-1)
-        return self.head(x)
+        return self.head(self.dropout(x))
     
 class PredHeadConv(nn.Module):
     """ Convolutional model
         - temporal conv model with average pooling
         - linear layer for level prediction
     """
-    def __init__(self, latent_dim, output_dim, with_hidden=True, hidden_dim=None):
+    def __init__(self, latent_dim, output_dim, with_hidden=True, hidden_dim=None, dropout=0.0):
         super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
         # since selected latent dimension is usually a small number
         # we can double it, another suggestion would be to get the middle number
         # in between latent and output dimensions, but that would bloat the model
@@ -97,7 +99,7 @@ class PredHeadConv(nn.Module):
         )
     def forward(self, z):
         x = self.temporal(z)
-        return self.head(x)
+        return self.head(self.dropout(x))
     
 
 class PredHeadTemporalPool(nn.Module):
@@ -105,14 +107,15 @@ class PredHeadTemporalPool(nn.Module):
          - use temporal pooling to reduce time point dimension to 1
          - applying linear layer to predict levels
     """
-    def __init__(self, latent_dim, output_dim):
+    def __init__(self, latent_dim, output_dim, dropout=0.0):
         super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
         self.pool = TemporalAttentionPooling(latent_dim)
         self.head = nn.Linear(latent_dim, output_dim, bias=True)
 
     def forward(self, z):
         x = self.pool(z)
-        return self.head(x)
+        return self.head(self.dropout(x))
     
     
 class PredHeadGatedTemporalPool(nn.Module):
@@ -120,8 +123,9 @@ class PredHeadGatedTemporalPool(nn.Module):
          - use gated temporal pooling to reduce time point dimension to 1
          - applying linear layer to predict levels
     """
-    def __init__(self, latent_dim, output_dim):
+    def __init__(self, latent_dim, output_dim, dropout=0.0):
         super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
         # like the convolutional hidden dim, same applies
         self.attention_dim = latent_dim * 2
         self.pool = GatedTemporalAttentionPooling(latent_dim, self.attention_dim)
@@ -129,7 +133,7 @@ class PredHeadGatedTemporalPool(nn.Module):
 
     def forward(self, z):
         x, _ = self.pool(z)
-        return self.head(x)
+        return self.head(self.dropout(x))
 
 
 class ClsHeadLinear(nn.Module):
