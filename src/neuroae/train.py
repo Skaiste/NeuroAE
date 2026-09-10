@@ -322,6 +322,7 @@ def train_vae(
     val_loader=None,
     num_epochs=100,
     learning_rate=1e-3,
+    aux_head_learning_rate=None,
     weight_decay=1e-4,
     device='cuda' if torch.cuda.is_available() else 'cpu',
     save_dir='./checkpoints',
@@ -366,11 +367,19 @@ def train_vae(
     epochs_without_improvement = 0
 
     requires_optimizer = bool(getattr(model, "requires_optimizer", True))
-    optimizer = (
-        optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-        if requires_optimizer
-        else None
-    )
+    if requires_optimizer:
+        aux_modules = [m for name in ("cls_head", "heads") for m in [getattr(model, name, None)] if m is not None]
+        if aux_head_learning_rate is not None and aux_modules and (use_pred_heads or use_cls_head):
+            aux_params = set(id(p) for m in aux_modules for p in m.parameters())
+            param_groups = [
+                {"params": [p for p in model.parameters() if id(p) not in aux_params], "lr": learning_rate},
+                {"params": [p for m in aux_modules for p in m.parameters()], "lr": aux_head_learning_rate},
+            ]
+            optimizer = optim.AdamW(param_groups, weight_decay=weight_decay)
+        else:
+            optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    else:
+        optimizer = None
 
     train_valid_last_dim = _dataset_valid_last_dim(train_loader.dataset)
     val_valid_last_dim = _dataset_valid_last_dim(val_loader.dataset) if val_loader is not None else None
