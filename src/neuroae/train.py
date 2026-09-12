@@ -177,6 +177,31 @@ def select_best_checkpoint(history, selection_metric="val_loss", min_delta=0.0):
     }
 
 
+def _aux_head_loss_scale(epoch, warmup_epochs, ramp_patience):
+    """0 during warmup, linear ramp to 1 over ramp_patience epochs after warmup."""
+    if epoch < warmup_epochs:
+        return 0.0
+    if ramp_patience is None or ramp_patience <= 0:
+        return 1.0
+    return min(1.0, (epoch - warmup_epochs) / ramp_patience)
+
+
+def _scale_aux_loss(loss, scale, model, use_cls_head, use_pred_heads):
+    """Return the effective loss tensor with aux head contribution scaled by `scale`."""
+    if scale == 1.0:
+        return loss["loss"]
+    if use_cls_head and "cls_loss" in loss:
+        cls_w = float(model.loss_fn_params.get("cls_head_weight", model.loss_fn_params.get("cls_head_delta", 1.0)))
+        return loss["loss"] + (scale - 1.0) * cls_w * loss["cls_loss"]
+    if use_pred_heads:
+        pred_keys = [k for k in loss if k.endswith("_loss") and k not in ("loss", "recon", "cls_loss")]
+        if pred_keys:
+            pred_d = float(model.loss_fn_params.get("pred_heads_delta", 0.0))
+            avg_pred = sum(loss[k] for k in pred_keys) / len(pred_keys)
+            return loss["loss"] + (scale - 1.0) * pred_d * avg_pred
+    return loss["loss"]
+
+
 def _should_display_loss(loss_name, loss_params):
     """Return whether a loss component contributes to the configured objective."""
     loss_params = loss_params or {}
@@ -323,6 +348,7 @@ def train_vae(
     num_epochs=100,
     learning_rate=1e-3,
     aux_head_learning_rate=None,
+    aux_head_warmup_epochs=0,
     weight_decay=1e-4,
     device='cuda' if torch.cuda.is_available() else 'cpu',
     save_dir='./checkpoints',
@@ -420,6 +446,7 @@ def train_vae(
         cls_weight = 0.0 if not use_cls_head else float(
             model.loss_fn_params.get("cls_head_weight", model.loss_fn_params.get("cls_head_delta", 1.0))
         )
+        aux_scale = _aux_head_loss_scale(epoch, aux_head_warmup_epochs, convergence_patience)
 
         model.train()
 
@@ -451,7 +478,7 @@ def train_vae(
             _accumulate_loss_metrics(train_loss_params, loss, x.shape[0], cls_mass)
 
             if optimizer is not None:
-                loss["loss"].backward()
+                _scale_aux_loss(loss, aux_scale, model, use_cls_head, use_pred_heads).backward()
 
                 optimizer.step()
 
