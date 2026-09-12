@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 from pathlib import Path
 from urllib.parse import quote, unquote
 
@@ -609,7 +610,9 @@ def _model_eval_per_class_metrics(model_eval: dict | None) -> dict[str, dict[str
     return {}
 
 
-def _metric_specs_for_rows(rows: list[dict], include_fc: bool = True) -> list[tuple[str, str]]:
+def _metric_specs_for_rows(
+    rows: list[dict], include_fc: bool = True, include_epochs: bool = False,
+) -> list[tuple[str, str]]:
     specs: list[tuple[str, str]] = []
     available_keys = {
         key
@@ -622,6 +625,8 @@ def _metric_specs_for_rows(rows: list[dict], include_fc: bool = True) -> list[tu
             continue
         if spec["row"] in available_keys:
             specs.append((spec["row"], spec["title"]))
+    if include_epochs and "num_epochs" in available_keys:
+        specs.append(("num_epochs", "Epochs trained"))
     specs.extend(_dynamic_metric_specs_from_keys(available_keys))
     return _sort_metric_specs(specs)
 
@@ -642,6 +647,8 @@ def _metric_specs_for_grouped(
             continue
         if spec["row"] in available_keys:
             specs.append((spec["row"], spec["title"]))
+    if "num_epochs" in available_keys:
+        specs.append(("num_epochs", "Epochs trained"))
     specs.extend(_dynamic_metric_specs_from_keys(available_keys))
     return _sort_metric_specs(specs)
 
@@ -2075,6 +2082,20 @@ def _save_pvalue_table_spec(
     )
 
 
+class _PlotSpecDumper(yaml.SafeDumper):
+    """Keep scientific-notation labels as strings across YAML parsers."""
+
+
+def _represent_plot_string(dumper, value):
+    scientific_notation = re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)[eE][+-]?[0-9]+", value)
+    return dumper.represent_scalar(
+        "tag:yaml.org,2002:str", value, style='"' if scientific_notation else None,
+    )
+
+
+_PlotSpecDumper.add_representer(str, _represent_plot_string)
+
+
 def _save_plot_spec(
     payload: dict[str, object],
     results_dir: Path,
@@ -2089,12 +2110,22 @@ def _save_plot_spec(
     output_dir = plot_data_dir / run_name
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{tab_slug}.yml"
-    _write_yaml(output_path, payload)
+    with output_path.open("w", encoding="utf-8") as handle:
+        yaml.dump(payload, handle, Dumper=_PlotSpecDumper, sort_keys=False, default_flow_style=False)
     return output_path
 
 
 def _comparison_seed(row: dict) -> str | None:
     """Return the reproducibility seed used to pair parameter-sweep runs."""
+    # ae_exp has a full fold-local AE fit per seed. That seed—not the
+    # classifier's per-fold initialization seed—is the independent replicate
+    # that must be matched across classifier hyperparameter settings.
+    experiment_params = row.get("_experiment_params")
+    if isinstance(experiment_params, dict):
+        ae_seed = experiment_params.get("ae_seed")
+        if ae_seed is not None and not isinstance(ae_seed, (dict, list, tuple)):
+            return str(ae_seed)
+
     training_params = row.get("_training_params")
     if not isinstance(training_params, dict):
         return None
@@ -2979,10 +3010,12 @@ def main() -> None:
             # Aggregate each metric by parameter value.
             loaded_param_path = tuple(loaded_param_key.split("."))
             comparison_rows = _expand_rows_for_parameter(selected_rows, loaded_param_path)
-            metric_specs = _metric_specs_for_rows(comparison_rows)
+            metric_specs = _metric_specs_for_rows(comparison_rows, include_epochs=True)
             if not metric_specs:
                 st.info("No numeric evaluation metrics available for the loaded selection.")
                 return
+            if any(key == "num_epochs" for key, _ in metric_specs):
+                st.caption("Epochs trained counts completed training epochs, including epochs after the selected checkpoint.")
             is_head_type_comparison = loaded_param_key == "model.cls_head_type"
             grouped, context_paired_grouped = _group_parameter_comparison_rows(
                 comparison_rows,
@@ -3180,6 +3213,32 @@ def main() -> None:
                         tab_name=f"{model_parameter_export_name}_cls_f1_pvalue",
                     )
                     st.success(f"CLS classwise F1 p-value data saved to {output_path}")
+
+
+            epoch_metric_specs = _metric_specs_for_titles(
+                param_compare_display_grouped, ("Epochs trained",),
+            )
+            if epoch_metric_specs:
+                epoch_export_cols = st.columns(2)
+                with epoch_export_cols[0]:
+                    if st.button("Save epochs raincloud plot spec", key="param_compare_save_epochs_raincloud"):
+                        output_path = _save_plot_spec(
+                            _build_raincloud_spec_for_metric_specs(
+                                param_compare_display_grouped, epoch_metric_specs,
+                            ),
+                            results_dir=results_dir,
+                            tab_name=f"{model_parameter_export_name}_epochs",
+                        )
+                        st.success(f"Epochs raincloud spec saved to {output_path}")
+                with epoch_export_cols[1]:
+                    if st.button("Save epochs p-value table spec", key="param_compare_save_epochs_pvalue"):
+                        output_path = _save_pvalue_table_spec(
+                            param_compare_paired_display_grouped,
+                            epoch_metric_specs,
+                            results_dir=results_dir,
+                            tab_name=f"{model_parameter_export_name}_epochs_pvalue",
+                        )
+                        st.success(f"Epochs p-value table spec saved to {output_path}")
 
     elif active_view == "Parameter Comparison":
         st.subheader("Parameter Comparison")
@@ -3509,7 +3568,7 @@ def main() -> None:
             progress_label="Loading metadata for model comparison",
         )
 
-        metric_specs = _metric_specs_for_rows(filtered_model_rows)
+        metric_specs = _metric_specs_for_rows(filtered_model_rows, include_epochs=True)
         if not metric_specs:
             st.info("No numeric evaluation metrics available for the selected runs.")
             return
@@ -3530,6 +3589,8 @@ def main() -> None:
             filtered_model_rows, model_order, metric_specs
         )
         st.caption("Box plots show metric distributions across all runs for each model type.")
+        if any(key == "num_epochs" for key, _ in metric_specs):
+            st.caption("Epochs trained counts completed training epochs, including epochs after the selected checkpoint.")
 
         for idx in range(0, len(metric_specs), 3):
             row_metrics = metric_specs[idx:idx + 3]
@@ -3677,6 +3738,31 @@ def main() -> None:
                     tab_name="model_comparison_cls_f1_pvalue",
                 )
                 st.success(f"CLS classwise F1 p-value data saved to {output_path}")
+
+        epoch_metric_specs = _metric_specs_for_titles(
+            export_grouped, ("Epochs trained",),
+        )
+        if epoch_metric_specs:
+            epoch_export_cols = st.columns(2)
+            with epoch_export_cols[0]:
+                if st.button("Save epochs raincloud plot spec", key="model_compare_save_epochs_raincloud"):
+                    output_path = _save_plot_spec(
+                        _build_raincloud_spec_for_metric_specs(
+                            export_grouped, epoch_metric_specs,
+                        ),
+                        results_dir=results_dir,
+                        tab_name="model_comparison_epochs",
+                    )
+                    st.success(f"Epochs raincloud spec saved to {output_path}")
+            with epoch_export_cols[1]:
+                if st.button("Save epochs p-value table spec", key="model_compare_save_epochs_pvalue"):
+                    output_path = _save_pvalue_table_spec(
+                        paired_export_grouped,
+                        epoch_metric_specs,
+                        results_dir=results_dir,
+                        tab_name="model_comparison_epochs_pvalue",
+                    )
+                    st.success(f"Epochs p-value table spec saved to {output_path}")
 
     elif active_view == "Data Comparison":
         st.subheader("Data Comparison")

@@ -113,6 +113,8 @@ def compute_varying_parameter_paths(metadata_rows: list[dict]) -> dict[str, set[
                 experiment_params = {}
                 if metadata.get("target_group") is not None:
                     experiment_params["target_group"] = metadata.get("target_group")
+                if metadata.get("ae_seed") is not None:
+                    experiment_params["ae_seed"] = metadata.get("ae_seed")
                 candidate_paths |= _collect_leaf_paths_from_dict(experiment_params)
                 continue
             candidate_paths |= _collect_leaf_paths_from_dict(metadata.get(metadata_key))
@@ -124,6 +126,8 @@ def compute_varying_parameter_paths(metadata_rows: list[dict]) -> dict[str, set[
                     experiment_params = {}
                     if metadata.get("target_group") is not None:
                         experiment_params["target_group"] = metadata.get("target_group")
+                    if metadata.get("ae_seed") is not None:
+                        experiment_params["ae_seed"] = metadata.get("ae_seed")
                     value = _get_nested_value(experiment_params, path)
                 else:
                     value = _get_nested_value(metadata.get(metadata_key), path)
@@ -149,6 +153,11 @@ def build_parameter_index_entry(
     experiment_params = {}
     if metadata.get("target_group") is not None:
         experiment_params["target_group"] = metadata.get("target_group")
+    # ae_exp stores the replicate identifier at the top level because it is
+    # neither a classifier nor a data-setting parameter. Preserve it in the
+    # parameter index so the UI can pair statistical comparisons by AE seed.
+    if metadata.get("ae_seed") is not None:
+        experiment_params["ae_seed"] = metadata.get("ae_seed")
 
     model_params = metadata.get("model_params")
     training_params = metadata.get("training_params")
