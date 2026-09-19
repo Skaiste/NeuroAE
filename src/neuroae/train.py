@@ -5,6 +5,7 @@ import numpy as np
 from sklearn.metrics import f1_score
 
 from .metrics.swfcd_torch import SwFCD
+from .masking import mask_bold, validate_masking
 
 
 def _dataset_valid_last_dim(dataset):
@@ -354,7 +355,7 @@ def train_vae(
     save_dir='./checkpoints',
     name='basicVAE_general',
     pca=None,
-    noise=None,
+    masking=None,
     use_pred_heads=False,
     use_cls_head=False,
     convergence_patience=None,
@@ -385,8 +386,7 @@ def train_vae(
         except KeyError as exc:
             raise ValueError(f"Encountered class label not configured for cls_head: {exc.args[0]!r}") from exc
 
-    if noise is not None:
-        noise = {k: v for p in noise for k, v in p.items()}
+    validate_masking(masking, train_loader.dataset, model)
 
     history = {"train": {}, "val": {}}
     best_model_losses = None
@@ -454,16 +454,12 @@ def train_vae(
             x = data.to(device)
             valid_mask = _build_valid_mask(x, train_valid_last_dim)
 
-            if noise is not None:
-                if noise["type"] == "gaussian":
-                    x += torch.randn_like(x) + float(noise["std"])
-                elif noise["type"] == "mask":
-                    x *= (torch.rand_like(x) > float(noise["ratio"])).float()
+            model_input = mask_bold(x, masking, train_loader.dataset, valid_mask)
 
             if optimizer is not None:
                 optimizer.zero_grad()
 
-            output = model(x)
+            output = model(model_input)
             output = _apply_recon_mask(x, output, valid_mask)
 
             if use_pred_heads:
