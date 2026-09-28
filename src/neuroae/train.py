@@ -6,6 +6,7 @@ from sklearn.metrics import f1_score
 
 from .metrics.swfcd_torch import SwFCD
 from .masking import mask_bold, validate_masking
+from .denoising import add_gaussian_noise, validate_denoising
 
 
 def _dataset_valid_last_dim(dataset):
@@ -365,6 +366,7 @@ def train_vae(
     save_checkpoint=True,
     vectorize_val_reference=False,
     compute_swfcd_during_training=None,
+    denoising=None,
 ):
     device = torch.device(device)
     model = model.to(device)
@@ -387,6 +389,7 @@ def train_vae(
             raise ValueError(f"Encountered class label not configured for cls_head: {exc.args[0]!r}") from exc
 
     validate_masking(masking, train_loader.dataset, model)
+    validate_denoising(denoising, train_loader.dataset, model)
 
     history = {"train": {}, "val": {}}
     best_model_losses = None
@@ -454,7 +457,8 @@ def train_vae(
             x = data.to(device)
             valid_mask = _build_valid_mask(x, train_valid_last_dim)
 
-            model_input = mask_bold(x, masking, train_loader.dataset, valid_mask)
+            model_input = add_gaussian_noise(x, denoising, train_loader.dataset, valid_mask)
+            model_input = mask_bold(model_input, masking, train_loader.dataset, valid_mask)
 
             if optimizer is not None:
                 optimizer.zero_grad()
