@@ -38,6 +38,7 @@ from .data import (
     load_hcp,
     prepare_data_loaders,
     SubjectRegionStandardScaler,
+    build_subject_normaliser,
     subset_dataset,
 )
 from .filters import NilearnBandPassFilter
@@ -145,6 +146,10 @@ def _build_data_cache_key(data_config):
         "parcelations": data_section.get("parcelations"),
         "tr": data_section.get("tr"),
     }
+    if key_fields["type"] == "ADNI_Long":
+        # ADNI-Long normalises inside its loader, so the loader differs per normalisation setting
+        key_fields["normalise"] = data_section.get("normalise", data_section.get("normalize", True))
+        key_fields["normalise_mode"] = data_section.get("normalize_mode") or "temporal"
     return json.dumps(key_fields, sort_keys=True, default=str)
 
 
@@ -237,6 +242,7 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
                 normalise=data_config["data"].get(
                     "normalise", data_config["data"].get("normalize", True)
                 ),
+                normalise_mode=data_config["data"].get("normalize_mode") or "temporal",
             )
             CACHED_DATA[data_cache_key] = data_loader
             print(data_loader.summary())
@@ -347,7 +353,8 @@ def load_data_from_config(data_dir, data_config, num_workers=0):
     # setup normaliser
     normaliser = None
     if data_type != "ADNI_Long" and data_config['data'].get('normalize', False):
-        normaliser = SubjectRegionStandardScaler()
+        # normalize_mode: null (historical behaviour) | "temporal" (each region over time) | "spatial" (each timepoint across regions)
+        normaliser = build_subject_normaliser(data_type, data_config['data'].get('normalize_mode'))
 
     group_defaults = (
         list(data_loader.get_subject_count().keys())
@@ -845,7 +852,7 @@ def load_model_from_config(
             timepoint_dim=input_dim[0],
             latent_dim=latent_dim,
         )
-    elif model_name == "PCAAE":
+    elif model_name in {"PCA", "PCAAE"}:
         from .models.pca import PCAAE
         latent_dim = model_config['model']['latent_dim']
         hidden_dim = None

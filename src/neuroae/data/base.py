@@ -3,16 +3,37 @@ import torch
 from torch.utils.data import Dataset
 
 
+NORMALISE_MODES = ("temporal", "spatial")
+
+# Position of the time axis in the raw series each loader returns (before the dataset's own transpose
+# flag): ADNI3 delivers (timepoints, regions); every other loader delivers (regions, timepoints).
+RAW_TIME_AXIS = {"ADNI3": 0}
+
+
 class SubjectRegionStandardScaler:
-    """Z-score each region over time, independently for every subject.
+    """Z-score a 2D array independently for every subject (every call to ``transform`` is one subject).
 
     The scaler is deliberately stateless: fitting statistics across subjects
     would reintroduce the cross-subject normalisation this class avoids.
+
+    ``axis`` is the axis of the array passed to ``transform`` that mean and standard deviation are taken
+    along. ``BaseTimeseriesDataset`` passes the transposed raw series, so what the default ``axis=0`` means
+    depends on the loader's layout (across regions for ADNI3, over time for the other loaders). Use
+    :func:`build_subject_normaliser` to choose ``"temporal"`` (every region over time) or ``"spatial"``
+    (every timepoint across regions) independently of the layout.
     """
 
+    def __init__(self, axis=0):
+        if axis not in (0, 1):
+            raise ValueError(f"axis must be 0 or 1, got {axis!r}")
+        self.axis = axis
+
     def get_params(self, deep=True):
-        """Match the estimator interface used when constructing cache keys."""
-        return {}
+        """Match the estimator interface used when constructing cache keys.
+
+        The historical default (``axis=0``) reports no parameters, so existing caches stay valid.
+        """
+        return {} if self.axis == 0 else {"axis": self.axis}
 
     def fit(self, samples, y=None):
         self._validate_samples(samples)
@@ -20,8 +41,8 @@ class SubjectRegionStandardScaler:
 
     def transform(self, samples):
         samples = self._validate_samples(samples)
-        means = np.mean(samples, axis=0, keepdims=True)
-        scales = np.std(samples, axis=0, keepdims=True)
+        means = np.mean(samples, axis=self.axis, keepdims=True)
+        scales = np.std(samples, axis=self.axis, keepdims=True)
         scales[scales == 0] = 1.0
         return (samples - means) / scales
 
@@ -37,6 +58,22 @@ class SubjectRegionStandardScaler:
                 "shape (timepoints, regions)."
             )
         return samples
+
+
+def build_subject_normaliser(data_type, mode=None):
+    """Return the per-subject normaliser for a data type.
+
+    ``mode=None`` keeps the historical behaviour unchanged (ADNI3: every timepoint z-scored across regions;
+    other loaders: every region z-scored over time). ``"temporal"`` z-scores every region over time and
+    ``"spatial"`` z-scores every timepoint across regions, whatever the loader's layout.
+    """
+    if mode is None:
+        return SubjectRegionStandardScaler()
+    if mode not in NORMALISE_MODES:
+        raise ValueError(f"normalize_mode must be one of {NORMALISE_MODES} (or null), got {mode!r}")
+    time_axis = RAW_TIME_AXIS.get(data_type, 1)
+    raw_axis = time_axis if mode == "temporal" else 1 - time_axis   # axis of the raw series to standardise over
+    return SubjectRegionStandardScaler(axis=1 - raw_axis)           # the dataset hands the scaler ts.T
 
 
 class BaseTimeseriesDataset(Dataset):

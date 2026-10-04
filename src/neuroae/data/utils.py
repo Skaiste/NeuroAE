@@ -3,6 +3,7 @@ import os
 import pickle
 import platform
 import random
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -219,12 +220,36 @@ def save_preprocessed_cache(cache_path, signature, datasets):
         raise
 
 
+def _check_normaliser_signature(cached_signature, expected_signature, cache_path):
+    """Compare only the normaliser entry of a cache signature with the current config's.
+
+    A cache built by ``SubjectRegionStandardScaler`` with a different ``axis`` (i.e. a different
+    ``normalize_mode``) would silently return differently normalised data, so that case raises. Any other
+    mismatch is only reported, so existing runs that load older caches keep working.
+    """
+    cached = (cached_signature or {}).get("normalizer")
+    expected = (expected_signature or {}).get("normalizer")
+    if cached == expected:
+        return
+    message = (
+        f"Cache {cache_path} was built with normaliser {cached}, but the current config asks for {expected}."
+    )
+    scaler = "SubjectRegionStandardScaler"
+    if cached and expected and cached.get("type") == expected.get("type") == scaler:
+        raise ValueError(
+            message + " Use a different cache_file for this normalize_mode, or rebuild the cache with cache_mode=create."
+        )
+    warnings.warn(message)
+
+
 def load_preprocessed_cache(cache_path, expected_signature=None):
     if cache_path.stat().st_size == 0:
         raise ValueError(
             f"Cache file is empty: {cache_path}. Rebuild it with cache_mode=create."
         )
     payload = torch.load(cache_path, map_location="cpu", weights_only=False)
+    if expected_signature is not None:
+        _check_normaliser_signature(payload.get("signature"), expected_signature, cache_path)
 
     datasets = {}
     for split_name, split_payload in payload.get("splits", {}).items():

@@ -2,7 +2,13 @@ from .adni import ADNI_B_N193_no_filt, get_data_dir, load_adni, load_adni_alt, l
 from .adni2 import ADNI2Loader, load_adni2
 from .adni3 import ADNI3Loader, load_adni3
 from .adni_long import ADNILongLoader, load_adni_long
-from .base import BaseTimeseriesDataset, BioLevelDataset, CachedDataset, SubjectRegionStandardScaler
+from .base import (
+    BaseTimeseriesDataset,
+    BioLevelDataset,
+    CachedDataset,
+    SubjectRegionStandardScaler,
+    build_subject_normaliser,
+)
 from .ebrains import EBRAINSBOLDLoader, load_ebrains, load_ebrains_bold
 from .hcp import HCP, load_hcp
 from .utils import extract_timeseries_from_loader, filter_dataset_by_labels, prepare_data_loaders, subset_dataset

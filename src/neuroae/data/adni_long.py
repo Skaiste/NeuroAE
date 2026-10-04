@@ -53,8 +53,11 @@ class ADNILongLoader(LibBrainADNILong):
         fmri_deriv_name="fmri_prepro_denoised_bp_008_08", prefer_cl=True,
         prefer_pvc=True, allowed_progressions=DEFAULT_ALLOWED_PROGRESSIONS,
         filter_timeseries=True, high_pass=0.008, low_pass=0.08, detrend=False,
-        normalise=True, strict=False, verbose=False,
+        normalise=True, normalise_mode="temporal", strict=False, verbose=False,
     ):
+        if normalise_mode not in ("temporal", "spatial"):
+            raise ValueError(f"normalise_mode must be 'temporal' or 'spatial', got {normalise_mode!r}")
+        self.normalise_mode = normalise_mode
         self.allowed_progressions = frozenset(allowed_progressions)
         self.filter_timeseries = bool(filter_timeseries)
         self.normalise = bool(normalise)
@@ -181,7 +184,7 @@ class ADNILongLoader(LibBrainADNILong):
         if self.nilearn_filter is not None:
             processed = self.nilearn_filter.filter(processed.T).T
         if self.normalise:
-            processed = self._normalise_session(processed)
+            processed = self._normalise_session(processed, self.normalise_mode)
         return processed
 
     def _diagnoses_by_session(self, subject_id, sessions):
@@ -197,9 +200,12 @@ class ADNILongLoader(LibBrainADNILong):
         }
 
     @staticmethod
-    def _normalise_session(timeseries):
-        means = timeseries.mean(axis=0, keepdims=True)
-        scales = timeseries.std(axis=0, keepdims=True)
+    def _normalise_session(timeseries, mode="temporal"):
+        """Z-score a (timepoints, regions) session: "temporal" = every region over time, "spatial" = every
+        timepoint across regions."""
+        axis = 0 if mode == "temporal" else 1
+        means = timeseries.mean(axis=axis, keepdims=True)
+        scales = timeseries.std(axis=axis, keepdims=True)
         scales = np.where(scales > 1e-12, scales, 1.0)
         return ((timeseries - means) / scales).astype(np.float32, copy=False)
 
