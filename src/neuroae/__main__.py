@@ -134,6 +134,17 @@ def resolve_results_dir(project_root, results_dir_arg):
     return candidate
 
 
+def apply_model_dir_override(training_config, project_root, model_dir_arg):
+    """Override training.save_dir when --model-dir-name is given."""
+    if model_dir_arg is None:
+        return training_config
+    model_dir = pathlib.Path(model_dir_arg)
+    if not model_dir.is_absolute():
+        model_dir = project_root / model_dir
+    training_config.setdefault("training", {})["save_dir"] = str(model_dir)
+    return training_config
+
+
 def _build_data_cache_key(data_config):
     data_section = deepcopy(data_config.get("data", {}))
     key_fields = {
@@ -1785,6 +1796,12 @@ def main():
         help='Results directory path/name. Accepts either a results root or a parent containing results/ (default: results).'
     )
     parser.add_argument(
+        '--model-dir-name',
+        type=str,
+        default=None,
+        help='Directory to save/load model checkpoints. Overrides training.save_dir from the config (default: use config value).'
+    )
+    parser.add_argument(
         '--dry-run',
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -1811,6 +1828,8 @@ def main():
     print("ADNI-B VAE")
     print("=" * 60)
     print(f"Results directory: {results_dir}")
+    if args.model_dir_name is not None:
+        print(f"Model directory override: {args.model_dir_name}")
     # Mode-specific actions
     if args.mode == 'load':
         # Just load and display data
@@ -1840,7 +1859,7 @@ def main():
         print("=" * 60)
 
         data_config = load_config(args.data_config)
-        training_config = load_config(args.training_config)
+        training_config = apply_model_dir_override(load_config(args.training_config), project_path, args.model_dir_name)
         _validate_non_exp_pipeline_usage("train", training_config)
         if args.dry_run:
             training_config.setdefault("training", {})
@@ -1908,7 +1927,7 @@ def main():
         print("=" * 60)
 
         data_config = load_config(args.data_config)
-        training_config = load_config(args.training_config)
+        training_config = apply_model_dir_override(load_config(args.training_config), project_path, args.model_dir_name)
         _validate_non_exp_pipeline_usage("eval", training_config)
         configure_reproducibility(data_config=data_config, training_config=training_config)
         loaders = load_data_from_config(
@@ -2054,6 +2073,7 @@ def main():
                     skipped_duplicates += 1
                     continue
                 seen_signatures.add(signature)
+                apply_model_dir_override(tc, project_path, args.model_dir_name)
                 experiment_specs.append((dc, mc, tc))
                 if idx == 1 or idx == total_set_permutations or idx % 100 == 0:
                     print(f"  {set_name}: processed {idx}/{total_set_permutations}", flush=True)
